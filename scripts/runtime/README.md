@@ -172,6 +172,18 @@ environment or registry credentials. The reserve/template-fork, captured-process
 and private prepared-primary image paths have been removed, including their component recipes.
 Normal startup still validates prebuild input identity, native dependency images and required hooks.
 
+The lifecycle component check uses the unmodified pinned CLI and a digest-pinned Node image
+with its standard `node` user. It holds an optional hook across the default, post-create and
+post-start `waitFor` boundaries, then checks that every hook ran exactly once and the
+`devcontainer.json` stayed unchanged. It owns bounded containers and a labelled private network;
+it is not Substrate product acceptance:
+
+```sh
+FACTORY_DEVCONTAINER_CLI=/absolute/path/to/pinned/devcontainer \
+FACTORY_LIFECYCLE_COMPONENT_IMAGE='your-registry/node@sha256:YOUR_CACHED_DIGEST' \
+  mise exec -- go test -C services/runtime-connector ./connector -run '^TestNativeLifecyclePinnedCLI' -count=1
+```
+
 Pinned OpenCode process checks exercise actual default/custom Workspace directories, native
 tool execution, retained history and metadata-only Stop without paid model keys:
 

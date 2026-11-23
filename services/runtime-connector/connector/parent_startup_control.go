@@ -95,6 +95,7 @@ func withParentStartupControl(ctx context.Context, assignment Assignment, token 
 				return context.Canceled
 			}
 			*control = connected
+			assignment.nativeSetup.connect(connected)
 			backoff.reset()
 			break
 		}

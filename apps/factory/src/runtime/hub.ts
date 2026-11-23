@@ -361,7 +361,9 @@ export class RuntimeHub {
       const timer = this.#disconnectTimers.get(`${socket.data.attemptID}:child`);
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:child`);
+      const setup = this.#processes.get(socket.data.attemptID)?.get("setup");
       this.#processes.delete(socket.data.attemptID);
+      if (setup) this.#processes.set(socket.data.attemptID, new Map([["setup", setup]]));
       this.processEvents.changed(socket.data.attemptID);
       this.#appChannels.set(
         socket.data.attemptID,
@@ -404,22 +406,31 @@ export class RuntimeHub {
       this.#observeStatus(socket, message.phase, message.error);
       return;
     }
+    const processName = (
+      socket.data.role === "parent"
+        ? message.process === "setup"
+        : isAppProcessName(message.process)
+    )
+      ? message.process
+      : undefined;
     if (
-      socket.data.role === "child" &&
+      processName &&
       message.type === "process-state" &&
-      message.process?.match(/^app(?:-[a-z][a-z0-9-]{0,26})?$/) &&
       (message.processState === "starting" ||
         message.processState === "running" ||
         message.processState === "stopping" ||
         message.processState === "stopped" ||
         message.processState === "failed")
     ) {
-      const process = this.#process(socket.data.attemptID, message.process);
+      const process = this.#process(socket.data.attemptID, processName);
+      if (!process) return;
       const wasRunning = process.state === "running";
       process.state = message.processState;
-      if (message.processState === "running" && !wasRunning)
-        for (const listener of this.#appRunning) listener(socket.data.attemptID, message.process);
-      if (message.processLabel?.trim() && message.processLabel.length <= 64) {
+      if (socket.data.role === "child" && message.processState === "running" && !wasRunning)
+        for (const listener of this.#appRunning) listener(socket.data.attemptID, processName);
+      if (processName === "setup") {
+        process.label = "Project setup";
+      } else if (message.processLabel?.trim() && message.processLabel.length <= 64) {
         process.label = message.processLabel;
       }
       if (message.startedAt && !Number.isNaN(Date.parse(message.startedAt))) {
@@ -434,15 +445,20 @@ export class RuntimeHub {
       return;
     }
     if (
-      socket.data.role === "child" &&
+      processName &&
       message.type === "process-output" &&
-      message.process?.match(/^app(?:-[a-z][a-z0-9-]{0,26})?$/) &&
       message.data &&
       message.data.length <= 48 << 10
     ) {
-      const process = this.#process(socket.data.attemptID, message.process);
+      const process = this.#process(socket.data.attemptID, processName);
+      if (!process) return;
       const output = Buffer.from(message.data, "base64").toString("utf8");
-      process.output = `${process.output}${output}`.slice(-(32 << 10));
+      const combined = `${process.output}${output}`;
+      const tail = combined.slice(-(32 << 10));
+      process.output =
+        processName === "setup" && combined.length > tail.length
+          ? tail.replace(/^[^\n]*\n?/, "")
+          : tail;
       this.processEvents.changed(socket.data.attemptID);
       return;
     }
@@ -606,6 +622,8 @@ export class RuntimeHub {
       const role = socket.data.role;
       const attemptID = socket.data.attemptID;
       connections.delete(socket.data.attemptID);
+      if (role === "parent" && this.#processes.get(attemptID)?.delete("setup"))
+        this.processEvents.changed(attemptID);
       this.#failAttemptStreams(attemptID, "Runtime channel disconnected", socket);
       if (this.#terminalSockets.has(socket)) return;
       this.#observeStatus(socket, "reconnecting", `${role} connector reconnecting`);
@@ -1143,6 +1161,9 @@ export class RuntimeHub {
     }
     let process = processes.get(name);
     if (!process) {
+      // SSE snapshots hold at most 16 entries. Reserve one for Parent setup;
+      // Child process names must not grow the in-memory map without a bound.
+      if (name !== "setup" && processes.size - Number(processes.has("setup")) >= 15) return;
       process = { name, state: "starting", output: "" };
       processes.set(name, process);
     }

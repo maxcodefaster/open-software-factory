@@ -65,12 +65,14 @@ func nativeContainerProxy(ctx context.Context, containerID string) (string, erro
 
 // The pinned CLI owns hook order and completion markers. up ran with
 // --skip-post-create, so no user lifecycle command has been dispatched yet. Run
-// those commands once, on that exact inspected container, without another up or
-// retry when execution or its reply fails.
-func runNativeLifecycle(ctx context.Context, assignment Assignment, result devcontainerResult) error {
+// commands on that exact inspected container. Development first respects the
+// CLI's waitFor boundary; only its explicit skipNonBlocking result commissions
+// one continuation, with the CLI retaining hook ordering and completion markers.
+// Neither execution errors nor lost replies commission another invocation.
+func runNativeLifecycle(ctx context.Context, assignment Assignment, result devcontainerResult, waitFor bool) (bool, error) {
 	proxy, err := nativeContainerProxy(ctx, result.ContainerID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	args := []string{"run-user-commands", "--container-id", result.ContainerID,
 		"--workspace-folder", assignment.WorkspaceFolder,
@@ -81,6 +83,9 @@ func runNativeLifecycle(ctx context.Context, assignment Assignment, result devco
 		"--id-label", attemptLabel + "=" + assignment.RuntimeAttemptID,
 		"--id-label", generationLabel + "=" + strconv.FormatUint(assignment.Generation, 10),
 		"--log-format", "text"}
+	if waitFor {
+		args = append(args, "--skip-non-blocking-commands")
+	}
 	if assignment.EffectiveConfiguration != "" {
 		args = append(args, "--override-config", assignment.EffectiveConfiguration)
 	}
@@ -94,19 +99,26 @@ func runNativeLifecycle(ctx context.Context, assignment Assignment, result devco
 	command.Stdout, command.Stderr = &stdout, &diagnostic
 	err = command.Run()
 	if err == nil {
-		outcome := ""
+		outcome, completion := "", ""
 		for _, line := range strings.Split(stdout.String(), "\n") {
 			var result struct {
 				Outcome string `json:"outcome"`
+				Result  string `json:"result"`
 			}
 			if json.Unmarshal([]byte(line), &result) == nil && result.Outcome != "" {
 				outcome = result.Outcome
+				completion = result.Result
 			}
 		}
 		if outcome == "success" {
-			return nil
+			if waitFor && completion == "skipNonBlocking" {
+				return true, nil
+			}
+			if completion == "done" {
+				return false, nil
+			}
 		}
 	}
 	detail := devcontainerFailureDiagnostic(stdout.String(), diagnostic.String(), assignment)
-	return fmt.Errorf("Dev Container lifecycle outcome is failed or unconfirmed; commands were not retried: %s", detail)
+	return false, fmt.Errorf("Dev Container lifecycle outcome is failed or unconfirmed; commands were not retried: %s", detail)
 }

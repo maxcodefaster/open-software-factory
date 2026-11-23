@@ -1612,6 +1612,162 @@ describe("Runtime Connector recovery", () => {
     expect(hub.processes("attempt")).toEqual([]);
   });
 
+  test.each(["running", "stopped", "failed"] as const)(
+    "Parent setup %s remains separate from Child readiness and App health",
+    (state) => {
+      const phases: string[] = [];
+      const apps: string[] = [];
+      const hub = new RuntimeHub(async (_attempt, phase) => {
+        phases.push(phase);
+      });
+      hub.onAppRunning((_attempt, app) => apps.push(app));
+      const parent = connectorSocket("parent");
+      const child = connectorSocket("child");
+      hub.open(parent);
+      hub.open(child);
+      const setup = {
+        type: "process-state",
+        process: "setup",
+        processLabel: "Project setup",
+        processState: state,
+        startedAt: "2026-11-23T12:00:00Z",
+        ...(state === "running" ? {} : { exitCode: state === "failed" ? 7 : 0 }),
+      };
+      try {
+        hub.message(parent, JSON.stringify(setup));
+        hub.message(
+          parent,
+          JSON.stringify({
+            type: "process-output",
+            process: "setup",
+            data: Buffer.from("Optional setup output [REDACTED]\n").toString("base64"),
+          }),
+        );
+        const expected = {
+          name: "setup",
+          label: "Project setup",
+          state,
+          startedAt: setup.startedAt,
+          ...(setup.exitCode === undefined ? {} : { exitCode: setup.exitCode }),
+          output: "Optional setup output [REDACTED]\n",
+        };
+        expect(hub.processes("attempt")).toEqual([expected]);
+        expect(hub.ready("attempt")).toBe(false);
+        hub.message(parent, JSON.stringify({ type: "hello", role: "parent" }));
+        hub.message(
+          child,
+          JSON.stringify({
+            type: "hello",
+            role: "child",
+            channels: [{ name: "app", kind: "app" }],
+          }),
+        );
+        expect(hub.processes("attempt")).toEqual([expected]);
+        expect(hub.ready("attempt")).toBe(true);
+        expect(phases).toEqual(["ready"]);
+        expect(apps).toEqual([]);
+        expect(hub.hasAppChannel("attempt", "setup")).toBe(false);
+        hub.message(
+          child,
+          JSON.stringify({ type: "process-state", process: "app", processState: "running" }),
+        );
+        expect(apps).toEqual(["app"]);
+      } finally {
+        hub.revoke("attempt");
+      }
+    },
+  );
+
+  test("only the current Parent owns setup; Child hello preserves it, Parent loss invalidates it", () => {
+    const hub = new RuntimeHub(async () => {});
+    const parent = connectorSocket("parent");
+    const child = connectorSocket("child");
+    const state = { type: "process-state", process: "setup", processState: "running" };
+    const output = {
+      type: "process-output",
+      process: "setup",
+      data: Buffer.from("owned setup\n").toString("base64"),
+    };
+    hub.open(parent);
+    hub.open(child);
+    try {
+      hub.message(parent, JSON.stringify(state));
+      hub.message(parent, JSON.stringify(output));
+      expect(hub.processes("attempt")).toHaveLength(1);
+      for (const [producer, process] of [
+        [child, "setup"],
+        [parent, "app"],
+        [parent, "setup-extra"],
+      ] as const) {
+        hub.message(producer, JSON.stringify({ ...state, process, processState: "failed" }));
+        hub.message(producer, JSON.stringify({ ...output, process }));
+      }
+      expect(hub.processes("attempt")).toMatchObject([
+        { name: "setup", state: "running", output: "owned setup\n" },
+      ]);
+      hub.close(child);
+      const replacementChild = connectorSocket("child");
+      hub.open(replacementChild);
+      hub.message(replacementChild, JSON.stringify({ type: "hello", role: "child" }));
+      expect(hub.processes("attempt")).toHaveLength(1);
+      hub.close(parent);
+      expect(hub.processes("attempt")).toEqual([]);
+      const replacementParent = connectorSocket("parent");
+      hub.open(replacementParent);
+      hub.message(parent, JSON.stringify(state));
+      hub.message(parent, JSON.stringify(output));
+      expect(hub.processes("attempt")).toEqual([]);
+      hub.message(replacementParent, JSON.stringify(state));
+      expect(hub.processes("attempt")).toHaveLength(1);
+      hub.revoke("attempt");
+      hub.message(replacementParent, JSON.stringify(output));
+      expect(hub.processes("attempt")).toEqual([]);
+    } finally {
+      hub.revoke("attempt");
+    }
+  });
+
+  test("setup keeps a reserved bounded process entry and complete-line output tail", () => {
+    const hub = new RuntimeHub(async () => {});
+    const parent = connectorSocket("parent");
+    const child = connectorSocket("child");
+    hub.open(parent);
+    hub.open(child);
+    try {
+      for (let index = 0; index < 64; index++)
+        hub.message(
+          child,
+          JSON.stringify({
+            type: "process-state",
+            process: `app-worker-${index}`,
+            processState: "running",
+          }),
+        );
+      hub.message(
+        parent,
+        JSON.stringify({ type: "process-state", process: "setup", processState: "running" }),
+      );
+      const line = "setup output [REDACTED]\n";
+      for (let index = 0; index < 3; index++)
+        hub.message(
+          parent,
+          JSON.stringify({
+            type: "process-output",
+            process: "setup",
+            data: Buffer.from(line.repeat(1_500)).toString("base64"),
+          }),
+        );
+      const processes = hub.processes("attempt");
+      expect(processes.length).toBeLessThanOrEqual(16);
+      const setup = processes.find((process) => process.name === "setup");
+      expect(setup?.output.length).toBeGreaterThan(0);
+      expect(setup?.output.length).toBeLessThanOrEqual(32 << 10);
+      expect(setup?.output).toMatch(/^(setup output \[REDACTED\]\n)+$/);
+    } finally {
+      hub.revoke("attempt");
+    }
+  });
+
   test("acknowledges scoped child operations and declared App channels", async () => {
     const sent: Array<Record<string, string>> = [];
     const child = {

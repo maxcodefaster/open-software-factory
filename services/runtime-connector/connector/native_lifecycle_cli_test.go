@@ -119,11 +119,12 @@ if (args[0] !== 'run-user-commands') {
   const result = cp.spawnSync(root + '/fixture-cli', args, {stdio:'inherit'});
   process.exit(result.status ?? 1);
 }
+
 fs.appendFileSync(root + '/cli.log', args.join(' ') + '\n');
 const read = ['read-configuration'];
 for (let i=1; i<args.length; i++) {
   if (args[i] === '--remote-env' || args[i] === '--secrets-file') { i++; continue; }
-  if (args[i] === '--oci-auth-hardening') continue;
+  if (args[i] === '--oci-auth-hardening' || args[i] === '--skip-non-blocking-commands') continue;
   read.push(args[i]);
 }
 read.push('--include-merged-configuration', '--log-level', 'trace');
@@ -134,7 +135,7 @@ if (result.status !== 0) {
   process.exit(1);
 }
 fs.writeFileSync(root + '/resolved.json', result.stdout);
-console.log('{"outcome":"success"}');
+console.log('{"outcome":"success","result":"done"}');
 `, directory, cli)
 			if err := os.WriteFile(filepath.Join(directory, "devcontainer"), []byte(script), 0700); err != nil {
 				t.Fatal(err)

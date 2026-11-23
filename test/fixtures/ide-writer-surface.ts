@@ -163,3 +163,63 @@ if (new URL(window.location.href).searchParams.has("statusbar")) {
     document.body.append(bar);
   }
 }
+
+if (new URL(window.location.href).searchParams.has("run")) {
+  const { FactoryRuntimeWidget } = await import(
+    "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-runtime-widget.js"
+  );
+  const { factoryRuntimeContext } = await import(
+    "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-runtime-context.js"
+  );
+  const { factoryWriteContext } = await import(
+    "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-write-context.js"
+  );
+  const workspaceID = "22222222-2222-4222-8222-222222222222";
+  const setup = {
+    name: "setup",
+    label: "Project setup",
+    state: "running",
+    startedAt: new Date(Date.now() - 10_000).toISOString(),
+    exitCode: undefined as number | undefined,
+    output: "Preparing optional Project tools [REDACTED]\n",
+  };
+  const processes = [
+    { name: "app", label: "Primary app", state: "running", output: "App listening on :3000\n" },
+    setup,
+  ];
+  const events = new Set<EventTarget>();
+  const snapshot = () => {
+    for (const source of events)
+      source.dispatchEvent(new MessageEvent("snapshot", { data: JSON.stringify({ processes }) }));
+  };
+  // Fixture-only server observations; no native Actor, setup command or App runs.
+  window.EventSource = class extends EventTarget {
+    constructor() {
+      super();
+      events.add(this);
+      queueMicrotask(snapshot);
+    }
+    close() {
+      events.delete(this);
+    }
+  } as unknown as typeof EventSource;
+  const widget = new FactoryRuntimeWidget();
+  factoryWriteContext.select(workspaceID);
+  factoryWriteContext.confirm(workspaceID, true);
+  factoryRuntimeContext.select(workspaceID);
+  const main = document.querySelector("main");
+  const heading = document.createElement("h1");
+  heading.textContent = "Workspace processes · fixture";
+  const fail = document.createElement("button");
+  fail.type = "button";
+  fail.className = "theia-button";
+  fail.textContent = "Observe setup failure";
+  fail.addEventListener("click", () => {
+    setup.state = "failed";
+    setup.exitCode = 7;
+    setup.output += "Optional tool unavailable; App is still running.\n";
+    snapshot();
+  });
+  main?.replaceChildren(heading, widget.node, fail);
+  window.addEventListener("pagehide", () => widget.dispose(), { once: true });
+}

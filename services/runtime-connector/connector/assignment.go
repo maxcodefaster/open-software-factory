@@ -64,6 +64,7 @@ type Assignment struct {
 	// Installed only by native-parent after checkout and Actor identity validation.
 	// Never serialized into the Child or accepted from a Project assignment.
 	nativeSource http.Handler
+	nativeSetup  *nativeSetup
 }
 
 type containerOrigin struct {

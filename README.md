@@ -52,7 +52,10 @@ An existing standard Dev Container is enough for Workspace compute and Coding; `
 and a Factory verification workflow are not prerequisites for that development path. The pinned
 Dev Containers CLI selects the actual container folder and user, including its default folder
 and custom image, Dockerfile or Compose workspaces. Factory does not rewrite those settings or
-require `/workspace/project`. App Preview, Staging and exact-commit Verification need their own
+require `/workspace/project`. Development readiness respects the standard `waitFor` setting through
+the official CLI. Remaining lifecycle commands continue as visible Project setup without blocking
+the Agent; their failure is reported separately from Agent readiness or App health.
+App Preview, Staging and exact-commit Verification need their own
 explicitly configured commands and checks; opening Source or starting compute does not supply or pass them.
 Installation security and egress policy still apply; privileged or host-bound recipes are not portable.
 If you opened Source before confirming Project setup, Start adds only the exact approved missing

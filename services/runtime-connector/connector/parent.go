@@ -31,7 +31,8 @@ type devcontainerResult struct {
 	RemoteUser            string `json:"remoteUser"`
 	RemoteWorkspaceFolder string `json:"remoteWorkspaceFolder"`
 	// Derived only from primary inspection, never decoded from CLI output.
-	checkoutFolder string
+	checkoutFolder   string
+	lifecyclePending bool
 }
 
 type parentState struct {
@@ -203,6 +204,8 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		retainingFailure = true
 		return retainParentStartupFailure(ctx, assignment, token, &control, err)
 	}
+	assignment.nativeSetup = startNativeSetup(ctx, assignment, result, control)
+	defer assignment.nativeSetup.stop()
 	browser := newBrowserRuntimeManager(ctx, assignment, result.ContainerID, result.RemoteUser)
 	browser.preparation = preparation
 	defer func() {
@@ -512,6 +515,7 @@ func reportParentStartupFailure(ctx context.Context, assignment Assignment, toke
 	}
 	*control = connected
 	if connected.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}) == nil {
+		assignment.nativeSetup.connect(connected)
 		_ = connected.write(message)
 	}
 }
@@ -535,6 +539,7 @@ func announceChildStarted(ctx context.Context, assignment Assignment, token stri
 					Channels:   parentChannels(assignment),
 				}); err == nil {
 					*control = connected
+					assignment.nativeSetup.connect(connected)
 					backoff.reset()
 					break
 				}
@@ -561,6 +566,9 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 			response.Error = "native Source is unavailable"
 			break
 		}
+		// Deferred hooks can still write canonical Source. Cancellation is not
+		// an ACK: join their exact CLI process before draining Docker writers.
+		assignment.nativeSetup.stop()
 		// Stop, do not delete, every container in this Actor-private daemon.
 		// Parent operations are already serialized with Git; stopped container
 		// identities, filesystems, hooks and volumes remain in native ROOTFS.
@@ -1373,7 +1381,12 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 		if err != nil {
 			return devcontainerResult{}, err
 		}
-		if err := runNativeLifecycle(ctx, assignment, result); err != nil {
+		development := false
+		for _, channel := range assignment.Channels {
+			development = development || channel.Kind == "ide"
+		}
+		result.lifecyclePending, err = runNativeLifecycle(ctx, assignment, result, development)
+		if err != nil {
 			return devcontainerResult{}, err
 		}
 	}

@@ -33,9 +33,11 @@ export const factoryRuntimeWidgetID = "factory-runtime";
 function processLabel(process: Pick<RuntimeProcess, "name" | "label">) {
   return (
     process.label ??
-    (process.name === "app"
-      ? "Primary app"
-      : process.name.replace(/^app-/, "").replaceAll("-", " "))
+    (process.name === "setup"
+      ? "Project setup"
+      : process.name === "app"
+        ? "Primary app"
+        : process.name.replace(/^app-/, "").replaceAll("-", " "))
   );
 }
 
@@ -88,17 +90,17 @@ export class FactoryRuntimeWidget extends BaseWidget {
     super();
     this.id = factoryRuntimeWidgetID;
     this.title.label = "Run";
-    this.title.caption = "Declared App processes";
+    this.title.caption = "Workspace processes";
     this.title.closable = true;
     this.node.classList.add("factory-runtime-widget");
     this.#processList.className = "factory-runtime-processes";
     this.#processList.setAttribute("role", "group");
-    this.#processList.setAttribute("aria-label", "Declared App processes");
+    this.#processList.setAttribute("aria-label", "Workspace processes");
     this.#main.className = "factory-runtime-main";
     this.#output.className = "factory-runtime-output wrap";
     this.#output.setAttribute("aria-label", "Process output");
     this.#output.setAttribute("aria-live", "off");
-    this.#output.textContent = "Connecting to declared processes...";
+    this.#output.textContent = "Connecting to Workspace processes...";
     this.#main.append(this.#output);
     this.node.append(this.#processList, this.#main);
     this.#contextSubscription = factoryRuntimeContext.subscribe((state) => {
@@ -184,7 +186,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
     source.addEventListener("error", () => {
       if (this.#events !== source) return;
       this.#disconnect();
-      this.#output.textContent = "Declared processes are reconnecting...";
+      this.#output.textContent = "Workspace processes are reconnecting...";
       factoryRuntimeContext.refresh(runtime);
     });
   }
@@ -243,7 +245,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
     header.className = "factory-runtime-toolbar";
     const processControls = document.createElement("div");
     const outputControls = document.createElement("div");
-    if (selected) {
+    if (selected && selected.name !== "setup") {
       const canStart = selected.state === "stopped" || selected.state === "failed";
       const lifecycle = controlButton(
         canStart ? "Start" : "Stop",
@@ -335,7 +337,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
 
   async #runAction(process: RuntimeProcess, action: "start" | "stop" | "restart") {
     const runtime = this.#runtime;
-    if (!runtime || this.#busyProcess) return;
+    if (!runtime || this.#busyProcess || process.name === "setup") return;
     const path = factoryProcessActionPath(runtime, process.name, action);
     this.#busyProcess = process.name;
     this.#actionError = undefined;

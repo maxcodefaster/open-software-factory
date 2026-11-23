@@ -1,6 +1,7 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Locator } from "@playwright/test";
+import ts from "typescript";
 import { createServer, type ViteDevServer } from "vite";
 import { test } from "../fixtures/browser-test";
 
@@ -14,6 +15,46 @@ test.beforeAll(async () => {
     root: resolve("test/fixtures"),
     cacheDir: cache,
     optimizeDeps: { entries: ["ide-writer.html"] },
+    plugins: [
+      {
+        name: "ide-writer-widget-shell",
+        enforce: "pre",
+        resolveId(id) {
+          if (id.startsWith("@theia/")) return "\0ide-writer-widget-shell";
+        },
+        async load(id) {
+          if (id.startsWith(resolve("deploy/theia-ide/factory-ide-extension/lib/browser/"))) {
+            // The editor adapter is packaged as CJS. Use its current source as
+            // ESM in this browser fixture, without bundling the whole IDE.
+            const source = await readFile(
+              id.replace("/lib/", "/src/").replace(/\.js$/, ".ts"),
+              "utf8",
+            );
+            return ts.transpileModule(source, {
+              compilerOptions: {
+                target: ts.ScriptTarget.ES2022,
+                module: ts.ModuleKind.ESNext,
+                experimentalDecorators: true,
+              },
+            }).outputText;
+          }
+          if (id !== "\0ide-writer-widget-shell") return;
+          // Only Theia's docking/DI shell is replaced. Render the real Run
+          // widget, runtime selection, EventSource callbacks and controls.
+          return `
+            export class BaseWidget {
+              node = document.createElement("section"); title = {};
+              isAttached = true; isVisible = true;
+              dispose() {} onAfterAttach() {} onAfterShow() {} onBeforeHide() {}
+            }
+            export class AbstractViewContribution {}
+            export class FileNavigatorContribution {}
+            export const injectable = () => value => value;
+            export const inject = () => () => {};
+          `;
+        },
+      },
+    ],
     server: { host: "127.0.0.1", port: 0, hmr: false },
   });
   await server.listen();
@@ -99,6 +140,62 @@ for (const width of [1440, 900, 390]) {
       await activate(page.getByRole("button", { name: "Resume compute", exact: true }));
       await expect(status).toHaveText("ready");
       await expect(starts).toHaveText("2");
+    });
+
+    test("Project setup is read-only and its failure does not replace healthy App controls", async ({
+      page,
+    }) => {
+      const mutations: string[] = [];
+      page.on("request", (request) => {
+        if (request.method() === "POST") mutations.push(request.url());
+      });
+      await page.route("**/__factory/workspaces/*/runtime", (route) =>
+        route.fulfill({
+          json: {
+            workspaceID: "22222222-2222-4222-8222-222222222222",
+            attemptID: "33333333-3333-4333-8333-333333333333",
+            state: "ready",
+            failure: null,
+          },
+        }),
+      );
+      await page.goto(`${origin}/ide-writer.html?run`);
+      const run = page.locator(".factory-runtime-widget");
+      const setup = run.getByRole("button", { name: /Project setup/ });
+      await expect(setup).toContainText("Running");
+      await setup.focus();
+      await page.keyboard.press("Enter");
+      await page.screenshot({ path: resolve(evidence, `setup-running-${width}.png`) });
+      await expect(run.getByRole("button", { name: /^(Start|Stop|Restart|Preview)$/ })).toHaveCount(
+        0,
+      );
+      const output = run.getByLabel("Process output");
+      await expect(output).toContainText("Preparing optional Project tools [REDACTED]");
+      await page.getByRole("button", { name: "Observe setup failure" }).click();
+      await expect(setup).toContainText("Failed · exit 7");
+      await expect(output).toContainText("Optional tool unavailable; App is still running.");
+      await expect(run.getByRole("button", { name: /^(Start|Stop|Restart|Preview)$/ })).toHaveCount(
+        0,
+      );
+      const options = run.getByText("Output options", { exact: true });
+      await options.focus();
+      await page.keyboard.press("Enter");
+      await run.getByRole("button", { name: "Wrap on" }).click();
+      await expect(run.getByRole("button", { name: "Wrap off" })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(options).toBeFocused();
+      expect(await run.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+        true,
+      );
+      await page.screenshot({ path: resolve(evidence, `setup-failed-keyboard-${width}.png`) });
+      const app = run.getByRole("button", { name: /Primary app/ });
+      await expect(app).toContainText("Running");
+      if (width === 390) await app.tap();
+      else await app.click();
+      await expect(run.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+      await expect(run.getByRole("button", { name: "Restart", exact: true })).toBeEnabled();
+      await expect(run.getByRole("button", { name: "Preview", exact: true })).toBeEnabled();
+      expect(mutations).toEqual([]);
     });
   });
 }

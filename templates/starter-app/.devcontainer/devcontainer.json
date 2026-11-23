@@ -11,5 +11,6 @@
       "version": "os-provided"
     }
   },
-  "postCreateCommand": "npm ci && npm run db:migrate"
+  "postCreateCommand": "npm ci && npm run db:migrate",
+  "waitFor": "postCreateCommand"
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func nativeNetworkFixture(t *testing.T) string {
@@ -42,7 +43,7 @@ case "$1" in
       lost-reply) exit 1 ;;
       incomplete) printf '{"outcome":"success"}\n{"outcome":"unknown"}\n' ;;
       failed) printf '{"outcome":"error","description":"postCreateCommand failed; PRIVATE_TOKEN=private-value"}\n'; exit 1 ;;
-      *) printf '{"outcome":"success"}\n' ;;
+      *) printf '{"outcome":"success","result":"done"}\n' ;;
     esac ;;
   *) exit 9 ;;
 esac
@@ -188,6 +189,43 @@ func TestNativeStartupInspectsPrimaryBeforeOneExactContainerLifecycleDispatch(t 
 				}
 			}
 		})
+	}
+}
+
+func TestNativeDevelopmentStartupRespectsCLIWaitForBeforeOptionalHooks(t *testing.T) {
+	directory := nativeNetworkFixture(t)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$NATIVE_NETWORK_FIXTURE/cli.log"
+case "$1" in
+  up) printf '{"outcome":"success","containerId":"%s","composeProjectName":"owned","remoteUser":"node","remoteWorkspaceFolder":"/workspace/project"}\n' "$NATIVE_NETWORK_PRIMARY" ;;
+  run-user-commands)
+    case " $* " in
+      *' --skip-non-blocking-commands '*) printf '{"outcome":"success","result":"skipNonBlocking"}\n' ;;
+      *) exec sleep 30 ;;
+    esac ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(directory, "devcontainer"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	assignment := Assignment{
+		RuntimeAttemptID: "owned-attempt", Generation: 1, ComposeProjectName: "owned",
+		WorkspaceFolder: directory, DevcontainerPath: ".devcontainer/devcontainer.json",
+		RemoteWorkspaceFolder: "/workspace/project", nativeActorUID: "owned-actor",
+		Channels: []Channel{{Name: "ide", Kind: "ide"}, {Name: "agent", Kind: "agent"}},
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := startDevcontainerWithConfiguration(ctx, assignment,
+		func(context.Context, Assignment, bool) ([]string, error) { return nil, nil }); err != nil {
+		trace, _ := os.ReadFile(filepath.Join(directory, "cli.log"))
+		t.Fatalf("optional lifecycle commands blocked development readiness instead of the CLI waitFor boundary: %v\n%s", err, trace)
+	}
+	trace, err := os.ReadFile(filepath.Join(directory, "cli.log"))
+	if err != nil || strings.Count(string(trace), "run-user-commands ") != 1 ||
+		!strings.Contains(string(trace), "--skip-non-blocking-commands") {
+		t.Fatalf("startup did not make one bounded waitFor dispatch: %s (%v)", trace, err)
 	}
 }
 
