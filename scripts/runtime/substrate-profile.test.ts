@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
@@ -9,7 +9,7 @@ import {
   verifySubstrateLiveClusters,
 } from "./substrate-egress";
 import { flags, pins, renderSubstrateProfile, verifyNightly } from "./substrate-profile";
-import { applySubstrateEgress } from "./substrate-profile-command";
+import { applySubstrateEgress, upstreamEgress } from "./substrate-profile-command";
 
 const input = {
   architecture: "amd64",
@@ -77,6 +77,120 @@ function fixture() {
   };
   return { map, expected };
 }
+
+// v1.0.1 shares one address-filtered DNS cache across seven uses, and one
+// local-reply config across two HTTP listeners. stringify emits native aliases.
+function aliasFixture() {
+  const { map, expected: original } = fixture();
+  const dns = {
+    name: "egress_dns_cache",
+    dns_lookup_family: "ALL",
+    resolved_address_filter: { ranges: [{ address_prefix: "127.0.0.0", prefix_len: 8 }] },
+  };
+  const reply = { mappers: [{ status_code: 403 }] };
+  for (const cluster of original.static_resources.clusters)
+    cluster.cluster_type.typed_config.dns_cache_config = dns;
+  const expected = {
+    static_resources: {
+      ...original.static_resources,
+      listeners: Array.from({ length: 5 }, (_, i) => ({
+        name: `listener-${i}`,
+        dns_cache_config: dns,
+        ...(i < 2 ? { local_reply_config: reply } : {}),
+      })),
+    },
+  };
+  map.data["envoy.yaml"] = stringify(expected);
+  return { map, expected };
+}
+
+const unsafeAliases = [
+  ["unresolved alias", "value: *missing\n", /Unresolved alias/],
+  ["mapping cycle", "value: &cycle {self: *cycle}\n", /circular|cyclic/i],
+  ["sequence cycle", "value: &cycle [*cycle]\n", /circular|cyclic/i],
+  [
+    "indirect cycle",
+    "value: &outer {inner: &inner {parent: *outer}, again: *inner}\n",
+    /circular|cyclic/i,
+  ],
+  [
+    "too many references",
+    `value: &value scalar\nreferences: [${Array(100).fill("*value").join(", ")}]\n`,
+    /Excessive alias count/,
+  ],
+  [
+    "exponential graph",
+    `a: &a [scalar, scalar]\nb: &b [${Array(10).fill("*a").join(", ")}]\nc: [${Array(10).fill("*b").join(", ")}]\n`,
+    /Excessive alias count/,
+  ],
+  ["duplicate key", "value: &value scalar\nvalue: *value\n", /Invalid.*YAML/],
+] as const;
+
+describe("Substrate bounded manifest aliases", () => {
+  test("resolves the minimal v1.0.1 shared DNS cache", () => {
+    const cache = { name: "egress_dns_cache", dns_lookup_family: "ALL" };
+    expect(
+      parseEnvoy(
+        "first: &egress_dns_cache {name: egress_dns_cache, dns_lookup_family: ALL}\nsecond: *egress_dns_cache\n",
+      ),
+    ).toEqual({ first: cache, second: cache });
+  });
+
+  test("accepts references up to the native bound", () => {
+    expect(
+      parseEnvoy(`value: &value scalar\nreferences: [${Array(99).fill("*value").join(", ")}]\n`),
+    ).toEqual({ value: "scalar", references: Array(99).fill("scalar") });
+  });
+
+  test.each(unsafeAliases)("Envoy rejects %s", (_, text, message) => {
+    expect(() => parseEnvoy(text)).toThrow(message);
+  });
+
+  test("upstream reader resolves bounded aliases and retains source/ConfigMap checks", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-substrate-aliases-"));
+    let head = pins.substrate.commit;
+    let dirty = "";
+    const spawn = spyOn(Bun, "spawn").mockImplementation((...args: unknown[]) => {
+      const command = args[0] as string[];
+      expect(command.slice(0, 3)).toEqual(["git", "-C", directory]);
+      expect(["rev-parse", "status"]).toContain(command[3] ?? "");
+      return {
+        stdout: new Response(command[3] === "rev-parse" ? `${head}\n` : dirty).body,
+        stderr: new Response("").body,
+        exited: Promise.resolve(0),
+      } as ReturnType<typeof Bun.spawn>;
+    });
+    try {
+      await mkdir(join(directory, "manifests/ate-install"), { recursive: true });
+      const path = join(directory, "manifests/ate-install/atenet-egress.yaml");
+      const { map } = aliasFixture();
+      const manifest = `${stringify(map)}\n---\nkind: Deployment\nmetadata: &metadata {name: atenet-egress}\nspec: {metadata: *metadata}\n`;
+      await writeFile(path, manifest);
+      expect(await upstreamEgress(directory)).toEqual(map.data);
+
+      head = "0".repeat(40);
+      await expect(upstreamEgress(directory)).rejects.toThrow("Wrong Substrate source commit");
+      head = pins.substrate.commit;
+      dirty = " M manifests/ate-install/atenet-egress.yaml\n";
+      await expect(upstreamEgress(directory)).rejects.toThrow("tracked changes");
+      dirty = "";
+      for (const [_, text, message] of unsafeAliases) {
+        await writeFile(path, `${manifest}\n---\n${text}`);
+        await expect(upstreamEgress(directory)).rejects.toThrow(message);
+      }
+      for (const invalid of [
+        `${manifest}\n---\n${stringify(map)}`,
+        manifest.replace("name: atenet-egress", "name: wrong-map"),
+      ]) {
+        await writeFile(path, invalid);
+        await expect(upstreamEgress(directory)).rejects.toThrow("Unexpected upstream egress");
+      }
+    } finally {
+      spawn.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("Substrate concrete profile", () => {
   test("native atelet health patch pins shared-node tolerance without changing endpoints, periods or runtime intent", async () => {
@@ -326,6 +440,41 @@ describe("Substrate concrete profile", () => {
 });
 
 describe("Substrate Envoy operator overlay", () => {
+  test("preserves v1.0.1 aliased address filters, TLS and identity through repeated overlays", () => {
+    const { map, expected } = aliasFixture();
+    expect(map.data["envoy.yaml"]).toMatch(/\*a\d/);
+    const before = structuredClone(map);
+    const once = overlaySubstrateEgress(map, expected);
+    expect(map).toEqual(before);
+    expect((once as typeof map).metadata).toEqual(map.metadata);
+    expect(once.data["sds-cert.yaml"]).toBe(map.data["sds-cert.yaml"]);
+    expect(overlaySubstrateEgress(once, expected)).toEqual(once);
+    const patched = parseEnvoy(once.data["envoy.yaml"] ?? "");
+    const wanted = JSON.parse(
+      JSON.stringify(expected).replaceAll(
+        '"dns_lookup_family":"ALL"',
+        '"dns_lookup_family":"V4_ONLY"',
+      ),
+    );
+    for (const cluster of wanted.static_resources.clusters)
+      cluster.transport_socket.typed_config.max_session_keys = 0;
+    expect(patched).toEqual(wanted);
+    expect(
+      verifySubstrateLiveClusters(
+        { configs: wanted.static_resources.clusters.map((cluster: unknown) => ({ cluster })) },
+        expected,
+      ),
+    ).toEqual(["egress_forward_proxy", "egress_forward_proxy_grpc"]);
+    const weakened = JSON.parse(JSON.stringify(wanted));
+    delete weakened.static_resources.listeners[0].dns_cache_config.resolved_address_filter;
+    expect(() =>
+      overlaySubstrateEgress(
+        { ...map, data: { ...map.data, "envoy.yaml": stringify(weakened) } },
+        expected,
+      ),
+    ).toThrow("drift");
+  });
+
   test("operator path uses UID/resourceVersion, rolls out, live-verifies, repeats and repairs installer regeneration", async () => {
     const { map, expected } = fixture();
     let current = structuredClone(map);

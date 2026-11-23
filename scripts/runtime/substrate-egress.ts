@@ -21,7 +21,16 @@ function record(value: unknown) {
 export function parseEnvoy(text: string): Record<string, unknown> {
   const document = parseDocument(text, { uniqueKeys: true });
   if (document.errors.length) throw new Error("Invalid or duplicate-key Envoy YAML");
-  return object.parse(document.toJS({ maxAliasCount: 0 }));
+  return object.parse(
+    document.toJS({
+      // v1.0.1 shares DNS/reply configs; retain yaml's native expansion bound.
+      maxAliasCount: 100,
+      onAnchor(value) {
+        // The native bound permits cycles; reject them before recursive checks.
+        JSON.stringify(value);
+      },
+    }),
+  );
 }
 
 function clusters(bootstrap: Record<string, unknown>) {

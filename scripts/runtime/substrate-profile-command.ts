@@ -5,8 +5,8 @@ import { isDeepStrictEqual } from "node:util";
 import { parseAllDocuments } from "yaml";
 import { z } from "zod";
 import {
-  nativeArchitecture,
   type NativeArchitecture,
+  nativeArchitecture,
 } from "../../packages/runtime-kubernetes/src/substrate-profile";
 import {
   overlaySubstrateEgress,
@@ -81,10 +81,20 @@ export async function upstreamEgress(directory: string) {
   const source = await pinnedSubstrateSource(directory);
   const documents = parseAllDocuments(
     await readFile(resolve(source, "manifests/ate-install/atenet-egress.yaml"), "utf8"),
+    { uniqueKeys: true },
   );
   if (documents.some((document) => document.errors.length))
     throw new Error("Invalid upstream YAML");
-  const values = documents.map((document) => document.toJS({ maxAliasCount: 0 }));
+  const values = documents.map((document) =>
+    document.toJS({
+      // Accept standard upstream aliases without disabling the native bound.
+      maxAliasCount: 100,
+      onAnchor(value) {
+        // Cyclic manifests are not valid input to the downstream JSON consumers.
+        JSON.stringify(value);
+      },
+    }),
+  );
   const maps = values.filter((value) => value.kind === "ConfigMap");
   if (maps.length !== 1 || maps[0].metadata.name !== "atenet-egress")
     throw new Error("Unexpected upstream egress ConfigMap");
