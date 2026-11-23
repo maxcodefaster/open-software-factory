@@ -51,9 +51,6 @@ func TestNativeInputStopPrivateBindRestrictions(t *testing.T) {
 }
 
 func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("private Stop root construction runs as root in the owned Linux lane")
-	}
 	root := t.TempDir()
 	previous := syscall.Umask(0077)
 	defer syscall.Umask(previous)
@@ -67,15 +64,39 @@ func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
 		if path != root && (!info.IsDir() || info.Mode().Perm() != 0755) {
 			t.Errorf("private worker path is not a traversable directory: %s %v", path, info.Mode())
 		}
-		if metadata, ok := info.Sys().(*syscall.Stat_t); !ok || metadata.Uid != 1000 || metadata.Gid != 1000 {
-			t.Errorf("private worker cannot create its empty native location below %s", path)
-		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if retained := syscall.Umask(0077); retained != 0077 {
 		t.Fatalf("private worker changed its inherited umask: %04o", retained)
+	}
+}
+
+func TestNativeInputStopLocationOwnershipPreservesFixedRoots(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("private Stop root ownership runs in the owned Linux lane")
+	}
+	root := t.TempDir()
+	if err := createInputStopDirectories(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownInputStopLocations(root); err != nil {
+		t.Fatal(err)
+	}
+	for path, uid := range map[string]uint32{
+		"": 1000, "/home": 1000, "/home/rootless": 1000, "/usr": 1000,
+		"/opt": 1000, "/workspace": 1000, "/workspace/project": 1000,
+		"/lib": 0, "/usr/lib": 0, "/usr/bin": 0, "/opt/factory": 0, inputStopGit: 0,
+	} {
+		info, err := os.Stat(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || metadata.Uid != uid || metadata.Gid != uid {
+			t.Errorf("private location ownership changed a fixed root or missed %s", path)
+		}
 	}
 }
 

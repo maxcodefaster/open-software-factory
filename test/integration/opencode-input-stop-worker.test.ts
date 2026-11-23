@@ -39,6 +39,7 @@ test.each([
     );
     const connectorProof = Bun.env["FACTORY_INPUT_STOP_CONNECTOR_TEST_BINARY"];
     const candidateWorker = Bun.env["FACTORY_INPUT_STOP_TEST_WORKER"];
+    const candidateConnector = Bun.env["FACTORY_INPUT_STOP_TEST_CONNECTOR_BINARY"];
     const id = crypto.randomUUID();
     const container = `factory-owned-input-stop-${id}`;
     const evidence = resolve(".factory/test-results/substrate-only/native-input-worker", id);
@@ -221,6 +222,14 @@ test.each([
                   .digest("hex"),
               }
             : null,
+          candidateConnector: candidateConnector
+            ? {
+                path: resolve(candidateConnector),
+                sha256: new Bun.CryptoHasher("sha256")
+                  .update(await Bun.file(candidateConnector).arrayBuffer())
+                  .digest("hex"),
+              }
+            : null,
         }),
       );
       intended = true;
@@ -240,6 +249,7 @@ test.each([
               "--cap-add=SETUID",
               "--cap-add=SETGID",
               "--cap-add=SYS_CHROOT",
+              "--cap-add=CHOWN",
               "--security-opt=seccomp=unconfined",
               "--env=FACTORY_NATIVE_INPUT_STOP_PACKAGED_PROOF=1",
               "--mount",
@@ -259,6 +269,12 @@ test.each([
           ? [
               "--mount",
               `type=bind,src=${resolve(candidateWorker)},dst=/opt/factory/opencode/server/input-stop.mjs,readonly`,
+            ]
+          : []),
+        ...(candidateConnector
+          ? [
+              "--mount",
+              `type=bind,src=${resolve(candidateConnector)},dst=/usr/local/bin/factory-runtime-connector,readonly`,
             ]
           : []),
         "--entrypoint",

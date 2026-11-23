@@ -255,6 +255,26 @@ func TestParentStartupLanguageCopyCannotBlockChildAndAgent(t *testing.T) {
 			if string(body) != "source-remains-usable" {
 				t.Fatal("Source response changed")
 			}
+			if strings.HasPrefix(scenario, "blocked-") {
+				// A consumer can log its command before either shell records
+				// its PID. Stop only after both deliberately held endpoints
+				// exist; cancelling before they start is not a reap failure.
+				for deadline := time.Now().Add(2 * time.Second); ; {
+					ready := true
+					for _, suffix := range []string{"." + step, "." + step + ".consumer"} {
+						raw, err := os.ReadFile(os.Getenv("FACTORY_INJECTION_REACHED") + suffix)
+						pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+						ready = ready && err == nil && parseErr == nil && pid > 0
+					}
+					if ready {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("owned copy fixture did not enter its held producer and consumer")
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
 			if err := parent.WriteJSON(Message{Type: "stop"}); err != nil {
 				t.Fatal(err)
 			}
@@ -271,8 +291,11 @@ func TestParentStartupLanguageCopyCannotBlockChildAndAgent(t *testing.T) {
 				for _, suffix := range []string{"." + step, "." + step + ".consumer"} {
 					raw, err := os.ReadFile(os.Getenv("FACTORY_INJECTION_REACHED") + suffix)
 					pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-					if err != nil || parseErr != nil || pid <= 0 || syscall.Kill(pid, 0) != syscall.ESRCH {
-						t.Fatal("Stop returned before reaping an owned copy producer or consumer")
+					if err != nil || parseErr != nil || pid <= 0 {
+						t.Fatalf("owned copy fixture did not record %s before Stop: read=%v parse=%v pid=%d", suffix, err, parseErr, pid)
+					}
+					if signalErr := syscall.Kill(pid, 0); signalErr != syscall.ESRCH {
+						t.Fatalf("Stop returned before reaping owned %s pid=%d: %v", suffix, pid, signalErr)
 					}
 				}
 			}

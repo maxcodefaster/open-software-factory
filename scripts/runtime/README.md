@@ -185,6 +185,9 @@ For focused worker-source iteration, build with
 and set `FACTORY_INPUT_STOP_TEST_WORKER` to that output's absolute `input-stop.mjs` path.
 The fixture records its checksum and mounts only that candidate read-only. This qualifies the
 candidate SDK executor, not the packaged image; omit the override for final package qualification.
+The same focused Linux fixture accepts a cross-compiled `FACTORY_INPUT_STOP_TEST_CONNECTOR_BINARY`
+alongside `FACTORY_INPUT_STOP_CONNECTOR_TEST_BINARY`; its checksum is recorded separately.
+Omit both source overrides when qualifying the packaged Connector and SDK together.
 
 Controlled controller tests use real PostgreSQL and Factory owners with explicit RPC responses.
 Cold restart is the accepted model, without preserved process IDs or warm memory.
