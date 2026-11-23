@@ -1153,7 +1153,12 @@ source-development installation are not part of this chart.
 ## Operating Factory
 
 Normal authenticated Workspace commands own Start, Pause and Stop. Reading or saving Source does
-not start inference. Paused compute permits editing only after completed durable ROOTFS and
+not start inference. Initial IDE Source access creates only its Source Workspace and pinned Git
+checkout, without an Actor or Project execution. Its durable initialization identity and publication
+confirmation prevent a missing retained tree from being silently cloned again. First Start freezes
+the latest saved files and imports them into the first actual native Actor before Docker starts;
+this Source export is not a Substrate ROOTFS snapshot.
+Paused compute permits editing only after completed durable ROOTFS and
 independent Source handoff. Stop requires independent Source and exact-UID native Delete; an
 unconfirmed pause or lost Delete response is not a successful Stop. A subsequent explicit Start
 selects a new immutable generation only after cleanup and the latest confirmed Source export.

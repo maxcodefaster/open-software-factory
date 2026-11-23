@@ -41,8 +41,10 @@ technical planning and implementation.
 ### Work with the agent
 
 Each Sandbox has your Dev Container, a private Docker daemon and running services. Open the IDE
-to inspect or edit the source. Open the Preview to use the App. The Substrate integration uses
-cold restart rather than promising continuity of running processes.
+to inspect or edit the source. Its first access prepares a pinned canonical checkout without
+starting an Actor, Docker, Project hooks or inference. The first explicit compute Start imports
+the latest saved checkout before Project execution. Open the Preview to use the App. The Substrate
+integration uses cold restart rather than promising continuity of running processes.
 
 <img alt="Project source and running application in the Factory IDE" src="assets/screens/ide.jpg" width="100%">
 

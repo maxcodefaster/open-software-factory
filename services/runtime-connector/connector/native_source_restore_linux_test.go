@@ -33,7 +33,7 @@ func TestSubstrateSourceRestoreBindsCurrentActorAndCheckpointProvenance(t *testi
 			},
 		},
 	}
-	if err := validateSourceRestoreLease(original, workspaceID, actorUID); err != nil {
+	if err := validateSourceRestoreLease(original, workspaceID, actorUID, 3); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutation := range []func(*sourceRestoreResponse){
@@ -55,16 +55,16 @@ func TestSubstrateSourceRestoreBindsCurrentActorAndCheckpointProvenance(t *testi
 			t.Fatal(err)
 		}
 		mutation(&changed)
-		if err := validateSourceRestoreLease(changed, workspaceID, actorUID); err == nil {
+		if err := validateSourceRestoreLease(changed, workspaceID, actorUID, 3); err == nil {
 			t.Fatalf("foreign/incomplete Source lease was accepted: %+v", changed)
 		}
 	}
 	fresh := sourceRestoreResponse{ActorUID: actorUID, WriterEpoch: 1, ChangeWriterEpoch: 1}
-	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID); err != nil {
+	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID, 1); err != nil {
 		t.Fatal(err)
 	}
 	fresh.CheckpointActorUID = predecessorUID
-	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID); err == nil {
+	if err := validateSourceRestoreLease(fresh, workspaceID, actorUID, 1); err == nil {
 		t.Fatal("fresh Source accepted an unbound checkpoint producer")
 	}
 	changed := original
@@ -84,7 +84,7 @@ func TestInputStopSourceRestoreRequiresReadOnlyOriginalCheckpoint(t *testing.T) 
 		ReadOnly: true, InputStop: &input, Checkpoint: &sourceRestoreCheckpoint{ID: input.StopID, WorkspaceID: workspaceID,
 			ActorUID: actorUID, WriterEpoch: 4, Generation: 2, Bundle: workspacefiles.Bundle{
 				Version: 1, Bytes: 4, SHA256: strings.Repeat("a", 64), Chunks: []string{strings.Repeat("a", 64)}}}}
-	if err := validateSourceRestoreLease(original, workspaceID, actorUID); err != nil {
+	if err := validateSourceRestoreLease(original, workspaceID, actorUID, 2); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*sourceRestoreResponse){
@@ -103,7 +103,7 @@ func TestInputStopSourceRestoreRequiresReadOnlyOriginalCheckpoint(t *testing.T) 
 			t.Fatal(err)
 		}
 		mutate(&changed)
-		if validateSourceRestoreLease(changed, workspaceID, actorUID) == nil {
+		if validateSourceRestoreLease(changed, workspaceID, actorUID, 2) == nil {
 			t.Fatal("unbound/writable Stop Source restore was accepted")
 		}
 	}

@@ -338,7 +338,7 @@ test.each([
           });
         expect(prepared).toBe(false);
         expect({ creates, resumes }).toEqual({ creates: 1, resumes: 1 });
-        expect(actor?.metadata.uid).toBe(initialSource?.actorUID);
+        expect(initialSource?.actorUID).toBe(actor?.metadata.uid);
         return;
       }
       // Only the strictly initial read-only role may await its first Parent.
@@ -358,7 +358,7 @@ test.each([
       expect(capabilityReads).toBe(1);
       await runtime.startPersisted(f.changeID, f.userID);
       expect({ creates, resumes }).toEqual({ creates: 1, resumes: 2 });
-      expect(actor?.metadata.uid).toBe(initialSource?.actorUID);
+      expect(initialSource?.actorUID).toBe(actor?.metadata.uid);
       expect(await sources.lease(f.workspaceID)).toEqual(initialSource);
       expect(
         await f.database.client`SELECT change_id FROM factory.change_agent_session

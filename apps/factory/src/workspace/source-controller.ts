@@ -6,8 +6,6 @@ import {
   drizzleTransaction,
 } from "../../../../packages/db/src/client";
 import {
-  branchCreateOperation,
-  change,
   developmentWorkspace,
   project,
   runtimeAttempt,
@@ -17,16 +15,12 @@ import {
   workspaceSharedDocument,
 } from "../../../../packages/db/src/schema";
 import type { WorkspaceSourceState } from "../../../../packages/workspace-domain/src/source";
-import {
-  personalWorkspaceIdentity,
-  ticketWorkspaceIdentity,
-} from "../../../../packages/workspace-domain/src/workspace";
-import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { boundedSourceBody } from "./source-body";
+import { admitInitialSource } from "./source-initialization";
 import { initialSourceRoleIn, type SourceRoleFence } from "./source-role-fence";
 import type { createSubstrateSources } from "./substrate-source";
 
@@ -41,8 +35,8 @@ export interface SourceWorkspaceView {
   readonly failure: string | null;
 }
 
-// Source reads and saves use the current native writer. They never create
-// Workspaces, start compute or prepare a second Kubernetes execution path.
+// Source reads and saves use the canonical writer. Initial admission may create
+// a Source-only Workspace, never compute or a second execution path.
 export function createWorkspaceSourceController(
   database: Database,
   hub: Pick<RuntimeHub, "sourceConnected" | "parentConnected">,
@@ -118,7 +112,9 @@ export function createWorkspaceSourceController(
     // frozen. Keep the editor's observation alive until its original Parent
     // connects; reads do not require Child readiness or admit a new writer.
     // The Actor's Parent still connects only after its private Docker starts.
-    const preparing = current.runtimeState === "starting" && current.sourceWritable;
+    const preparing =
+      current.sourceWritable &&
+      (current.runtimeState === "starting" || current.sourceOwner === "service");
     return {
       workspaceID: current.workspaceID,
       label:
@@ -156,42 +152,11 @@ export function createWorkspaceSourceController(
     ensure,
     get: ensure,
     async ensurePersonal(projectID: string, userID: string) {
-      await database.client.begin((sql) => projectDevelopmentAuthorityIn(sql, userID, projectID));
-      const { workspaceID } = personalWorkspaceIdentity(projectID, userID);
-      if (!(await nativeRow(workspaceID)))
-        throw new CommandError(
-          "unavailable",
-          "Start this fresh native Workspace once to initialize Source. No compute or legacy Workspace was created by editor access.",
-        );
+      const workspaceID = await admitInitialSource(database, userID, { projectID });
       return ensure(workspaceID, userID);
     },
     async ensureChange(changeID: string, userID: string) {
-      const { workspaceID } = ticketWorkspaceIdentity(changeID);
-      await database.client.begin(async (sql) => {
-        await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${workspaceID}`}))`;
-        // PostgreSQL's OF lock target must be an unqualified relation name.
-        const sourceChange = alias(change, "source_change");
-        const [currentChange] = await drizzleTransaction(sql)
-          .select({
-            projectID: sourceChange.projectId,
-            state: sourceChange.state,
-            ready: expression<boolean>`${branchCreateOperation.state}='succeeded'
-              AND ${branchCreateOperation.observedHeadSha}=${sourceChange.baseSha}`,
-          })
-          .from(sourceChange)
-          .innerJoin(branchCreateOperation, eq(branchCreateOperation.changeId, sourceChange.id))
-          .where(eq(sourceChange.id, changeID))
-          .for("share", { of: sourceChange });
-        if (!currentChange) throw new CommandError("not-found", "Change not found");
-        await projectDevelopmentAuthorityIn(sql, userID, currentChange.projectID);
-        if (!currentChange.ready || !["starting", "active", "failed"].includes(currentChange.state))
-          throw new CommandError("unavailable", "Change source is not ready for editing");
-        if (!(await nativeRow(workspaceID, sql)))
-          throw new CommandError(
-            "unavailable",
-            "Start this fresh native Ticket Workspace to initialize Source. Editor access did not create compute or a legacy Workspace.",
-          );
-      });
+      const workspaceID = await admitInitialSource(database, userID, { changeID });
       return ensure(workspaceID, userID);
     },
     async fenceChange(
@@ -349,7 +314,7 @@ export function createWorkspaceSourceController(
             }
           }
           const current = await nativeRow(workspaceID, sql);
-          if (!current?.attemptID)
+          if (!current || (!current.attemptID && current.sourceOwner !== "service"))
             throw new CommandError(
               "unavailable",
               "Native Source is not initialized; compute was not started",

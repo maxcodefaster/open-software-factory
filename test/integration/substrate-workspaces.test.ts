@@ -718,19 +718,72 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
   }
 }, 60_000);
 
-test("independent Source command cannot create a legacy Workspace in an explicitly native Project", async () => {
+test("first Source access admits a personal Source owner without creating native compute", async () => {
   const f = await substrateFixture();
+  const directory = await mkdtemp(join(tmpdir(), "factory-first-source-"));
+  const repository = join(directory, "repository");
+  await Bun.$`git init -b main ${repository}`.quiet();
+  await writeFile(join(repository, "README"), "Fresh Source before compute\n");
+  await Bun.$`git -C ${repository} add .`.quiet();
+  await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
+  const revision = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
+  await f.database
+    .client`UPDATE factory.project SET repository_url=${`file://${repository}`} WHERE id=${f.projectID}`;
   await f.database.client`DELETE FROM factory.development_workspace WHERE id=${f.workspaceID}`;
-  const source = createWorkspaceSourceController(
-    f.database,
-    f.hub,
-    createSubstrateSources(f.database, f.hub),
-  );
+  const sources = createSubstrateSources(f.database, f.hub);
+  // This controller seam observes admission, not the Linux file service. Real
+  // clone/read/save/first-Actor import is qualified in the native Source lane.
+  sources.available = async (workspaceID) => {
+    const row = await sources.lease(workspaceID);
+    return row?.owner === "service" && row.actorUID === null;
+  };
+  const forwarded: string[] = [];
+  sources.forward = async (workspaceID, attemptID, operation, request) => {
+    expect(workspaceID).toBe(f.workspaceID);
+    expect(attemptID).toBeNull();
+    if (operation === "write") expect(request.headers.get("X-Factory-Writer-Epoch")).toBe("1");
+    forwarded.push(operation);
+    return Response.json({ accepted: true });
+  };
+  const source = createWorkspaceSourceController(f.database, f.hub, sources);
   try {
-    await expect(source.ensurePersonal(f.projectID, f.userID)).rejects.toThrow(
-      "No compute or legacy Workspace was created",
+    expect(await source.ensurePersonal(f.projectID, f.userID)).toMatchObject({
+      workspaceID: f.workspaceID,
+      state: "ready",
+      epoch: 1,
+      failure: null,
+    });
+    expect([
+      ...(await f.database
+        .client`SELECT id,source_revision,source_branch FROM factory.development_workspace`),
+    ]).toEqual([{ id: f.workspaceID, source_revision: revision, source_branch: "main" }]);
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+    ).toHaveLength(0);
+    expect(await source.ensurePersonal(f.projectID, f.userID)).toMatchObject({
+      workspaceID: f.workspaceID,
+      state: "ready",
+      epoch: 1,
+    });
+    expect(await f.database.client`SELECT workspace_id FROM factory.substrate_source`).toHaveLength(
+      1,
     );
-    expect(await f.database.client`SELECT id FROM factory.development_workspace`).toHaveLength(0);
+    for (const operation of ["read", "write"])
+      expect(
+        (
+          await source.forward(
+            f.workspaceID,
+            f.userID,
+            operation,
+            new Request("https://factory.test/source", {
+              method: "POST",
+              body: '{"path":"README"}',
+            }),
+          )
+        ).status,
+      ).toBe(200);
+    expect(forwarded).toEqual(["read", "write"]);
     expect([
       ...(await f.database.client`SELECT to_regclass('factory.workspace_source') AS source,
         to_regclass('factory.factorybox_worker') AS worker`),
@@ -738,6 +791,7 @@ test("independent Source command cannot create a legacy Workspace in an explicit
   } finally {
     await source.close();
     await f.dispose();
+    await rm(directory, { recursive: true, force: true });
   }
 }, 60_000);
 

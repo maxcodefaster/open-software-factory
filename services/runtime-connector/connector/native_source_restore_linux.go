@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type sourceRestoreCheckpoint struct {
 	ID          string                `json:"id"`
 	WorkspaceID string                `json:"workspaceID"`
 	ActorUID    string                `json:"actorUID"`
+	SeedID      *string               `json:"seedID,omitempty"`
 	WriterEpoch uint64                `json:"writerEpoch"`
 	Generation  uint64                `json:"generation"`
 	Bundle      workspacefiles.Bundle `json:"bundle"`
@@ -42,6 +44,7 @@ type sourceRestoreCheckpoint struct {
 type sourceRestoreResponse struct {
 	ActorUID           string                   `json:"actorUID"`
 	CheckpointActorUID string                   `json:"checkpointActorUID"`
+	CheckpointSeedID   *string                  `json:"checkpointSeedID"`
 	WriterEpoch        uint64                   `json:"writerEpoch"`
 	ChangeWriterEpoch  uint64                   `json:"changeWriterEpoch"`
 	ReadOnly           bool                     `json:"readOnly"`
@@ -49,8 +52,11 @@ type sourceRestoreResponse struct {
 	InputStop          *nativeInputStop         `json:"inputStop,omitempty"`
 }
 
-func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorUID string) error {
-	if reply.ActorUID != actorUID || len(actorUID) != 36 || reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 {
+var sourceRestoreUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorUID string, generation uint64) error {
+	if reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) || generation == 0 ||
+		reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 {
 		return errors.New("Source restore lease invalid")
 	}
 	saved := reply.Checkpoint
@@ -59,7 +65,7 @@ func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorU
 		return errors.New("input Stop requires the original read-only Source checkpoint")
 	}
 	if saved == nil {
-		if reply.CheckpointActorUID != "" {
+		if reply.CheckpointActorUID != "" || reply.CheckpointSeedID != nil {
 			return errors.New("Source restore checkpoint provenance invalid")
 		}
 		return nil
@@ -68,8 +74,17 @@ func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorU
 	// Factory binds this checkpoint's producer to the current Source lease.
 	// A fresh Actor may consume its positively stopped predecessor's export;
 	// it never adopts that Actor's runtime identity or resumes its snapshot.
-	if saved.WorkspaceID != workspaceID || saved.ActorUID != reply.CheckpointActorUID ||
-		len(saved.ActorUID) != 36 || len(saved.ID) != 36 || saved.Generation == 0 ||
+	actorCheckpoint := saved.ActorUID == reply.CheckpointActorUID && sourceRestoreUUID.MatchString(saved.ActorUID) &&
+		saved.SeedID == nil && reply.CheckpointSeedID == nil
+	// A Source-service export predates every Actor. Only the actual first
+	// assignment may import its explicit seed, never a later generation or Stop.
+	seedCheckpoint := saved.ActorUID == "" && reply.CheckpointActorUID == "" &&
+		saved.SeedID != nil && reply.CheckpointSeedID != nil && *saved.SeedID == *reply.CheckpointSeedID &&
+		sourceRestoreUUID.MatchString(*saved.SeedID) && generation == 1 && reply.InputStop == nil
+	if !actorCheckpoint && !seedCheckpoint {
+		return errors.New("Source restore checkpoint provenance invalid")
+	}
+	if saved.WorkspaceID != workspaceID || !sourceRestoreUUID.MatchString(saved.ID) || saved.Generation == 0 ||
 		saved.WriterEpoch >= reply.WriterEpoch || bundle.Version != 1 || bundle.Bytes <= 0 ||
 		bundle.Bytes > workspacefiles.MaxSourceBundleBytes ||
 		len(bundle.Chunks) != int((bundle.Bytes+workspacefiles.SourceChunkBytes-1)/workspacefiles.SourceChunkBytes) {
@@ -193,9 +208,11 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	if json.Unmarshal(data, &reply) != nil {
 		return errors.New("Source restore lease invalid")
 	}
-	if err := validateSourceRestoreLease(reply, b.Source.WorkspaceID, actorUID); err != nil {
+	if err := validateSourceRestoreLease(reply, b.Source.WorkspaceID, actorUID, b.Assignment.Generation); err != nil {
 		return err
 	}
+	// b.InputStop advertises the bootstrap's capability, not a dispatched Stop.
+	// Only the authenticated reply's actual InputStop excludes a seed above.
 	if reply.InputStop != nil && (b.InputStop == nil || b.InputStop.Version != 1 ||
 		b.InputStop.OpenCodeVersion != reply.InputStop.Version || reply.InputStop.AttemptID != b.Assignment.RuntimeAttemptID) {
 		return errors.New("input Stop differs from its admitted cold bootstrap")

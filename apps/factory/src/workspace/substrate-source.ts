@@ -26,8 +26,15 @@ import {
   substrateRuntimePrincipalIn,
   substrateWorkspaceGrantIn,
 } from "../runtime/source-api";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "../storage/objects";
+import {
+  confirmInitialSourcePublication,
+  type InitialSourceSeed,
+  initialSourceActorIn,
+  initialSourceSeed,
+  materializeInitialSource,
+} from "./source-initialization";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | DatabaseTransaction;
@@ -44,18 +51,21 @@ export const sourceBundle = z
     chunks: z.array(digest).min(1).max(4096),
   })
   .refine((b) => b.chunks.length === Math.ceil(b.bytes / (1 << 20)));
-const checkpoint = z.strictObject({
-  id: z.uuid(),
-  workspaceID: z.uuid(),
-  actorUID: z.uuid(),
-  writerEpoch: z.number().int().positive(),
-  generation: z.number().int().positive(),
-  bundle: sourceBundle,
-});
+const checkpoint = z
+  .strictObject({
+    id: z.uuid(),
+    workspaceID: z.uuid(),
+    actorUID: z.uuid().nullable(),
+    seedID: z.uuid().optional(),
+    writerEpoch: z.number().int().positive(),
+    generation: z.number().int().positive(),
+    bundle: sourceBundle,
+  })
+  .refine((value) => (value.actorUID === null ? Boolean(value.seedID) : !value.seedID));
 type Checkpoint = z.infer<typeof checkpoint>;
 export type SubstrateSourceLease = {
   workspaceID: string;
-  actorUID: string;
+  actorUID: string | null;
   owner: "actor" | "service";
   writerEpoch: number;
   writable: boolean;
@@ -63,6 +73,8 @@ export type SubstrateSourceLease = {
   checkpointID: string | null;
   checkpoint: Checkpoint | null;
   serviceBase: string | null;
+  seed: InitialSourceSeed | null;
+  seedConfirmedAt: Date | null;
 };
 export type SubstrateSourceHandoff = Pick<
   ReturnType<typeof createSubstrateSources>,
@@ -152,28 +164,36 @@ export function createSubstrateSources(
         checkpointID: substrateSource.checkpointId,
         checkpoint: substrateSource.checkpoint,
         serviceBase: substrateSource.serviceBase,
+        seed: substrateSource.seed,
+        seedConfirmedAt: substrateSource.seedConfirmedAt,
       })
       .from(substrateSource)
       .where(eq(substrateSource.workspaceId, workspaceID));
     return row
-      ? { ...row, checkpoint: row.checkpoint ? checkpoint.parse(row.checkpoint) : null }
+      ? {
+          ...row,
+          checkpoint: row.checkpoint ? checkpoint.parse(row.checkpoint) : null,
+          seed: row.seed ? initialSourceSeed.parse(row.seed) : null,
+        }
       : null;
   }
   async function sourceRequest(
     workspaceID: string,
-    attemptID: string,
+    attemptID: string | null,
     row: SubstrateSourceLease,
     operation: string,
     request: Request,
     sql: SQL,
   ) {
-    if (row.owner === "actor")
+    if (row.owner === "actor") {
+      if (!attemptID) throw new CommandError("unavailable", "Actor Source binding is unavailable");
       return hub.request(
         attemptID,
         "source",
         request,
         `/v1/workspaces/${workspaceID}/${operation}`,
       );
+    }
     const host = await service(row, sql);
     return fetch(`http://source.internal/v1/workspaces/${workspaceID}/${operation}`, {
       unix: host.socket,
@@ -307,10 +327,14 @@ export function createSubstrateSources(
     };
   }
   async function service(row: SubstrateSourceLease, sql: SQL) {
-    if (row.owner !== "service" || !row.serviceBase || !row.checkpoint)
+    if (row.owner !== "service" || !row.serviceBase)
       throw new CommandError("unavailable", "Independent Source owner is unconfirmed");
     const retained = hosts.get(row.workspaceID);
-    if (retained?.base === row.serviceBase && retained.child.exitCode === null) {
+    if (
+      retained?.base === row.serviceBase &&
+      retained.child.exitCode === null &&
+      (!row.seed || row.serviceBase !== row.seed.id || row.seedConfirmedAt !== null)
+    ) {
       await retained.ready;
       return retained;
     }
@@ -318,41 +342,51 @@ export function createSubstrateSources(
     const base = join(root, row.workspaceID, row.serviceBase);
     // Its base stays fixed throughout offline edits and freeze retries. Never
     // import a prior checkpoint over an existing service-owned dirty tree.
-    const marker = join(base, "confirmed.json");
-    if (
-      !(await stat(marker).then(
-        () => true,
-        () => false,
-      ))
-    ) {
-      if (row.checkpoint.id !== row.serviceBase)
+    if (row.seed && row.seed.id === row.serviceBase) {
+      if (row.actorUID !== null || row.seed.workspaceID !== row.workspaceID)
+        throw new CommandError("unavailable", "Initial Source owner identity changed");
+      await materializeInitialSource(binary, root, row.seed, row.seedConfirmedAt !== null);
+      if (!row.seedConfirmedAt)
+        await confirmInitialSourcePublication(database, row.workspaceID, row.seed.id);
+    } else {
+      if (!row.checkpoint)
+        throw new CommandError("unavailable", "Independent Source checkpoint is unavailable");
+      const marker = join(base, "confirmed.json");
+      if (
+        !(await stat(marker).then(
+          () => true,
+          () => false,
+        ))
+      ) {
+        if (row.checkpoint.id !== row.serviceBase)
+          throw new CommandError(
+            "unavailable",
+            "Service-owned Source is missing; reinitialization refused",
+          );
+        await materialize(row.checkpoint, base);
+      }
+      let materialized: Checkpoint;
+      try {
+        materialized = checkpoint.parse(JSON.parse(await readFile(marker, "utf8")));
+      } catch {
         throw new CommandError(
           "unavailable",
-          "Service-owned Source is missing; reinitialization refused",
+          "Source materialization identity changed; existing data was preserved",
         );
-      await materialize(row.checkpoint, base);
+      }
+      if (
+        materialized.id !== row.serviceBase ||
+        materialized.workspaceID !== row.workspaceID ||
+        materialized.actorUID !== row.actorUID ||
+        materialized.writerEpoch >= row.writerEpoch ||
+        materialized.generation > row.generation
+      )
+        throw new CommandError(
+          "unavailable",
+          "Source materialization identity changed; existing data was preserved",
+        );
+      await verifiedManifest(materialized);
     }
-    let materialized: Checkpoint;
-    try {
-      materialized = checkpoint.parse(JSON.parse(await readFile(marker, "utf8")));
-    } catch {
-      throw new CommandError(
-        "unavailable",
-        "Source materialization identity changed; existing data was preserved",
-      );
-    }
-    if (
-      materialized.id !== row.serviceBase ||
-      materialized.workspaceID !== row.workspaceID ||
-      materialized.actorUID !== row.actorUID ||
-      materialized.writerEpoch >= row.writerEpoch ||
-      materialized.generation > row.generation
-    )
-      throw new CommandError(
-        "unavailable",
-        "Source materialization identity changed; existing data was preserved",
-      );
-    await verifiedManifest(materialized);
     const role = await writer(row, sql);
     const access = {
       workspaceId: row.workspaceID,
@@ -487,6 +521,7 @@ export function createSubstrateSources(
       id: row.checkpointID,
       workspaceID: row.workspaceID,
       actorUID: row.actorUID,
+      ...(row.actorUID === null ? { seedID: row.seed?.id } : {}),
       writerEpoch: row.writerEpoch,
       generation: row.generation + 1,
       bundle,
@@ -554,7 +589,9 @@ export function createSubstrateSources(
       .where(
         and(
           eq(substrateSource.workspaceId, row.workspaceID),
-          eq(substrateSource.actorUid, row.actorUID),
+          row.actorUID === null
+            ? isNull(substrateSource.actorUid)
+            : eq(substrateSource.actorUid, row.actorUID),
           eq(substrateSource.owner, row.owner),
           eq(substrateSource.writerEpoch, row.writerEpoch),
           eq(substrateSource.writable, false),
@@ -603,12 +640,22 @@ export function createSubstrateSources(
         .insert(substrateSource)
         .values({ workspaceId: workspaceID, actorUid: actorUID })
         .onConflictDoNothing({ target: substrateSource.workspaceId });
-      const row = await lease(workspaceID, sql);
+      let row = await lease(workspaceID, sql);
       if (!row) throw new Error("Source owner is missing");
       if (row.actorUID === actorUID) return;
+      if (row.actorUID === null && row.owner === "service" && !row.seedConfirmedAt) {
+        // Start can win the same Workspace lock immediately after seed
+        // admission. Complete only that retained seed before its first import.
+        await service(row, sql);
+        row = await lease(workspaceID, sql);
+        if (!row) throw new Error("Initial Source owner is missing");
+      }
       // Authorize this exact native successor in one read of both generations
       // and their frozen provisioning identities before exporting or changing UID.
-      const [successor] = await sql<{ id: string }[]>`
+      const [successor] =
+        row.actorUID === null && row.seedConfirmedAt && row.seed
+          ? await initialSourceActorIn(sql, row.seed, actorUID)
+          : await sql<{ id: string }[]>`
         SELECT current.id FROM factory.runtime_attempt predecessor
         JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
         JOIN factory.runtime_attempt current ON current.workspace_id=predecessor.workspace_id
@@ -697,13 +744,16 @@ export function createSubstrateSources(
     },
     async forward(
       workspaceID: string,
-      attemptID: string,
+      attemptID: string | null,
       operation: string,
       request: Request,
       sql: SQL,
     ) {
       const row = await lease(workspaceID, sql);
-      if (!row?.writable || (row.owner === "actor" && !hub.sourceConnected(attemptID)))
+      if (
+        !row?.writable ||
+        (row.owner === "actor" && (!attemptID || !hub.sourceConnected(attemptID)))
+      )
         throw new CommandError(
           "unavailable",
           "Current Source writer is frozen or unavailable; keep the editor buffer",
@@ -845,7 +895,17 @@ export function createSubstrateSources(
           row.writerEpoch !== inputStop.sourceWriterEpoch)
       )
         return new Response(null, { status: 409 });
-      if (row.checkpoint && row.checkpoint.actorUID !== attempt.actorUID) {
+      if (row.checkpoint?.actorUID === null) {
+        if (
+          inputStop ||
+          attempt.generation !== 1 ||
+          !row.seedConfirmedAt ||
+          !row.seed ||
+          row.checkpoint.seedID !== row.seed.id ||
+          row.seed.workspaceID !== attempt.workspaceID
+        )
+          return new Response(null, { status: 409 });
+      } else if (row.checkpoint && row.checkpoint.actorUID !== attempt.actorUID) {
         const [predecessor] = await database.db
           .select({ actorUID: substrateBinding.actorUid })
           .from(runtimeAttempt)
@@ -870,6 +930,7 @@ export function createSubstrateSources(
           {
             actorUID: row.actorUID,
             checkpointActorUID: row.checkpoint?.actorUID ?? null,
+            checkpointSeedID: row.checkpoint?.seedID ?? null,
             writerEpoch: row.writerEpoch,
             changeWriterEpoch: role.epoch,
             readOnly: Boolean(inputStop) || !role.writable,

@@ -26,6 +26,9 @@ func RunSubstrateSource(context.Context) error {
 
 func RunSourceHost(context.Context) error    { return errors.New("Source host requires Linux") }
 func RunSourceService(context.Context) error { return errors.New("Source service requires Linux") }
+func RunSourceInitialize(context.Context, io.Reader) error {
+	return errors.New("Source initialization requires Linux")
+}
 func RunSourceMaterialize(string, string) error {
 	return errors.New("Source materialization requires Linux")
 }

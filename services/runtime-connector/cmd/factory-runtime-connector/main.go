@@ -129,6 +129,17 @@ func main() {
 		}
 		return
 	}
+	if os.Args[1] == "source-initialize" {
+		if len(os.Args) != 2 {
+			fail("source-initialize accepts only its fixed stdin assignment")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.RunSourceInitialize(ctx, os.Stdin); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
 	if os.Args[1] == "browser-client" {
 		if len(os.Args) != 3 {
 			fail("usage: factory-runtime-connector browser-client <Build turn ID>; one fixed JSON tool call on stdin")

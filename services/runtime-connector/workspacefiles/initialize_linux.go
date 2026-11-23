@@ -2,6 +2,7 @@ package workspacefiles
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -124,6 +125,15 @@ func initGit(ctx context.Context, directory string, args ...string) (string, err
 			command.Env = append(command.Env, name+"="+value)
 		}
 	}
+	// Only InitializeService can attach this transport. Scope the header to
+	// that clone URL and subprocess; local Git, Actor initialization, hooks and
+	// persisted repository/initialization configuration never receive it.
+	if transport, ok := ctx.Value(serviceCloneTransportKey{}).(serviceCloneTransport); ok &&
+		transport.authorization != "" && len(args) > 0 && args[0] == "clone" {
+		command.Env = append(command.Env, "GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http."+transport.repositoryURL+".extraHeader",
+			"GIT_CONFIG_VALUE_0=Authorization: "+transport.authorization)
+	}
 	output, err := command.Output()
 	if err != nil {
 		if canceled := ctx.Err(); canceled != nil {
@@ -160,6 +170,46 @@ func preparedCheckout(ctx context.Context, directory, projectID string) bool {
 }
 
 func Initialize(ctx context.Context, parent string, input Initialization) error {
+	return initialize(ctx, parent, input, 1000, 1000)
+}
+
+type serviceCloneTransportKey struct{}
+type serviceCloneTransport struct {
+	repositoryURL string
+	authorization string
+}
+
+// InitializeService exposes the existing initializer to trusted Factory code
+// running as the development user. The optional Basic credential is clone-only
+// transport, not Source identity or permission to run Project code.
+func InitializeService(ctx context.Context, parent string, input Initialization, gitAuthorization string) error {
+	if os.Geteuid() != 1000 || os.Getegid() != 1000 {
+		return errors.New("Source initialization requires UID/GID 1000")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if gitAuthorization != "" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(gitAuthorization, "Basic "))
+		if !strings.HasPrefix(gitAuthorization, "Basic ") || len(gitAuthorization) > 8192 || err != nil ||
+			!strings.Contains(string(decoded), ":") || strings.ContainsAny(gitAuthorization+string(decoded), "\r\n\x00") ||
+			!sourceRepositoryURL(input.RepositoryURL) ||
+			(!strings.HasPrefix(input.RepositoryURL, "https://") && !strings.HasPrefix(input.RepositoryURL, "http://")) {
+			return errors.New("Source initialization Git authorization is invalid")
+		}
+	}
+	if !filepath.IsAbs(parent) || filepath.Clean(parent) != parent || parent == "/" {
+		return errors.New("Source initialization requires an absolute private parent")
+	}
+	if err := os.Mkdir(parent, 0700); err != nil && !os.IsExist(err) {
+		return errors.New("Source initialization private parent is unavailable")
+	}
+	var info unix.Stat_t
+	if unix.Lstat(parent, &info) != nil || info.Mode&unix.S_IFMT != unix.S_IFDIR ||
+		info.Uid != 1000 || info.Gid != 1000 || info.Mode&0077 != 0 {
+		return errors.New("Source initialization requires its owned private parent")
+	}
+	ctx = context.WithValue(ctx, serviceCloneTransportKey{}, serviceCloneTransport{input.RepositoryURL, gitAuthorization})
 	return initialize(ctx, parent, input, 1000, 1000)
 }
 

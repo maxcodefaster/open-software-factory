@@ -376,6 +376,13 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
     expect(controllerNeedsDatabase(path)).toBe(false);
   }
   expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-source-seed.test.ts")).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/substrate-source-seed.test.ts")).toBe(
+    false,
+  );
+  expect(integrationNeedsApplicationBuild("test/integration/substrate-workspaces.test.ts")).toBe(
+    false,
+  );
   expect(controllerNeedsDatabase("test/integration/openbao.test.ts")).toBe(false);
   expect(integrationNeedsApplicationBuild("test/integration/openbao.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/postgres-baseline.test.ts")).toBe(false);

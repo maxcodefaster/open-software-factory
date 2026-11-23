@@ -56,6 +56,7 @@ const selfContainedControllerTests = new Set([
   "substrate-workspaces.native.test.ts",
   "substrate-source.test.ts",
   "substrate-source-access.test.ts",
+  "substrate-source-seed.test.ts",
   "openbao.test.ts",
   "postgres-baseline.test.ts",
   "schema-baseline.test.ts",
@@ -128,6 +129,8 @@ export function integrationNeedsApplicationBuild(path: string) {
     "workspace-container-files.test.ts",
     "substrate-source.test.ts",
     "substrate-source-access.test.ts",
+    "substrate-source-seed.test.ts",
+    "substrate-workspaces.test.ts",
     "developer-ide.test.ts",
     "developer-ide-access-recovery.test.ts",
   ].includes(basename(path));

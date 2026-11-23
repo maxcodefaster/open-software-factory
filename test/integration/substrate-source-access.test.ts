@@ -194,13 +194,16 @@ test("native Source rechecks slow uploads, orders revocation after writes and cl
 }, 30_000);
 
 test.each(["personal", "ticket"] as const)(
-  "%s Source metadata reads retain an unstarted Workspace without creating native compute",
+  "%s metadata observes an initializing Source-only Workspace without native compute",
   async (kind) => {
     const f = await substrateFixture("a".repeat(40), kind);
     f.hub.request = async () => {
       throw new Error("An unstarted Source read must not dispatch a native request");
     };
     const source = createSubstrateSources(f.database, f.hub);
+    // Controlled metadata observation while the pinned Source initializer is
+    // unfinished; this lane does not substitute a host process for Linux Source.
+    source.available = async () => false;
     const controller = createWorkspaceSourceController(f.database, f.hub, source);
     try {
       const view =
@@ -216,7 +219,12 @@ test.each(["personal", "ticket"] as const)(
       await expect(controller.get(crypto.randomUUID(), f.userID)).rejects.toThrow(
         "Workspace not found",
       );
-      expect(await source.lease(f.workspaceID)).toBeNull();
+      expect(await source.lease(f.workspaceID)).toMatchObject({
+        owner: "service",
+        actorUID: null,
+        generation: 0,
+        seedConfirmedAt: null,
+      });
       expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
       expect(
         await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,

@@ -237,7 +237,19 @@ CREATE FUNCTION factory.protect_substrate_source() RETURNS trigger
 BEGIN
   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Source ownership and checkpoints cannot be discarded'; END IF;
   IF TG_OP='INSERT' THEN
-    IF NEW.owner<>'actor' OR NEW.writer_epoch<>1 OR NOT NEW.writable OR NEW.generation<>0
+    IF NEW.writer_epoch<>1 OR NOT NEW.writable OR NEW.generation<>0 OR NEW.seed_confirmed_at IS NOT NULL
+      THEN RAISE EXCEPTION 'Source requires an initial writable generation'; END IF;
+    IF NEW.owner='service' THEN
+      IF NEW.actor_uid IS NOT NULL OR NEW.seed IS NULL
+        OR NEW.service_base::text IS DISTINCT FROM NEW.seed->>'id'
+        OR NOT EXISTS(SELECT 1 FROM factory.development_workspace w JOIN factory.project p ON p.id=w.project_id
+          WHERE w.id=NEW.workspace_id AND w.id::text=NEW.seed->>'workspaceID'
+            AND w.project_id::text=NEW.seed->>'projectID'
+            AND p.repository_url=NEW.seed->>'repositoryURL'
+            AND w.source_branch=NEW.seed->>'branch' AND w.source_revision=NEW.seed->>'revision')
+        OR EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.workspace_id=NEW.workspace_id)
+        THEN RAISE EXCEPTION 'Initial service Source requires its exact Workspace seed before any Attempt'; END IF;
+    ELSIF NEW.owner<>'actor' OR NEW.seed IS NOT NULL
       OR NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
         WHERE a.workspace_id=NEW.workspace_id AND b.actor_uid=NEW.actor_uid
           AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
@@ -245,13 +257,56 @@ BEGIN
       THEN RAISE EXCEPTION 'Source requires its current original Actor binding'; END IF;
     RETURN NEW;
   END IF;
+  IF NEW.seed IS DISTINCT FROM OLD.seed
+    THEN RAISE EXCEPTION 'Source seed is immutable'; END IF;
+  IF OLD.seed_confirmed_at IS NOT NULL AND NEW.seed_confirmed_at IS DISTINCT FROM OLD.seed_confirmed_at
+    THEN RAISE EXCEPTION 'Source seed confirmation is immutable'; END IF;
+  IF OLD.seed_confirmed_at IS NULL AND NEW.seed_confirmed_at IS NOT NULL AND (
+    OLD.seed IS NULL OR OLD.actor_uid IS NOT NULL OR OLD.owner<>'service'
+    OR OLD.service_base::text IS DISTINCT FROM OLD.seed->>'id'
+    OR ROW(NEW.actor_uid,NEW.owner,NEW.writer_epoch,NEW.writable,NEW.generation,
+        NEW.checkpoint_id,NEW.checkpoint,NEW.service_base)
+      IS DISTINCT FROM ROW(OLD.actor_uid,OLD.owner,OLD.writer_epoch,OLD.writable,OLD.generation,
+        OLD.checkpoint_id,OLD.checkpoint,OLD.service_base))
+    THEN RAISE EXCEPTION 'Source seed confirmation requires its unchanged initialized service owner'; END IF;
   IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
     OR NEW.writer_epoch<OLD.writer_epoch OR NEW.writer_epoch>OLD.writer_epoch+1
     OR NEW.generation<OLD.generation OR NEW.generation>OLD.generation+1
     THEN RAISE EXCEPTION 'Source identity/epoch/generation changed'; END IF;
   IF NEW.actor_uid IS DISTINCT FROM OLD.actor_uid THEN
     IF OLD.owner<>'service' OR NEW.owner<>'actor' OR OLD.writable OR NOT NEW.writable
-      OR NOT EXISTS(
+      THEN RAISE EXCEPTION 'Source Actor transfer requires its confirmed stopped predecessor and current native successor'; END IF;
+    IF OLD.actor_uid IS NULL THEN
+      IF NEW.actor_uid IS NULL OR OLD.seed IS NULL OR OLD.seed_confirmed_at IS NULL
+        OR OLD.service_base::text IS DISTINCT FROM OLD.seed->>'id'
+        OR NOT EXISTS(
+          SELECT 1 FROM factory.runtime_attempt current
+          JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
+          JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
+          WHERE current.workspace_id=NEW.workspace_id AND current.generation=1
+            AND current.project_id::text=OLD.seed->>'projectID' AND current.revision=OLD.seed->>'revision'
+            AND current.state='create-intended' AND current.stop_intended_at IS NULL
+            AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
+            AND new_binding.create_attempted_at IS NOT NULL
+            AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
+            AND new_binding.observation#>>'{metadata,uid}'=NEW.actor_uid::text
+            AND new_binding.observation#>>'{metadata,name}'=new_binding.actor_name
+            AND new_binding.observation#>>'{metadata,atespace}'=new_binding.atespace
+            AND new_binding.intent->>'projectID'=current.project_id::text
+            AND new_binding.intent->>'workspaceID'=NEW.workspace_id::text
+            AND new_binding.intent->>'generation'=current.generation::text
+            AND new_binding.intent->>'atespaceUID'=provision.atespace#>>'{metadata,uid}'
+            AND new_binding.intent->>'templateUID'=provision.template#>>'{metadata,uid}'
+            AND new_binding.intent->>'templateVersion'=provision.template#>>'{metadata,version}'
+            AND new_binding.intent->>'templateSHA256'=provision.intent->>'templateSHA256'
+            AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
+            AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
+            AND provision.intent->>'revision'=OLD.seed->>'revision'
+            AND provision.intent->>'branch'=OLD.seed->>'branch'
+            AND provision.intent->>'repositoryURL'=OLD.seed->>'repositoryURL'
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt other WHERE other.workspace_id=current.workspace_id AND other.id<>current.id))
+        THEN RAISE EXCEPTION 'Source first Actor transfer requires its confirmed seed and exact generation-one native binding'; END IF;
+    ELSIF NOT EXISTS(
         SELECT 1 FROM factory.runtime_attempt predecessor
         JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
         JOIN factory.runtime_attempt current ON current.workspace_id=predecessor.workspace_id
@@ -279,6 +334,11 @@ BEGIN
       OR NEW.checkpoint->>'id' IS DISTINCT FROM NEW.checkpoint_id::text
       OR NEW.checkpoint->>'workspaceID' IS DISTINCT FROM NEW.workspace_id::text
       OR NEW.checkpoint->>'actorUID' IS DISTINCT FROM NEW.actor_uid::text
+      OR (NEW.actor_uid IS NULL AND (
+        NEW.seed_confirmed_at IS NULL
+        OR NEW.checkpoint->'actorUID' IS DISTINCT FROM 'null'::jsonb
+        OR NEW.checkpoint->'seedID' IS DISTINCT FROM NEW.seed->'id'))
+      OR (NEW.actor_uid IS NOT NULL AND NEW.checkpoint ? 'seedID')
       OR NEW.checkpoint->>'generation' IS DISTINCT FROM NEW.generation::text
       OR NEW.checkpoint->>'writerEpoch' IS DISTINCT FROM NEW.writer_epoch::text
       THEN RAISE EXCEPTION 'Source checkpoint confirmation differs from frozen writer'; END IF;

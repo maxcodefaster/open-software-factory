@@ -246,7 +246,7 @@ export const substrateSource = factorySchema.table(
   "substrate_source",
   {
     workspaceId: uuid("workspace_id").primaryKey().notNull(),
-    actorUid: uuid("actor_uid").notNull(),
+    actorUid: uuid("actor_uid"),
     owner: text("owner").$type<"actor" | "service">().default("actor").notNull(),
     writerEpoch: bigint("writer_epoch", { mode: "number" }).default(1).notNull(),
     writable: boolean("writable").default(true).notNull(),
@@ -254,6 +254,8 @@ export const substrateSource = factorySchema.table(
     checkpointId: uuid("checkpoint_id"),
     checkpoint: jsonb("checkpoint"),
     serviceBase: uuid("service_base"),
+    seed: jsonb("seed"),
+    seedConfirmedAt: timestamp("seed_confirmed_at", { withTimezone: true }),
   },
   (table): PgTableExtraConfigValue[] => [
     foreignKey({
@@ -266,6 +268,32 @@ export const substrateSource = factorySchema.table(
     check(
       "substrate_source_check2",
       sql`(${table.owner} <> 'service'::text) OR (${table.serviceBase} IS NOT NULL)`,
+    ),
+    check(
+      "substrate_source_actor_check",
+      sql`(${table.actorUid} IS NOT NULL) OR (${table.owner} = 'service'::text AND ${table.seed} IS NOT NULL)`,
+    ),
+    check(
+      "substrate_source_seed_check",
+      sql`${table.seed} IS NULL OR (
+        jsonb_typeof(${table.seed}) = 'object'
+        AND ${table.seed} - ARRAY['version','id','workspaceID','projectID','repositoryURL','revision','branch'] = '{}'::jsonb
+        AND ${table.seed}->'version' = '1'::jsonb
+        AND jsonb_typeof(${table.seed}->'id') = 'string'
+        AND ${table.seed}->>'id' ~ '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+        AND jsonb_typeof(${table.seed}->'workspaceID') = 'string'
+        AND ${table.seed}->>'workspaceID' = ${table.workspaceId}::text
+        AND jsonb_typeof(${table.seed}->'projectID') = 'string'
+        AND ${table.seed}->>'projectID' ~ '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+        AND jsonb_typeof(${table.seed}->'repositoryURL') = 'string'
+        AND jsonb_typeof(${table.seed}->'revision') = 'string'
+        AND ${table.seed}->>'revision' ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'
+        AND jsonb_typeof(${table.seed}->'branch') = 'string'
+      ) IS TRUE`,
+    ),
+    check(
+      "substrate_source_seed_confirmation_check",
+      sql`${table.seedConfirmedAt} IS NULL OR ${table.seed} IS NOT NULL`,
     ),
     check("substrate_source_generation_check", sql`${table.generation} >= 0`),
     check(

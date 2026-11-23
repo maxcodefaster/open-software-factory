@@ -232,6 +232,54 @@ function configuredRepository(repositoryURL: string) {
   }
 }
 
+// Initial Source uses the same bound Forge transport as native Git. Only this
+// short-lived initializer receives clone authorization; it is never saved in Git.
+export async function initializeSourceCheckout(
+  binary: string,
+  root: string,
+  source: {
+    workspaceID: string;
+    projectID: string;
+    repositoryURL: string;
+    revision: string;
+    branch: string;
+  },
+) {
+  const repository = source.repositoryURL.startsWith("file://")
+    ? undefined
+    : configuredRepository(source.repositoryURL);
+  const path = repository ? `/${repository.owner}/${repository.name}.git` : "";
+  const repositoryURL = repository ? new URL(path, repository.apiURL).href : source.repositoryURL;
+  const originURL = repository
+    ? new URL(path, process.env["FACTORY_FORGEJO_PUBLIC_URL"] ?? repository.apiURL).href
+    : source.repositoryURL;
+  const result = await runEnvironmentCommand(
+    [binary, "source-initialize"],
+    { PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin" },
+    { timeoutMS: 180_000, outputBytes: 16 * 1024 },
+    JSON.stringify({
+      root,
+      initialization: {
+        workspaceId: source.workspaceID,
+        projectId: source.projectID,
+        revision: source.revision,
+        repositoryUrl: repositoryURL,
+        originUrl: originURL,
+        branch: source.branch,
+      },
+      ...(repository
+        ? {
+            gitAuthorization: `Basic ${Buffer.from(`factory:${repository.token}`).toString("base64")}`,
+          }
+        : {}),
+    }),
+  );
+  if (result.exitCode !== 0)
+    throw new Error(
+      "Initial Source checkout failed; its original initialization intent was retained",
+    );
+}
+
 // Git transport credentials exist only in this server-side process environment.
 // Neither the checkout config nor captured processes receive them.
 export async function cleanRuntimeSourceArchive(
