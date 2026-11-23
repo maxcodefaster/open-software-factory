@@ -50,6 +50,38 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       await process.kill(initialized);
       const owned = await nativeBuildProcessFixture(database, peer);
       ownedFixture = owned;
+      const sourceBinding = async () => {
+        const [row] = await database.client<
+          {
+            actorUID: string;
+            sourceUID: string;
+            owner: string;
+            epoch: number;
+            checkpoint: unknown;
+            parentHash: string;
+            childHash: string;
+          }[]
+        >`SELECT binding.actor_uid AS "actorUID",source.actor_uid AS "sourceUID",
+            source.owner,source.writer_epoch::float8 AS epoch,source.checkpoint,
+            attempt.parent_connector_token_hash AS "parentHash",
+            attempt.child_connector_token_hash AS "childHash"
+          FROM factory.runtime_attempt attempt
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+          JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
+          WHERE attempt.id=${owned.attemptID}`;
+        return row;
+      };
+      const originalSource = await sourceBinding();
+      const originalUID = (await peer.connectorHeaders(owned.attemptID, "parent"))[
+        "x-factory-runtime-actor-uid"
+      ];
+      expect(originalSource).toMatchObject({
+        actorUID: originalUID,
+        sourceUID: originalUID,
+        owner: "actor",
+        checkpoint: expect.objectContaining({ workspaceID: owned.workspaceID, actorUID: null }),
+      });
+      expect(originalSource?.parentHash).not.toBe(originalSource?.childHash);
       const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
       const first = await process.start();
       const cookie = await process.signIn();
@@ -162,6 +194,15 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               data = { message: "Owned skill discovery failed before dispatch" };
             } else if (request.path === "/api/info") {
               data = { version: upstream.openCode.version };
+            } else if (request.path === "/api/location") {
+              data = {
+                directory: "/workspace/project",
+                project: {
+                  id: owned.projectID,
+                  directory: "/workspace/project",
+                  canonical: "/workspace/project",
+                },
+              };
             } else if (request.path === "/api/skill") {
               data = installedSkills.map((id) => ({
                 id,
@@ -251,7 +292,9 @@ test.each(["failed", "pre-dispatch failed"] as const)(
                 JSON.stringify({
                   type: "stream-data",
                   streamId: frame.streamId,
-                  data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
+                  data: Buffer.from(
+                    JSON.stringify(request.path === "/api/location" ? data : { data, cursor: {} }),
+                  ).toString("base64"),
                 }),
               );
             socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
@@ -380,6 +423,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       expect(writer?.fence).toBe(true);
       expect(promptCalls).toBe(outcome === "pre-dispatch failed" ? 0 : 1);
       expect(peer.calls.filter((call) => !call.method.startsWith("Get"))).toEqual(lifecycleBefore);
+      expect(await sourceBinding()).toEqual(originalSource);
     } finally {
       for (const socket of sockets) socket.close();
       // An earlier assertion may fail while the projection is held. Release
