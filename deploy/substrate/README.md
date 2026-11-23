@@ -237,6 +237,10 @@ closed before provisioning. Registry credentials grant image pulls by default, n
 A Project manager must explicitly enable **Allow publishing prepared images for this Project**
 and save that Environment revision before a new producer can publish. Use a push-capable token
 limited to the Project's prepared-image repository. Verification access remains a separate choice.
+A committed Development Environment save queues only that environment's image preparation, even
+before optional App/QA configuration is confirmed. Factory rechecks the saving manager and exact
+current Environment revision before admission; the save does not approve Preview or inference.
+Background preparation and Preview Environment saves still require confirmed Project setup.
 Without an admitted registry or that grant, Factory records an unstarted preparation as skipped
 and keeps normal Dev Container startup available; it creates no native producer resources.
 Project setup reports normal startup instead of waiting for a prepared image. Existing provisioning

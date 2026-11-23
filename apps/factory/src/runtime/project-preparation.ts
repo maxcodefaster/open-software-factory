@@ -16,8 +16,13 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
 import {
+  type createDatabase,
+  type DatabaseTransaction,
+  drizzleTransaction,
+} from "../../../../packages/db/src/client";
+import {
+  environmentWrite,
   projectEnvironment,
   projectImagePreparation,
   runtimeAttempt,
@@ -27,6 +32,9 @@ import {
 } from "../../../../packages/db/src/schema";
 import type { ProjectEnvironment } from "../../../../packages/project-domain/src/environment";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
+import { projectAuthorityIn } from "../access/authority";
+import { CommandError } from "../command-error";
+import type { EnvironmentSaveDecision } from "../environments/api";
 import { requireSetupReady } from "../setup/execution-gate";
 import { substratePrebuildGrantIn } from "./substrate-prebuild-grant";
 
@@ -77,15 +85,58 @@ export function createProjectPreparation(input: {
 }) {
   const sql = input.database.client;
   let draining: Promise<void> | undefined;
-  async function ensure(projectID: string) {
-    await requireSetupReady(sql, projectID);
+  async function requireSavedEnvironment(
+    transaction: DatabaseTransaction,
+    projectID: string,
+    decision: EnvironmentSaveDecision,
+  ) {
+    await projectAuthorityIn(transaction, decision.userID, projectID, true);
+    if (!Number.isSafeInteger(decision.version) || decision.version < 1)
+      throw new CommandError("conflict", "Current committed environment save is required");
+    const [saved] = await drizzleTransaction(transaction)
+      .select({ commandID: environmentWrite.commandId })
+      .from(environmentWrite)
+      .innerJoin(
+        projectEnvironment,
+        and(
+          eq(projectEnvironment.projectId, environmentWrite.projectId),
+          eq(projectEnvironment.environment, environmentWrite.environment),
+          eq(projectEnvironment.secretKey, environmentWrite.secretKey),
+          eq(projectEnvironment.version, decision.version),
+        ),
+      )
+      .where(
+        and(
+          eq(environmentWrite.commandId, decision.commandID),
+          eq(environmentWrite.projectId, projectID),
+          eq(environmentWrite.environment, decision.environment),
+          eq(environmentWrite.createdBy, decision.userID),
+          eq(environmentWrite.baseVersion, decision.version - 1),
+          eq(environmentWrite.state, "committed"),
+        ),
+      )
+      .for("share");
+    if (!saved)
+      throw new CommandError("conflict", "Current committed environment save is required");
+  }
+  async function ensure(projectID: string, decision?: EnvironmentSaveDecision) {
+    // A real Development settings save already authorizes this preparation.
+    // It does not confirm App/QA setup or admit a Preview. Background admission
+    // and Preview settings retain the existing configuration boundary.
+    if (decision?.environment !== "development") await requireSetupReady(sql, projectID);
+    if (decision)
+      await sql.begin((transaction) => requireSavedEnvironment(transaction, projectID, decision));
     const revision = await input.head(projectID);
     if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(revision))
       throw new Error("Project default branch is unavailable");
-    for (const environment of ["development", "main-preview"] as const) {
+    const environments = decision
+      ? [decision.environment]
+      : (["development", "main-preview"] as const);
+    for (const environment of environments) {
       await sql.begin(async (transaction) => {
         const db = drizzleTransaction(transaction);
         await transaction`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${projectID}:${environment}`}))`;
+        if (decision) await requireSavedEnvironment(transaction, projectID, decision);
         const [settings] = await db
           .select({ version: expression<string>`${projectEnvironment.version}::text` })
           .from(projectEnvironment)

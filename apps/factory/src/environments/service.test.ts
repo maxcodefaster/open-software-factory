@@ -17,7 +17,12 @@ test("only successful environment saves admit preparation, without replaying sav
   const input = { commandID: crypto.randomUUID(), version: 0, variables: [], registries: [] };
   expect(await service.save("project", "actor", "development", input)).toBe(saved);
   expect(save).toHaveBeenCalledWith("project", "actor", "development", input);
-  expect(prepare).toHaveBeenCalledWith("project");
+  expect(prepare).toHaveBeenCalledWith("project", {
+    userID: "actor",
+    environment: "development",
+    commandID: input.commandID,
+    version: 1,
+  });
   await service.discard("project", "actor", "development", input.commandID);
   await service.get("project", "actor", "main-preview");
   expect(prepare).toHaveBeenCalledTimes(1);
