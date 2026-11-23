@@ -35,6 +35,9 @@ RUN apk add --no-cache git libgcc libstdc++ \
 RUN test "$(containerd --version | awk '{print $3}')" = v2.4.1
 COPY deploy/substrate/rootless/ /opt/factory-rootless/
 COPY deploy/substrate/rootless/runtime-child.sh /opt/factory-rootless/child.sh
-RUN chmod 0555 /opt/factory-rootless/*.sh
+# Build contexts can inherit a private umask. The runtime user must read Python
+# probes and proxy configuration too, not just execute the shell entrypoints.
+RUN chmod -R a+rX,go-w /opt/factory-rootless \
+  && chmod 0555 /opt/factory-rootless/*.sh
 USER rootless
 ENTRYPOINT ["/opt/factory-rootless/start.sh", "/opt/factory-rootless/connector.sh", "/usr/local/bin/factory-runtime-connector", "native-parent"]

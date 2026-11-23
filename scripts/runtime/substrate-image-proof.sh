@@ -22,6 +22,11 @@ docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
     test -x /opt/factory-rootless/start.sh
     test -x /opt/factory-rootless/connector.sh
     test -x /opt/factory-rootless/child.sh
+    for file in /opt/factory-rootless/*.py; do
+      test -r "$file"
+      python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$file"
+    done
+    test -r /opt/factory-rootless/tinyproxy.conf
     test -s /opt/factory/opencode/server/server.mjs
     test -s /opt/factory/opencode/server/input-stop.mjs
     test ! -S /var/run/docker.sock

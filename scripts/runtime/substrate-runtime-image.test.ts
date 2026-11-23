@@ -3,11 +3,15 @@ import pins from "../../deploy/substrate/runtime-pins.json";
 
 test("Factory native image keeps exact Factory tools and the official matching containerd daemon/shim API", async () => {
   const dockerfile = await Bun.file("deploy/substrate/Runtime.Dockerfile").text();
+  expect(dockerfile).toContain("chmod -R a+rX,go-w /opt/factory-rootless");
+  const packageProof = await Bun.file("scripts/runtime/substrate-image-proof.sh").text();
+  expect(packageProof).toContain("for file in /opt/factory-rootless/*.py");
+  expect(packageProof).toContain('test -r "$file"');
   for (const [architecture, pin] of Object.entries(pins.containerd.architectures)) {
     expect(dockerfile).toContain(`FROM tools AS containerd-${architecture}`);
     expect(dockerfile).toContain(`--checksum=sha256:${pin.sha256} ${pin.url}`);
   }
-  expect(dockerfile).toContain("FROM containerd-${TARGETARCH} AS containerd");
+  expect(dockerfile).toContain(`FROM containerd-\${TARGETARCH} AS containerd`);
   expect(dockerfile).toContain(pins.containerd.revision);
   for (const version of [
     "29.9.0",
