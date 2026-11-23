@@ -137,8 +137,12 @@ test.each([
     // Linux archive fidelity or a live Substrate Actor.
     const sources: SubstrateSourceHandoff = {
       async attach(workspaceID, uid, sql) {
-        await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
-        VALUES(${workspaceID},${uid}) ON CONFLICT DO NOTHING`;
+        if (!(await restore.lease(workspaceID, sql))) await f.admitActorSource(uid);
+        // The initial controller fixture starts after an already-granted import.
+        expect(await restore.lease(workspaceID, sql)).toMatchObject({
+          actorUID: uid,
+          owner: "actor",
+        });
       },
       async freezeActor(_workspace, _attempt, sql) {
         const [row] =
@@ -151,14 +155,11 @@ test.each([
         await sql`UPDATE factory.substrate_source SET owner='service',writer_epoch=writer_epoch+1,writable=true,
           service_base=checkpoint_id,checkpoint_id=NULL WHERE workspace_id=${f.workspaceID} AND owner='actor'`;
       },
-      async resume(_workspace, _attempt, sql) {
+      async resume(_workspace, _attempt, sql, inputStop = false) {
         const [row] =
           await sql`SELECT owner FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`;
-        if (row?.["owner"] === "service") {
+        if (row?.["owner"] === "service" && inputStop)
           await checkpoint(sql as typeof f.database.client);
-          await sql`UPDATE factory.substrate_source SET owner='actor',writer_epoch=writer_epoch+1,writable=true,
-            checkpoint_id=NULL WHERE workspace_id=${f.workspaceID}`;
-        }
       },
       async requireIndependent(_workspace, uid, sql) {
         const [row] =
@@ -201,7 +202,15 @@ test.each([
             authorization: `Bearer ${runtimeConnectorTokens("owned-native-secret", f.attemptID, 1).parent}`,
             "X-Factory-Runtime-Actor-UID": operation.actorUID,
             "X-Factory-Runtime-Generation": "1",
+            "X-Factory-Source-Protocol": "2",
           };
+          expect(await restore.lease(f.workspaceID)).toMatchObject({
+            actorUID: operation.actorUID,
+            owner: "service",
+            writable: false,
+            writerEpoch: Number(operation.sourceWriterEpoch) - 1,
+            checkpointID: operation.sourceCheckpointID,
+          });
           const restored = await restore.restoreEndpoint(
             new Request(`https://factory.test/internal/substrate-source/${f.attemptID}`, {
               headers,
@@ -210,10 +219,31 @@ test.each([
           );
           expect(restored.status).toBe(200);
           expect(await restored.json()).toMatchObject({
+            version: 2,
             inputStop: operation.assignment,
             readOnly: true,
             writerEpoch: operation.sourceWriterEpoch,
             checkpoint: { id: operation.sourceCheckpointID },
+          });
+          expect((await restore.lease(f.workspaceID))?.owner).toBe("service");
+          const committed = await restore.restoreEndpoint(
+            new Request(`https://factory.test/internal/substrate-source/${f.attemptID}`, {
+              method: "POST",
+              headers: { ...headers, "content-type": "application/json" },
+              body: JSON.stringify({
+                checkpointID: operation.sourceCheckpointID,
+                writerEpoch: operation.sourceWriterEpoch,
+              }),
+            }),
+            f.attemptID,
+          );
+          expect(committed.status).toBe(200);
+          expect(await restore.lease(f.workspaceID)).toMatchObject({
+            actorUID: operation.actorUID,
+            owner: "actor",
+            writable: true,
+            writerEpoch: operation.sourceWriterEpoch,
+            checkpointID: null,
           });
         }
         actor.metadata.version = String(Number(actor.metadata.version) + 1);
@@ -302,6 +332,13 @@ test.each([
         expect(operation.action).toBe("input-stop-result");
         const saved = await nativeInputStopIn(f.database.client, f.attemptID);
         if (!saved) throw Error("Stop was not persisted");
+        expect(await restore.lease(f.workspaceID)).toMatchObject({
+          actorUID: saved.actorUID,
+          owner: "actor",
+          writable: true,
+          writerEpoch: saved.sourceWriterEpoch,
+          checkpoint: { id: saved.sourceCheckpointID },
+        });
         return {
           data: JSON.stringify({
             ...saved.assignment,
@@ -339,7 +376,12 @@ test.each([
           if (!snapshot?.durableSnapshot) throw Error("Controlled ROOTFS missing");
           snapshot.durableSnapshot.state = "SNAPSHOT_STORAGE_STATE_PENDING";
         } else if (scenario === "maintenance-source-owner") {
-          await sources.resume(f.workspaceID, f.attemptID, f.database.client);
+          // Controlled already-committed import, intentionally not independent
+          // Source. Ordinary resume now leaves service ownership unchanged.
+          await checkpoint(f.database.client);
+          await f.database.client`UPDATE factory.substrate_source
+            SET owner='actor',writer_epoch=writer_epoch+1,writable=true,checkpoint_id=NULL
+            WHERE workspace_id=${f.workspaceID}`;
         } else if (scenario === "maintenance-incomplete-worker") {
           expect(await stop.confirm(f.changeID)).toBe(false);
           expect(

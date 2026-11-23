@@ -70,7 +70,7 @@ import {
 } from "../agent/runtime-api";
 import { CommandError } from "../command-error";
 import { admitComputeIn } from "../usage/compute";
-import { type SubstrateSourceHandoff } from "../workspace/source-api";
+import type { SubstrateSourceHandoff } from "../workspace/source-api";
 import { templateInitialSourceRole } from "../workspace/source-role-fence";
 import type { RuntimeHub } from "./hub";
 import { trackNativeOperation } from "./native-lock";
@@ -425,6 +425,7 @@ export function createSubstrateExecution(
   const retainedIntent = {
     ...config,
     actorSelector: config.workerSelector ?? substrateActorSelector(secret, attemptID),
+    ...(sources ? { sourceRestoreProtocol: 2 } : {}),
   };
   const endpoint = new URL(config.connectorURL);
   const egressRules = [
@@ -859,10 +860,17 @@ export function createSubstrateExecution(
         .where(
           and(
             eq(substrateSource.workspaceId, workspaceID),
-            eq(substrateSource.actorUid, operation.actorUID),
-            eq(substrateSource.owner, "actor"),
-            eq(substrateSource.writable, true),
-            isNull(substrateSource.checkpointId),
+            or(
+              and(
+                eq(substrateSource.actorUid, operation.actorUID),
+                eq(substrateSource.owner, "actor"),
+                eq(substrateSource.writable, true),
+                isNull(substrateSource.checkpointId),
+              ),
+              // No worker was assigned. V2 has not granted this Actor a Source
+              // writer yet; its saved independent tree remains authoritative.
+              eq(substrateSource.owner, "service"),
+            ),
           ),
         );
       if (!source)
@@ -990,7 +998,8 @@ export function createSubstrateExecution(
       );
     }
     if (userID) await currentGrant(sql, userID, true);
-    if (workspaceID && !operation.attempted) await sources?.resume(workspaceID, attemptID, sql);
+    if (workspaceID && !operation.attempted)
+      await sources?.resume(workspaceID, attemptID, sql, Boolean(stopID));
     await egress();
     if (signal?.aborted) return before;
     if (userID) await currentGrant(sql, userID, true);
@@ -1007,8 +1016,8 @@ export function createSubstrateExecution(
             and(
               eq(substrateSource.workspaceId, workspaceID ?? expression`NULL`),
               eq(substrateSource.actorUid, before.metadata.uid),
-              eq(substrateSource.owner, "actor"),
-              eq(substrateSource.writable, true),
+              eq(substrateSource.owner, "service"),
+              eq(substrateSource.writable, false),
               isNotNull(substrateSource.checkpoint),
             ),
           );
@@ -1017,7 +1026,7 @@ export function createSubstrateExecution(
           .update(substrateInputStop)
           .set({
             sourceCheckpointId: source.id,
-            sourceWriterEpoch: source.epoch,
+            sourceWriterEpoch: source.epoch + 1,
             resumeAttemptedAt: expression`now()`,
           })
           .where(
@@ -1541,8 +1550,7 @@ export function createSubstrateExecution(
     async supportsInitialSourceRole(sql: DatabaseTransaction) {
       return trackNativeOperation(
         (async () => {
-          if (!workspaceID || config.generation !== 1 || config.deployment !== "fresh-workspaces")
-            return false;
+          if (!workspaceID || config.deployment !== "fresh-workspaces") return false;
           const [db] = await sql<{ name: string }[]>`SELECT current_database() AS name`;
           if (db?.name !== config.database)
             throw new Error("Native adapter is limited to its explicitly owned database");
@@ -1558,7 +1566,7 @@ export function createSubstrateExecution(
             .where(
               and(
                 eq(substrateWorkspace.workspaceId, workspaceID),
-                eq(substrateWorkspace.generation, 1),
+                eq(substrateWorkspace.generation, config.generation),
               ),
             );
           if (!provision?.workloadImage) return false;
@@ -1567,6 +1575,7 @@ export function createSubstrateExecution(
           return templateInitialSourceRole(await profile(), {
             workspaceID,
             attemptID,
+            generation: config.generation,
             projectID: config.projectID,
             workloadImage: provision.workloadImage,
           });
@@ -1863,6 +1872,9 @@ export function createSubstrateExecution(
               generation: runtimeAttempt.generation,
               state: runtimeAttempt.state,
               actorUID: substrateBinding.actorUid,
+              sourceProtocol: expression<
+                string | null
+              >`${substrateBinding.intent}->>'sourceRestoreProtocol'`,
               deleted: expression<boolean>`${substrateBinding.deletedAt} IS NOT NULL`,
             })
             .from(runtimeAttempt)
@@ -1891,10 +1903,15 @@ export function createSubstrateExecution(
                     .where(
                       and(
                         eq(substrateSource.workspaceId, workspaceID),
-                        eq(substrateSource.actorUid, prior.actorUID),
                         eq(substrateSource.owner, "service"),
                         eq(substrateSource.writable, true),
-                        isNotNull(substrateSource.checkpoint),
+                        or(
+                          and(
+                            eq(substrateSource.actorUid, prior.actorUID),
+                            isNotNull(substrateSource.checkpoint),
+                          ),
+                          expression`${prior.sourceProtocol === "2"} AND ${substrateSource.serviceBase} IS NOT NULL`,
+                        ),
                       ),
                     )
                 : [];

@@ -33,6 +33,8 @@ checkout through authenticated Source routes, rather than owning another clone.
 While compute runs, Source is served by the Actor's development-user subprocess.
 The current ROOTFS Pause and final Stop paths transfer the complete checkout to
 Factory's independent Source owner; owner epochs revoke the previous access.
+Explicit Start admits that same independent checkout even if the IDE has never been opened.
+Creating or allocating an Actor does not transfer Source.
 
 OpenCode packages are installed during the runtime image build. The current cold
 entrypoint copies the packaged tools into the Dev Container and starts their
@@ -319,9 +321,21 @@ An explicit Workspace Start after confirmed Stop selects the next generation onl
 re-observing the original Actor's absence and independent Source. Every generation keeps its own
 Atespace, grant, template, Actor binding and creation attribution. New compute consumes the latest
 confirmed service-owned Source export, including saved offline edits, without reusing an old runtime
-identity. Source transfer freezes the service, confirms its complete export and stops its process
-before assigning the new writer. The authenticated restore response identifies both the new Actor
-and the checkpoint's original producer; the Connector rechecks the complete lease before publishing.
+identity. The version-2 restore GET freezes and confirms the service's complete export only when
+the exact admitted Actor requests it. Frozen service-owned Source stays readable; saves refuse
+without discarding editor buffers. A dedicated Source lock keeps these operations independent of
+the long-running native Resume lock.
+The authenticated response identifies both the recipient and the checkpoint's actual producer.
+After verifying and materializing the bundle and rechecking the complete lease, the Connector
+POSTs that exact checkpoint and planned owner epoch. Factory stops the old service and commits
+the Actor's writer grant before acknowledging it. Only that ACK permits the cold bootstrap marker,
+Docker or Stop-only execution. The ACK supplies the current Change writing role, including on an
+identical retry; the marker does not reuse an earlier GET's role.
+Lost ACKs may confirm the identical receipt; GET never replays an
+import over an already-granted Actor's tree.
+Final Stop before this v2 grant keeps the same independent saved checkout, including when a
+download was interrupted. Stop after the grant still requires the original Actor's confirmed
+export; an absent Parent is never proof that no writes happened.
 Ticket Start rechecks pending Agent Stop under the existing Change lock. Source durability cannot
 authorize replay of unsettled OpenCode input.
 

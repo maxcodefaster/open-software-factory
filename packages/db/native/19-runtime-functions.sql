@@ -283,9 +283,11 @@ BEGIN
           SELECT 1 FROM factory.runtime_attempt current
           JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
           JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
-          WHERE current.workspace_id=NEW.workspace_id AND current.generation=1
+          WHERE current.workspace_id=NEW.workspace_id
             AND current.project_id::text=OLD.seed->>'projectID' AND current.revision=OLD.seed->>'revision'
-            AND current.state='create-intended' AND current.stop_intended_at IS NULL
+            AND (current.state='create-intended' OR (current.state='starting'
+              AND new_binding.intent->>'sourceRestoreProtocol'='2'))
+            AND current.stop_intended_at IS NULL
             AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
             AND new_binding.create_attempted_at IS NOT NULL
             AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
@@ -304,18 +306,25 @@ BEGIN
             AND provision.intent->>'revision'=OLD.seed->>'revision'
             AND provision.intent->>'branch'=OLD.seed->>'branch'
             AND provision.intent->>'repositoryURL'=OLD.seed->>'repositoryURL'
-            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt other WHERE other.workspace_id=current.workspace_id AND other.id<>current.id))
+            AND NOT EXISTS(
+              SELECT 1 FROM factory.runtime_attempt other
+              LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=other.id
+              WHERE other.workspace_id=current.workspace_id AND other.id<>current.id
+                AND (other.generation<current.generation AND other.state='stopped'
+                  AND retired.deleted_at IS NOT NULL AND retired.intent->>'sourceRestoreProtocol'='2') IS NOT TRUE))
         THEN RAISE EXCEPTION 'Source first Actor transfer requires its confirmed seed and exact generation-one native binding'; END IF;
     ELSIF NOT EXISTS(
         SELECT 1 FROM factory.runtime_attempt predecessor
         JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
         JOIN factory.runtime_attempt current ON current.workspace_id=predecessor.workspace_id
-          AND current.generation=predecessor.generation+1
+          AND current.generation>predecessor.generation
         JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
         JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
         WHERE predecessor.workspace_id=NEW.workspace_id AND predecessor.state='stopped'
           AND old_binding.actor_uid=OLD.actor_uid AND old_binding.deleted_at IS NOT NULL
- AND current.state='create-intended' AND current.stop_intended_at IS NULL
+          AND (current.state='create-intended' OR (current.state='starting'
+            AND new_binding.intent->>'sourceRestoreProtocol'='2'))
+          AND current.stop_intended_at IS NULL
           AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
           AND new_binding.create_attempted_at IS NOT NULL
           AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
@@ -325,6 +334,13 @@ BEGIN
           AND new_binding.intent->>'templateUID'=provision.template#>>'{metadata,uid}'
           AND new_binding.intent->>'templateVersion'=provision.template#>>'{metadata,version}'
           AND new_binding.intent->>'templateSHA256'=provision.intent->>'templateSHA256'
+          AND NOT EXISTS(
+            SELECT 1 FROM factory.runtime_attempt skipped
+            LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=skipped.id
+            WHERE skipped.workspace_id=current.workspace_id
+              AND skipped.generation>predecessor.generation AND skipped.generation<current.generation
+              AND (skipped.state='stopped' AND retired.deleted_at IS NOT NULL
+                AND retired.intent->>'sourceRestoreProtocol'='2') IS NOT TRUE)
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=current.workspace_id AND newer.generation>current.generation))
       THEN RAISE EXCEPTION 'Source Actor transfer requires its confirmed stopped predecessor and current native successor'; END IF;
   END IF;
@@ -352,12 +368,18 @@ BEGIN
       OR (NEW.owner='service' AND NEW.service_base IS DISTINCT FROM OLD.checkpoint_id)
       THEN RAISE EXCEPTION 'Source transfer requires a completely confirmed frozen generation'; END IF;
     IF NEW.actor_uid=OLD.actor_uid AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-      WHERE a.workspace_id=NEW.workspace_id AND a.state='paused' AND b.actor_uid=NEW.actor_uid
+      WHERE a.workspace_id=NEW.workspace_id AND b.actor_uid=NEW.actor_uid
         AND b.checkpoint->>'actorUID'=NEW.actor_uid::text
         AND b.checkpoint->>'fidelity'='SNAPSHOT_FIDELITY_ROOTFS'
         AND b.checkpoint#>>'{durableSnapshot,state}'='SNAPSHOT_STORAGE_STATE_COMPLETED'
-        AND b.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
-         AND b.checkpoint->>'generation'=b.observation#>>'{status,lastAssignedGeneration}')
+        AND ((a.state='paused' AND b.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
+          AND b.checkpoint->>'generation'=b.observation#>>'{status,lastAssignedGeneration}')
+          OR (NEW.owner='actor' AND a.state='starting' AND a.stop_intended_at IS NULL
+            AND b.intent->>'sourceRestoreProtocol'='2' AND EXISTS(
+              SELECT 1 FROM factory.substrate_actor_rpc resumed
+              WHERE resumed.runtime_attempt_id=a.id AND resumed.actor_uid=NEW.actor_uid
+                AND resumed.action='resume' AND resumed.origin_checkpoint=b.checkpoint
+                AND resumed.attempted_at IS NOT NULL))))
       AND NOT (NEW.owner='service' AND EXISTS(
         SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
         WHERE a.workspace_id=NEW.workspace_id AND a.state='stopping' AND a.stop_intended_at IS NOT NULL
@@ -367,7 +389,17 @@ BEGIN
             WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)))
       THEN RAISE EXCEPTION 'Source transfer requires original durable paused ROOTFS or final Stop intent'; END IF;
   ELSIF NEW.writable IS DISTINCT FROM OLD.writable THEN
-    IF NOT OLD.writable OR NEW.writable OR NEW.writer_epoch<>OLD.writer_epoch+1 OR NEW.checkpoint_id IS NULL
+    IF OLD.owner='service' AND NOT OLD.writable AND NEW.writable
+      AND NEW.writer_epoch=OLD.writer_epoch+1 AND NEW.checkpoint_id IS NULL
+      AND EXISTS(
+        SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+        WHERE a.workspace_id=NEW.workspace_id AND a.state='stopping' AND a.stop_intended_at IS NOT NULL
+          AND b.intent->>'sourceRestoreProtocol'='2' AND b.actor_uid IS NOT NULL
+          AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected AND b.deleted_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+            WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation))
+      THEN NULL; -- No v2 writer grant was committed; retain the same saved service tree.
+    ELSIF NOT OLD.writable OR NEW.writable OR NEW.writer_epoch<>OLD.writer_epoch+1 OR NEW.checkpoint_id IS NULL
       THEN RAISE EXCEPTION 'Source freeze must advance the writer epoch'; END IF;
   ELSIF ROW(NEW.writer_epoch,NEW.checkpoint_id,NEW.service_base) IS DISTINCT FROM ROW(OLD.writer_epoch,OLD.checkpoint_id,OLD.service_base) THEN
     RAISE EXCEPTION 'Source lease facts cannot change outside freeze/transfer';
@@ -411,10 +443,13 @@ BEGIN
       OR (previous_generation IS NOT NULL AND (
         NEW.generation<>previous_generation+1 OR NOT EXISTS(
           SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-          JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id AND s.actor_uid=b.actor_uid
+          JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id
           WHERE a.workspace_id=NEW.workspace_id AND a.generation=previous_generation
  AND a.state='stopped' AND b.deleted_at IS NOT NULL
-            AND s.owner='service' AND s.writable AND s.checkpoint IS NOT NULL)))
+            AND s.owner='service' AND s.writable AND s.service_base IS NOT NULL
+            AND ((s.actor_uid=b.actor_uid AND s.checkpoint IS NOT NULL)
+              OR (b.intent->>'sourceRestoreProtocol'='2'
+                AND (s.checkpoint IS NOT NULL OR s.seed_confirmed_at IS NOT NULL))))))
       THEN RAISE EXCEPTION 'Native Workspace successor requires exact cleanup and independent Source'; END IF;
     IF NOT EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id
 

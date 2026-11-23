@@ -62,6 +62,7 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
           ${JSON.stringify({
             ...f.config,
             actorSelector: f.config.workerSelector,
+            sourceRestoreProtocol: 2,
             egressHosts: f.config.egressHosts ?? [],
             environment: { version: 0, secretKey: null },
             declaredApps: ["app"],

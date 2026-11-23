@@ -15,10 +15,16 @@ import {
   substrateWorkspaceGrantIn,
   substrateWorkspaceSourceIn,
 } from "../../apps/factory/src/runtime/substrate-grant";
-import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import {
+  createSubstrateWorkspaces,
+  type SubstrateInstallationConfiguration,
+} from "../../apps/factory/src/runtime/substrate-workspaces";
 import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
+import { objectDigest } from "../../apps/factory/src/storage/objects";
 import { computeAllocationIn } from "../../apps/factory/src/usage/journal-api";
+import { admitInitialSourceSeedIn } from "../../apps/factory/src/workspace/source-api";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
+import { admitInitialSource } from "../../apps/factory/src/workspace/source-initialization";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
@@ -27,6 +33,7 @@ import {
   type SubstrateCall,
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
 const starterSourceFile = (path: string) => !path.split(/[\\/]/).includes("node_modules");
@@ -384,6 +391,189 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
   }
 }, 60_000);
 
+test.each(["personal", "ticket"] as const)(
+  "direct %s Start admits its exact Source seed before native effects without opening Source",
+  async (kind) => {
+    const f = await substrateFixture("a".repeat(40), kind);
+    const directory = await mkdtemp(join(tmpdir(), "factory-start-seed-"));
+    const ca = join(directory, "ca.pem");
+    await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
+    const sources = createSubstrateSources(f.database, f.hub);
+    let effects = 0;
+    try {
+      if (kind === "ticket") {
+        const [approval] = await f.database.client<{ revision: string }[]>`
+          SELECT requirement_revision_id AS revision FROM factory.requirement_approval WHERE ticket_id=${f.ticketID}`;
+        if (!approval) throw new Error("Owned Ticket approval is missing");
+        await f.database.client`UPDATE factory.project_membership SET role='product-contributor'
+          WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
+        const turns = createAgentTurnStore(f.database);
+        const { turn } = await turns.admit(
+          {
+            kind: "change-start",
+            commandId: crypto.randomUUID(),
+            projectId: f.projectID,
+            ticketId: f.ticketID,
+            changeId: f.changeID,
+            createdBy: f.userID,
+            conversationId: null,
+          },
+          {
+            mode: "build",
+            modelId: "factory-coding-model",
+            skillRevisionIds: [],
+            requiredSkillRevisionIds: [],
+            conversationVersion: null,
+            requirementRevisionId: approval.revision,
+          },
+          (sql, record) => claimAgentWriterIn(sql, f.changeID, record.id, f.userID),
+        );
+        const writers = createChangeWriterController({
+          database: f.database,
+          agentUsername: "owned-agent",
+          protect: async () => {},
+          stopAgent: async () => {
+            throw new Error("No earlier Agent exists");
+          },
+          runtime: {
+            stop: async () => {
+              throw new Error("No earlier runtime exists");
+            },
+            get: async () => null,
+          },
+        });
+        expect(await writers.prepareAgent(f.changeID, turn.id)).toBe(true);
+        expect((await turns.claimPending(turn.id, 60_000))?.ownerToken).toBeTruthy();
+        await f.database
+          .client`DELETE FROM factory.development_workspace WHERE id=${f.workspaceID}`;
+      }
+      const branch =
+        kind === "ticket"
+          ? (
+              await f.database.client<{ branch: string }[]>`
+                SELECT branch_name AS branch FROM factory.change WHERE id=${f.changeID}`
+            )[0]?.branch
+          : "main";
+      const call: SubstrateCall = async (method) => {
+        if (method.startsWith("Get")) throw new SubstrateRPCError("NotFound", "absent");
+        effects++;
+        const [source] = await f.database.client`
+          SELECT actor_uid,owner,seed,seed_confirmed_at FROM factory.substrate_source
+          WHERE workspace_id=${f.workspaceID}`;
+        expect(source).toMatchObject({
+          actor_uid: null,
+          owner: "service",
+          seed_confirmed_at: null,
+          seed: {
+            workspaceID: f.workspaceID,
+            projectID: f.projectID,
+            repositoryURL: "https://example.invalid/fixture.git",
+            revision: "a".repeat(40),
+            branch,
+          },
+        });
+        expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+        throw new Error("owned-seeded-provisioning-boundary");
+      };
+      sources.startupContract = async () => undefined;
+      const runtime = createSubstrateWorkspaces(
+        f.database,
+        f.hub,
+        "owned-native-secret",
+        {
+          deployment: f.config.deployment,
+          database: f.config.database,
+          projectID: f.projectID,
+          connection: f.config.connection,
+          connectorURL: f.config.connectorURL,
+          profile: f.config.profile,
+          runtime: f.config.runtime,
+          provisioner: f.config.connection,
+          editorPrincipal: "user:system:serviceaccount:owned:factory-control",
+          factoryCAFile: ca,
+          workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
+          workerSelector: {
+            "factory.runtime/profile": f.config.profile,
+            "factory.dev/deployment": "owned",
+          },
+          egressHosts: [],
+        },
+        call,
+        call,
+        async () => null,
+        sources,
+      );
+      await expect(
+        runtime.start(f.userID, kind === "ticket" ? f.changeID : undefined),
+      ).rejects.toThrow("owned-seeded-provisioning-boundary");
+      expect(effects).toBe(1);
+      const retained = [
+        ...(await f.database
+          .client`SELECT seed FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ];
+      await expect(
+        runtime.start(f.userID, kind === "ticket" ? f.changeID : undefined),
+      ).rejects.toThrow("absent");
+      expect([
+        ...(await f.database
+          .client`SELECT seed FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ]).toEqual(retained);
+      expect(effects).toBe(1);
+    } finally {
+      await sources.close();
+      await f.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test("initial Source seed admission refuses missing history after any Runtime Attempt", async () => {
+  const f = await substrateFixture();
+  try {
+    await f.database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},
+          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
+      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
+        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
+    });
+    for (const state of ["create-intended", "stopped"]) {
+      await f.database.client`UPDATE factory.runtime_attempt
+        SET state=${state}::factory.runtime_attempt_state WHERE id=${f.attemptID}`;
+      await expect(
+        f.database.client.begin(async (sql) => {
+          await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+          const grant = await substrateWorkspaceGrantIn(
+            f.database,
+            sql,
+            f.workspaceID,
+            f.userID,
+            true,
+          );
+          await admitInitialSourceSeedIn(sql, {
+            workspaceID: f.workspaceID,
+            projectID: grant.projectID,
+            repositoryURL: "https://example.invalid/fixture.git",
+            revision: "a".repeat(40),
+            branch: "main",
+          });
+        }),
+      ).rejects.toThrow("Retained Source is missing; reinitialization refused");
+      await expect(
+        admitInitialSource(f.database, f.userID, { projectID: f.projectID }),
+      ).rejects.toThrow("Retained Source is missing; reinitialization refused");
+    }
+    expect(await f.database.client`SELECT workspace_id FROM factory.substrate_source`).toHaveLength(
+      0,
+    );
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
 test("devcontainer-only startPersisted retains commissioned Contributor, lost Actor create and native Source role fences", async () => {
   await mkdir(".factory/test-results", { recursive: true });
   const directory = await mkdtemp(resolve(".factory/test-results/native-ticket-controller-"));
@@ -471,7 +661,8 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     }
     throw new Error(`Unexpected ${method}`);
   };
-  const sources = createSubstrateSources(f.database, f.hub);
+  const blobs = memoryPrivateObjects();
+  const sources = createSubstrateSources(f.database, f.hub, blobs);
   const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
     configuration: config,
     sources,
@@ -591,22 +782,86 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     expect(agentEnvironment.FACTORY_BUILD_BROWSER_URL).toBe(
       `https://factory.test/internal/build-browser/${f.attemptID}`,
     );
+    const seeded = await sources.lease(f.workspaceID);
+    expect(seeded).toMatchObject({
+      actorUID: null,
+      owner: "service",
+      writable: true,
+      writerEpoch: 1,
+      seedConfirmedAt: null,
+    });
+    if (!seeded?.seed) throw new Error("Owned initial Ticket Source seed is missing");
+    // Controlled complete service export, not Linux archive or native acceptance.
+    // The real v2 receipt below must grant the Actor before synthetic readiness.
+    const checkpointID = crypto.randomUUID();
+    const bytes = new TextEncoder().encode("Owned imported Ticket Source fixture");
+    const checkpoint = {
+      id: checkpointID,
+      workspaceID: f.workspaceID,
+      actorUID: null,
+      seedID: seeded.seed.id,
+      writerEpoch: 2,
+      generation: 1,
+      bundle: {
+        version: 1,
+        bytes: bytes.length,
+        sha256: objectDigest(bytes),
+        chunks: [objectDigest(bytes)],
+      },
+    };
+    await f.database.client`UPDATE factory.substrate_source SET seed_confirmed_at=now()
+      WHERE workspace_id=${f.workspaceID}`;
+    await f.database.client`UPDATE factory.substrate_source
+      SET writable=false,writer_epoch=2,checkpoint_id=${checkpointID}
+      WHERE workspace_id=${f.workspaceID}`;
+    await blobs.put(
+      `workspace-source/v1/${f.workspaceID}/${checkpointID}/manifest.json`,
+      new TextEncoder().encode(JSON.stringify(checkpoint)),
+      "application/json",
+    );
+    await blobs.put(
+      `workspace-source/v1/${f.workspaceID}/${checkpointID}/chunk-0`,
+      bytes,
+      "application/octet-stream",
+    );
+    await f.database.client`UPDATE factory.substrate_source
+      SET generation=1,checkpoint=${JSON.stringify(checkpoint)}::jsonb
+      WHERE workspace_id=${f.workspaceID}`;
+    const headers = {
+      authorization: `Bearer ${runtimeConnectorTokens("owned-native-secret", f.attemptID, 1).parent}`,
+      "X-Factory-Runtime-Actor-UID": started?.native?.actorUID ?? "",
+      "X-Factory-Runtime-Generation": "1",
+      "X-Factory-Source-Protocol": "2",
+    };
     const restore = await sources.restoreEndpoint(
       new Request(`https://factory.test/internal/substrate-source/${f.attemptID}`, {
-        headers: {
-          authorization: `Bearer ${runtimeConnectorTokens("owned-native-secret", f.attemptID, 1).parent}`,
-          "X-Factory-Runtime-Actor-UID": started?.native?.actorUID ?? "",
-          "X-Factory-Runtime-Generation": "1",
-        },
+        headers,
       }),
       f.attemptID,
     );
     expect(restore.status).toBe(200);
     expect(await restore.json()).toMatchObject({
-      writerEpoch: 1,
+      version: 2,
+      writerEpoch: 3,
       changeWriterEpoch: 2,
       readOnly: true,
-      checkpoint: null,
+      checkpoint,
+    });
+    expect((await sources.lease(f.workspaceID))?.owner).toBe("service");
+    const committed = await sources.restoreEndpoint(
+      new Request(`https://factory.test/internal/substrate-source/${f.attemptID}`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ checkpointID, writerEpoch: 3 }),
+      }),
+      f.attemptID,
+    );
+    expect(committed.status).toBe(200);
+    expect(await sources.lease(f.workspaceID)).toMatchObject({
+      actorUID: started?.native?.actorUID,
+      owner: "actor",
+      writable: true,
+      writerEpoch: 3,
     });
     await f.database
       .client`UPDATE factory.agent_turn SET owner_expires_at=clock_timestamp()-interval '1 second' WHERE id=${turn.id}`;
@@ -730,22 +985,24 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
             authorization: `Bearer ${runtimeConnectorTokens("owned-native-secret", f.attemptID, 1).parent}`,
             "X-Factory-Runtime-Actor-UID": started?.native?.actorUID ?? "",
             "X-Factory-Runtime-Generation": "1",
+            "X-Factory-Source-Protocol": "2",
           },
         }),
         f.attemptID,
       );
     const handed = await currentRestore();
-    expect(handed.status).toBe(200);
-    expect(await handed.json()).toMatchObject({
-      writerEpoch: 1,
-      changeWriterEpoch: 3,
-      readOnly: false,
-    });
+    expect(handed.status).toBe(409); // A later writer must not replay the initial import.
+    const currentGrant = () =>
+      f.database.client.begin((sql) =>
+        substrateWorkspaceGrantIn(f.database, sql, f.workspaceID, developer, true),
+      );
+    expect(await currentGrant()).toMatchObject({ projectID: f.projectID, changeID: f.changeID });
     const [creator] = await f.database
       .client`SELECT created_by FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(creator?.["created_by"]).toBe(f.userID);
     await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID} AND user_id=${developer}`;
+    await expect(currentGrant()).rejects.toThrow("Developer access required");
     await expect(currentRestore()).rejects.toThrow("Developer access required");
   } finally {
     await sources.close();
@@ -1032,6 +1289,31 @@ test("first Source access admits a personal Source owner without creating native
     expect(await f.database.client`SELECT workspace_id FROM factory.substrate_source`).toHaveLength(
       1,
     );
+    const resume = f.database.coordination();
+    let admission: ReturnType<typeof admitInitialSource> | undefined;
+    try {
+      await resume`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+      admission = admitInitialSource(f.database, f.userID, { projectID: f.projectID });
+      expect(
+        await Promise.race([
+          admission,
+          Bun.sleep(1000).then(() => {
+            throw new Error("Existing Source admission waited behind native Resume");
+          }),
+        ]),
+      ).toBe(f.workspaceID);
+    } finally {
+      await resume`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+      await resume.end({ timeout: 1 });
+      await admission;
+    }
+    await f.database
+      .client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${f.userID}`;
+    await expect(
+      admitInitialSource(f.database, f.userID, { projectID: f.projectID }),
+    ).rejects.toThrow("Account access is disabled");
+    await f.database
+      .client`UPDATE factory.account_access SET disabled_at=NULL WHERE user_id=${f.userID}`;
     for (const operation of ["read", "write"])
       expect(
         (

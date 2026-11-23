@@ -38,9 +38,46 @@ export const initialSourceSeed = z.strictObject({
 export type InitialSourceSeed = z.infer<typeof initialSourceSeed>;
 type Database = ReturnType<typeof createDatabase>;
 
+/** The caller holds runtime authority and its Workspace lock; this admits no execution. */
+export async function admitInitialSourceSeedIn(
+  sql: DatabaseTransaction,
+  input: Omit<InitialSourceSeed, "version" | "id">,
+) {
+  await sql`SELECT pg_advisory_xact_lock(hashtext(${`source:${input.workspaceID}`}))`;
+  const db = drizzleTransaction(sql);
+  if (
+    (
+      await db
+        .select({ id: substrateSource.workspaceId })
+        .from(substrateSource)
+        .where(eq(substrateSource.workspaceId, input.workspaceID))
+    ).length
+  )
+    return;
+  if (
+    (
+      await db
+        .select({ id: runtimeAttempt.id })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.workspaceId, input.workspaceID))
+        .limit(1)
+    ).length
+  )
+    throw new CommandError("unavailable", "Retained Source is missing; reinitialization refused");
+  const seed = initialSourceSeed.parse({ ...input, version: 1, id: crypto.randomUUID() });
+  // The native constraint rechecks the exact existing Workspace and repository.
+  await db.insert(substrateSource).values({
+    workspaceId: seed.workspaceID,
+    actorUid: null,
+    owner: "service",
+    serviceBase: seed.id,
+    seed,
+  });
+}
+
 // Filesystem publication is an external fact. Commit it before exposing a
 // process, even when the file operation that requested Source later rolls back.
-// The caller holds the Workspace lock; this short connection must not reacquire
+// The caller holds the Source owner lock; this short connection must not reacquire
 // it or occupy the application pool behind the requesting transaction.
 export async function confirmInitialSourcePublication(
   database: Database,
@@ -71,7 +108,7 @@ export async function confirmInitialSourcePublication(
   }
 }
 
-/** Bind a seed only to the actual first provisioning, before freezing its writer. */
+/** Bind a seed only to its first recipient, after any ungranted v2 Actors were deleted. */
 export async function initialSourceActorIn(
   sql: Database["client"] | DatabaseTransaction,
   seed: InitialSourceSeed,
@@ -82,9 +119,11 @@ export async function initialSourceActorIn(
     SELECT current.id FROM factory.runtime_attempt current
     JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
     JOIN factory.substrate_workspace p ON p.workspace_id=current.workspace_id AND p.generation=current.generation
-    WHERE current.workspace_id=${seed.workspaceID} AND current.generation=1
+    WHERE current.workspace_id=${seed.workspaceID}
       AND current.project_id=${seed.projectID} AND current.revision=${seed.revision}
-      AND current.state='create-intended' AND current.stop_intended_at IS NULL
+      AND (current.state='create-intended'
+        OR (current.state='starting' AND binding.intent->>'sourceRestoreProtocol'='2'))
+      AND current.stop_intended_at IS NULL
       AND binding.actor_uid=${actorUID} AND NOT binding.create_rejected
       AND binding.create_attempted_at IS NOT NULL
       AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
@@ -93,7 +132,7 @@ export async function initialSourceActorIn(
       AND binding.observation#>>'{metadata,atespace}'=binding.atespace
       AND binding.intent->>'projectID'=${seed.projectID}
       AND binding.intent->>'workspaceID'=${seed.workspaceID}
-      AND binding.intent->>'generation'='1'
+      AND binding.intent->>'generation'=current.generation::text
       AND binding.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
       AND binding.intent->>'templateUID'=p.template#>>'{metadata,uid}'
       AND binding.intent->>'templateVersion'=p.template#>>'{metadata,version}'
@@ -104,11 +143,17 @@ export async function initialSourceActorIn(
       AND p.intent->>'branch'=${seed.branch}
       AND p.intent->>'repositoryURL'=${seed.repositoryURL}
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt other
-        WHERE other.workspace_id=current.workspace_id AND other.id<>current.id)`),
+        LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=other.id
+        WHERE other.workspace_id=current.workspace_id AND other.id<>current.id AND (
+          other.generation<current.generation AND other.state='stopped'
+          AND retired.deleted_at IS NOT NULL AND retired.intent->>'sourceRestoreProtocol'='2'
+          AND retired.intent->>'projectID'=${seed.projectID}
+          AND retired.intent->>'workspaceID'=${seed.workspaceID}
+          AND retired.intent->>'generation'=other.generation::text) IS NOT TRUE)`),
   ];
 }
 
-/** Source admission shares the normal Workspace lock, but creates no execution intent. */
+/** New seeds take runtime then Source locks; an existing authorized owner needs neither. */
 export async function admitInitialSource(
   database: Database,
   userID: string,
@@ -121,8 +166,6 @@ export async function admitInitialSource(
   const sql = database.coordination();
   let locked = false;
   try {
-    await sql`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceID}`}))`;
-    locked = true;
     const readIn = async (tx: DatabaseTransaction) => {
       const db = drizzleTransaction(tx);
       // PostgreSQL's OF lock target must be an unqualified relation alias.
@@ -176,17 +219,22 @@ export async function admitInitialSource(
       return { projectID, repository, approved, workspace };
     };
     const read = () => sql.begin(readIn);
-    const current = await read();
     const db = drizzleTransaction(sql);
-    if (
-      (
-        await db
-          .select({ id: substrateSource.workspaceId })
-          .from(substrateSource)
-          .where(eq(substrateSource.workspaceId, workspaceID))
-      ).length
-    )
-      return workspaceID;
+    const retained = async () =>
+      Boolean(
+        (
+          await db
+            .select({ id: substrateSource.workspaceId })
+            .from(substrateSource)
+            .where(eq(substrateSource.workspaceId, workspaceID))
+        ).length,
+      );
+    let current = await read();
+    if (await retained()) return workspaceID;
+    await sql`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceID}`}))`;
+    locked = true;
+    current = await read();
+    if (await retained()) return workspaceID;
     // Missing retained Actor Source is never permission to clone over its history.
     if (
       (
@@ -196,7 +244,7 @@ export async function admitInitialSource(
           .where(eq(runtimeAttempt.workspaceId, workspaceID))
       ).length
     )
-      return workspaceID;
+      throw new CommandError("unavailable", "Retained Source is missing; reinitialization refused");
     const revision =
       current.workspace?.revision ??
       current.approved?.revision ??
@@ -206,15 +254,6 @@ export async function admitInitialSource(
       ));
     const branch =
       current.workspace?.branch ?? current.approved?.branch ?? current.repository.branch;
-    const seed = initialSourceSeed.parse({
-      version: 1,
-      id: crypto.randomUUID(),
-      workspaceID,
-      projectID: current.projectID,
-      repositoryURL: current.repository.repositoryURL,
-      revision,
-      branch,
-    });
     await sql.begin(async (tx) => {
       if (JSON.stringify(await readIn(tx)) !== JSON.stringify(current))
         throw new CommandError("conflict", "Project source changed before initialization");
@@ -234,12 +273,12 @@ export async function admitInitialSource(
       await workspaceAuthorityIn(tx, workspaceID, userID);
       // The seed identity is durable before clone or process creation. It is
       // not an Actor, Runtime Attempt, ROOTFS snapshot or inference admission.
-      await transaction.insert(substrateSource).values({
-        workspaceId: workspaceID,
-        actorUid: null,
-        owner: "service",
-        serviceBase: seed.id,
-        seed,
+      await admitInitialSourceSeedIn(tx, {
+        workspaceID,
+        projectID: current.projectID,
+        repositoryURL: current.repository.repositoryURL,
+        revision,
+        branch,
       });
     });
     return workspaceID;

@@ -266,7 +266,7 @@ test.each([
   },
 );
 
-test("initial Workspace capacity continuation preserves the real original Source lease", async () => {
+test("initial Workspace capacity continuation preserves its independent editable Source seed", async () => {
   const f = await nativeRuntimeFixture();
   const runtime = f.controller();
   let reject = true;
@@ -282,7 +282,14 @@ test("initial Workspace capacity continuation preserves the real original Source
       f.database.client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`;
     const original = await source();
     expect(original).toHaveLength(1);
-    expect(original[0]).toMatchObject({ owner: "actor", writable: true });
+    expect(original[0]).toMatchObject({
+      owner: "service",
+      actor_uid: null,
+      writable: true,
+      writer_epoch: "1",
+      checkpoint_id: null,
+      generation: "0",
+    });
     await runtime.start(f.projectID, f.userID);
     expect(await source()).toEqual(original);
     expect(f.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);

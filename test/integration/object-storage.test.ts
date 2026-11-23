@@ -57,6 +57,7 @@ test("Source-only retained checkpoints require every matching chunk and manifest
   const actorUID = crypto.randomUUID();
   const bytes = new Uint8Array((1 << 20) + 37).fill(7);
   const chunks = [bytes.slice(0, 1 << 20), bytes.slice(1 << 20)];
+  f.hub.sourceConnected = () => true;
   f.hub.parentOperation = async () => ({});
   f.hub.request = async (_attempt, channel, request, path) => {
     expect(channel).toBe("source");
@@ -77,7 +78,7 @@ test("Source-only retained checkpoints require every matching chunk and manifest
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
         VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
     });
-    await source.attach(f.workspaceID, actorUID, f.database.client);
+    await f.admitActorSource(actorUID);
     await source.freezeActor(f.workspaceID, f.attemptID, f.database.client);
     const before = await source.lease(f.workspaceID);
     expect(before).toMatchObject({
@@ -202,7 +203,8 @@ test("Source-only startup rejects a full bundle checksum mismatch even when ever
         VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
         VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
-      await source.attach(f.workspaceID, actorUID, sql);
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${f.workspaceID},${actorUID})`;
       await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,checkpoint_id=${saved.id} WHERE workspace_id=${f.workspaceID}`;
       await sql`UPDATE factory.substrate_source SET generation=1,checkpoint=${JSON.stringify(saved)}::text::jsonb WHERE workspace_id=${f.workspaceID}`;
     });

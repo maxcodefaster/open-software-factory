@@ -1,5 +1,5 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 import { z } from "zod";
+import type { DatabaseTransaction } from "../../../../packages/db/src/client";
 
 // These are internal calls under the caller's validated Turn/Change transaction.
 // The ordinary human handoff has neither mode and always needs its real fence.
@@ -33,7 +33,7 @@ const sourceBootstrap = z.object({
   sourceHandoff: z.literal(true),
   assignment: z.object({
     runtimeAttemptId: z.string(),
-    generation: z.literal(1),
+    generation: z.number().int().positive(),
     repositoryIdentity: z.string(),
     workspaceFolder: z.literal("/home/rootless/persist/project"),
     connectorStateDir: z.literal("/home/rootless/persist/connector"),
@@ -46,7 +46,13 @@ const sourceBootstrap = z.object({
 // Never persist or return the credential-bearing bootstrap body.
 export function templateInitialSourceRole(
   value: unknown,
-  identity: { attemptID: string; workspaceID: string; projectID: string; workloadImage: string },
+  identity: {
+    attemptID: string;
+    generation: number;
+    workspaceID: string;
+    projectID: string;
+    workloadImage: string;
+  },
 ) {
   const parsed = retainedBootstrapTemplate.safeParse(value);
   if (!parsed.success) return false;
@@ -64,6 +70,7 @@ export function templateInitialSourceRole(
   }
   return (
     bootstrap.assignment.runtimeAttemptId === identity.attemptID &&
+    bootstrap.assignment.generation === identity.generation &&
     bootstrap.assignment.repositoryIdentity === identity.projectID &&
     bootstrap.source.workspaceId === identity.workspaceID &&
     bootstrap.source.projectId === identity.projectID
@@ -115,22 +122,41 @@ export async function initialSourceRoleIn(
       AND binding.observation#>>'{metadata,uid}'=binding.actor_uid::text
       AND binding.observation#>>'{status,state}'='ACTOR_STATE_RESUMING'
       AND binding.intent->>'deployment'='fresh-workspaces'
+      AND binding.intent->>'sourceRestoreProtocol'='2'
     JOIN factory.substrate_actor_rpc resumed ON resumed.runtime_attempt_id=a.id
       AND resumed.action='resume' AND resumed.origin_key='initial'
       AND resumed.origin_checkpoint IS NULL AND resumed.actor_uid=binding.actor_uid
       AND resumed.attempted_at IS NOT NULL AND resumed.outcome IS NULL AND resumed.stop_id IS NULL
     JOIN factory.substrate_workspace provision ON provision.workspace_id=workspace.id
-      AND provision.generation=1 AND provision.template IS NOT NULL
+      AND provision.generation=a.generation AND provision.template IS NOT NULL
       AND provision.intent#>>'{configuration,deployment}'='fresh-workspaces'
     JOIN factory.substrate_source source ON source.workspace_id=workspace.id
       AND source.actor_uid=binding.actor_uid AND source.owner='actor' AND source.writable
-      AND source.writer_epoch=1 AND source.generation=0 AND source.checkpoint_id IS NULL
-      AND source.checkpoint IS NULL AND source.service_base IS NULL
+      AND source.checkpoint_id IS NULL AND source.seed_confirmed_at IS NOT NULL
+      AND source.service_base::text=source.seed->>'id'
+      AND source.seed->>'workspaceID'=workspace.id::text
+      AND source.seed->>'projectID'=a.project_id::text AND source.seed->>'revision'=a.revision
+      AND source.seed->>'repositoryURL'=provision.intent->>'repositoryURL'
+      AND source.seed->>'branch'=provision.intent->>'branch'
+      AND source.checkpoint->>'workspaceID'=workspace.id::text
+      AND source.checkpoint->'actorUID'='null'::jsonb
+      AND source.checkpoint->'seedID'=source.seed->'id'
+      AND source.generation>0
+      AND (source.checkpoint->>'generation')::bigint=source.generation
+      AND (source.checkpoint->>'writerEpoch')::bigint+1=source.writer_epoch
     WHERE workspace.id=${workspaceID} AND a.id=${attemptID}
-      AND a.generation=1 AND a.state='starting' AND a.ready_at IS NULL
+      AND a.state='starting' AND a.ready_at IS NULL
       AND a.failure IS NULL AND a.stop_intended_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
         WHERE newer.workspace_id=workspace.id AND newer.generation>a.generation)
+      AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt other
+        LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=other.id
+        WHERE other.workspace_id=workspace.id AND other.id<>a.id AND (
+          other.generation<a.generation AND other.state='stopped'
+          AND retired.deleted_at IS NOT NULL AND retired.intent->>'sourceRestoreProtocol'='2'
+          AND retired.intent->>'projectID'=a.project_id::text
+          AND retired.intent->>'workspaceID'=workspace.id::text
+          AND retired.intent->>'generation'=other.generation::text) IS NOT TRUE)
       AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=change.id)
       AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop WHERE runtime_attempt_id=a.id)
       AND NOT EXISTS(SELECT 1 FROM factory.substrate_actor_rpc other

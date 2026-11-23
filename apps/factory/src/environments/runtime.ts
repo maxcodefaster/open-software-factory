@@ -12,6 +12,8 @@ import {
   projectImagePreparation,
   runtimeAttempt,
   runtimeEnvironmentIntent,
+  substrateBinding,
+  substrateSource,
 } from "../../../../packages/db/src/schema";
 import {
   type EnvironmentBundle,
@@ -132,6 +134,11 @@ export function createRuntimeEnvironmentEndpoint(database: Database, secrets: En
           .select({
             generation: attempt.generation,
             parentHash: attempt.parentConnectorTokenHash,
+            workspaceID: attempt.workspaceId,
+            sourceCommitted: expression<boolean>`(${substrateSource.owner}='actor'
+              AND ${substrateSource.writable}
+              AND ${substrateSource.actorUid}=${substrateBinding.actorUid}
+              AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL)`,
             verification: expression<boolean>`COALESCE(${attempt.isolatedKind}='verification',false)`,
             secretKey: runtimeEnvironmentIntent.secretKey,
             version: runtimeEnvironmentIntent.version,
@@ -141,6 +148,8 @@ export function createRuntimeEnvironmentEndpoint(database: Database, secrets: En
             runtimeEnvironmentIntent,
             eq(runtimeEnvironmentIntent.runtimeAttemptId, attempt.id),
           )
+          .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, attempt.id))
+          .leftJoin(substrateSource, eq(substrateSource.workspaceId, attempt.workspaceId))
           .where(
             and(
               eq(attempt.id, attemptID),
@@ -152,6 +161,7 @@ export function createRuntimeEnvironmentEndpoint(database: Database, secrets: En
         const hash = hashConnectorToken(token);
         if (
           !runtime ||
+          (runtime.workspaceID !== null && runtime.sourceCommitted !== true) ||
           runtime.generation !== Number(request.headers.get("x-factory-runtime-generation")) ||
           runtime.parentHash.length !== hash.length ||
           !timingSafeEqual(Buffer.from(hash), Buffer.from(runtime.parentHash))

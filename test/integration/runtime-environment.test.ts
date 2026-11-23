@@ -22,9 +22,11 @@ test("runtime environment freezes version, authenticates parent generation, isol
     ownedFixture = owned;
     await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     const values = new Map<string, StoredEnvironment>();
+    let credentialReads = 0;
     const secrets = {
       configured: true,
       async read(key: string) {
+        credentialReads++;
         return values.get(key);
       },
       async create(key: string, value: StoredEnvironment) {
@@ -89,6 +91,18 @@ test("runtime environment freezes version, authenticates parent generation, isol
     expect((await endpoint(request(developmentAttempt, token, 1), developmentAttempt)).status).toBe(
       401,
     );
+    const readsBeforeBootstrap = credentialReads;
+    expect((await endpoint(request(), developmentAttempt)).status).toBe(401);
+    expect(credentialReads).toBe(readsBeforeBootstrap);
+    // Controlled already-committed Source grant. The cold import/commit protocol
+    // is exercised separately, not simulated by the environment endpoint.
+    const actorUID = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`UPDATE factory.substrate_binding SET actor_uid=${actorUID},create_attempted_at=now()
+        WHERE runtime_attempt_id=${developmentAttempt}`;
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${owned.workspaceID},${actorUID})`;
+    });
     const response = await endpoint(request(), developmentAttempt);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect((await response.json()).bundle.variables.map((v: { name: string }) => v.name)).toEqual([

@@ -15,28 +15,38 @@ test("final Stop hands off a confirmed Source export without ROOTFS and cannot r
   let actor: ReturnType<typeof f.actor> | undefined;
   const effects: string[] = [];
   const source = createSubstrateSources(f.database, f.hub, memoryPrivateObjects());
-  const controller = await f.controller(async (method) => {
-    if (method === "GetAtespace") return f.space;
-    if (method === "GetActorTemplate") return f.template;
-    if (method === "GetActor") {
-      if (!actor) throw new SubstrateRPCError("NotFound", "absent");
-      return structuredClone(actor);
-    }
-    effects.push(method);
-    if (method === "CreateActor") {
-      actor = await f.createdActor();
-      return structuredClone(actor);
-    }
-    if (method === "ResumeActor" && actor) {
-      actor.metadata.version = "2";
-      actor.status = {
-        state: "ACTOR_STATE_RUNNING",
-        workerAssignment: { sandboxRuntime: f.config.runtime },
-      };
-      return { actor: structuredClone(actor) };
-    }
-    throw new Error(`Unexpected native effect ${method}`);
-  }, source);
+  const controller = await f.controller(
+    async (method) => {
+      if (method === "GetAtespace") return f.space;
+      if (method === "GetActorTemplate") return f.template;
+      if (method === "GetActor") {
+        if (!actor) throw new SubstrateRPCError("NotFound", "absent");
+        return structuredClone(actor);
+      }
+      effects.push(method);
+      if (method === "CreateActor") {
+        actor = await f.createdActor();
+        return structuredClone(actor);
+      }
+      if (method === "ResumeActor" && actor) {
+        actor.metadata.version = "2";
+        actor.status = {
+          state: "ACTOR_STATE_RUNNING",
+          workerAssignment: { sandboxRuntime: f.config.runtime },
+        };
+        return { actor: structuredClone(actor) };
+      }
+      throw new Error(`Unexpected native effect ${method}`);
+    },
+    {
+      ...source,
+      async attach(workspaceID, actorUID, sql) {
+        // Controlled already-granted Source, independent of cold import proof.
+        await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${workspaceID},${actorUID})`;
+      },
+    },
+  );
   const bytes = new TextEncoder().encode("controlled complete Source export");
   const bundle = {
     version: 1,
@@ -48,7 +58,6 @@ test("final Stop hands off a confirmed Source export without ROOTFS and cannot r
     await controller.start(f.projectID, f.userID);
     const uid = actor?.metadata.uid;
     if (!uid) throw new Error("Original native Actor is missing");
-    await source.attach(f.workspaceID, uid, f.database.client);
     f.hub.sourceConnected = () => true;
     f.hub.parentOperation = async () => ({});
     f.hub.request = async (_id, _channel, _request, path) =>
@@ -125,7 +134,7 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.change_writer SET state='human',epoch=42,user_id=${f.userID} WHERE change_id=${f.changeID}`;
     });
-    await native.attach(f.workspaceID, actorUID, f.database.client);
+    await f.admitActorSource(actorUID);
     const request = () =>
       new Request("https://factory.test/source/write", {
         method: "POST",
@@ -140,12 +149,12 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
     await source.fenceChange(f.changeID, "43", false);
     expect(calls.at(-1)?.body).toEqual({ writerEpoch: 43, writable: false });
     expect((await native.lease(f.workspaceID))?.writerEpoch).toBe(1);
-    await lifecycle`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lifecycle`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
     held = true;
     await expect(source.fenceChange(f.changeID, "44", false)).rejects.toThrow(
       "Source owner is busy",
     );
-    await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lifecycle`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     held = false;
     await f.database
       .client`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,epoch=44 WHERE change_id=${f.changeID}`;
@@ -168,7 +177,7 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
         to_regclass('factory.factorybox_worker') AS worker`),
     ]).toEqual([{ source: null, worker: null }]);
   } finally {
-    if (held) await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    if (held) await lifecycle`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     await lifecycle.end({ timeout: 1 });
     await source.close();
     await f.dispose();
@@ -213,7 +222,7 @@ test("native editor metadata queues brief contention under the existing exclusiv
       await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
     });
-    await native.attach(f.workspaceID, actorUID, f.database.client);
+    await f.admitActorSource(actorUID);
     reads.push(source.forward(f.workspaceID, f.userID, "read", request()));
     await entered.promise;
     for (let i = 0; i < 3; i++)
@@ -223,7 +232,7 @@ test("native editor metadata queues brief contention under the existing exclusiv
     for (const response of await completed) expect(response.status).toBe(200);
     expect(calls).toBe(4);
     expect(maximumActive).toBe(1);
-    await lifecycle`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lifecycle`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
     held = true;
     await expect(source.forward(f.workspaceID, f.userID, "read", request())).rejects.toThrow(
       "Source owner is busy",
@@ -239,7 +248,7 @@ test("native editor metadata queues brief contention under the existing exclusiv
     release.resolve();
     if (timer) clearTimeout(timer);
     await Promise.allSettled(reads);
-    if (held) await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    if (held) await lifecycle`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     await lifecycle.end({ timeout: 1 });
     await source.close();
     await f.dispose();
@@ -329,7 +338,7 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     await controller.start(f.projectID, f.userID);
     const uid = (await controller.get(f.attemptID))?.native?.actorUID;
     if (!uid) throw new Error("original Actor fixture UID missing");
-    await source.attach(f.workspaceID, uid, f.database.client);
+    await f.admitActorSource(uid);
     const token = runtimeConnectorTokens("owned-native-secret", f.attemptID, 1).parent;
     const request = (extra: Record<string, string> = {}) =>
       new Request(`https://factory.test/internal/substrate-source/${f.attemptID}`, {
@@ -340,7 +349,8 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
           ...extra,
         },
       });
-    expect((await source.restoreEndpoint(request(), f.attemptID)).status).toBe(200);
+    // A granted Actor must never replay its initial import over later writes.
+    expect((await source.restoreEndpoint(request(), f.attemptID)).status).toBe(403);
     expect(
       (
         await source.restoreEndpoint(
@@ -353,11 +363,6 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
       (await source.restoreEndpoint(request({ "X-Factory-Runtime-Generation": "2" }), f.attemptID))
         .status,
     ).toBe(403);
-    await f.database
-      .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID}`;
-    await expect(source.restoreEndpoint(request(), f.attemptID)).rejects.toThrow();
-    await f.database
-      .client`UPDATE factory.project_membership SET role='developer' WHERE project_id=${f.projectID}`;
     checkpointFailure = "ownership-mode";
     await expect(source.freezeActor(f.workspaceID, f.attemptID, f.database.client)).rejects.toThrow(
       "Complete Source checkpoint is unavailable (HTTP 503; ownership-mode); original owner remains fenced",
@@ -470,12 +475,11 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     });
     const lifecycle = f.database.coordination();
     try {
-      await lifecycle`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
-      // A concurrent status read must not start another writable Source process
-      // while Resume or a current file operation owns the Workspace lock.
+      await lifecycle`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
+      // Status cannot start another Source process during an ownership change.
       expect(await source.available(f.workspaceID)).toBe(false);
     } finally {
-      await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+      await lifecycle`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
       await lifecycle.end({ timeout: 1 });
     }
     await expect(
@@ -566,7 +570,8 @@ test("native Ticket Source forwards Change writer epochs and handoff fences, nev
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change_writer SET state='human',epoch=42,user_id=${f.userID} WHERE change_id=${f.changeID}`;
-      await native.attach(f.workspaceID, uid, sql);
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${f.workspaceID},${uid})`;
     });
     const request = () =>
       new Request("https://factory.test/source", {
@@ -594,11 +599,11 @@ test("native Ticket Source forwards Change writer epochs and handoff fences, nev
     fenceConfirmed = false;
     await expect(source.fenceChange(f.changeID, "44", false)).rejects.toThrow("unconfirmed");
     fenceConfirmed = true;
-    await lifecycle`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lifecycle`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
     try {
       await expect(source.fenceChange(f.changeID, "44", false)).rejects.toThrow("busy");
     } finally {
-      await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+      await lifecycle`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     }
     await f.database
       .client`UPDATE factory.change_writer SET state='unassigned',user_id=NULL,epoch=44 WHERE change_id=${f.changeID}`;

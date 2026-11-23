@@ -119,7 +119,8 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       await sql`UPDATE factory.change SET runtime_attempt_id=${owned.attemptID} WHERE id=${owned.changeID}`;
     });
     const source = createSubstrateSources(owned.database, hub);
-    await source.attach(workspace.id, actorUID, owned.database.client);
+    await owned.database.client`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+      VALUES(${workspace.id},${actorUID})`;
     sources = createWorkspaceSourceController(owned.database, hub, source);
     await sources.ensure(workspace.id, owned.userID);
     await eventually(

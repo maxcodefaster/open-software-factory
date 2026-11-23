@@ -45,6 +45,9 @@ to inspect or edit the source. Its first access prepares a pinned canonical chec
 starting an Actor, Docker, Project hooks or inference. The first explicit compute Start imports
 the latest saved checkout before Project execution. Open the Preview to use the App. The Substrate
 integration uses cold restart rather than promising continuity of running processes.
+Starting compute without opening the IDE first admits the same independent Source, not another
+checkout. Native allocation alone does not transfer it: the Actor must verify its import and
+confirm the exact checkpoint before it can start Docker or Project work.
 An existing standard Dev Container is enough for Workspace compute and Coding; `.factory/system.json`
 and a Factory verification workflow are not prerequisites for that development path. The pinned
 Dev Containers CLI selects the actual container folder and user, including its default folder

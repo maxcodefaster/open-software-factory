@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +44,7 @@ type sourceRestoreCheckpoint struct {
 	Bundle      workspacefiles.Bundle `json:"bundle"`
 }
 type sourceRestoreResponse struct {
+	Version            int                      `json:"version"`
 	ActorUID           string                   `json:"actorUID"`
 	CheckpointActorUID string                   `json:"checkpointActorUID"`
 	CheckpointSeedID   *string                  `json:"checkpointSeedID"`
@@ -55,20 +58,14 @@ type sourceRestoreResponse struct {
 var sourceRestoreUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorUID string, generation uint64) error {
-	if reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) || generation == 0 ||
-		reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 {
+	if reply.Version != 2 || reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) || generation == 0 ||
+		reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 || reply.Checkpoint == nil {
 		return errors.New("Source restore lease invalid")
 	}
 	saved := reply.Checkpoint
 	if reply.InputStop != nil && (reply.InputStop.validate() != nil || !reply.ReadOnly ||
-		reply.InputStop.Mode != "interrupt" || saved == nil || reply.CheckpointActorUID != actorUID) {
+		reply.InputStop.Mode != "interrupt" || reply.CheckpointActorUID != actorUID) {
 		return errors.New("input Stop requires the original read-only Source checkpoint")
-	}
-	if saved == nil {
-		if reply.CheckpointActorUID != "" || reply.CheckpointSeedID != nil {
-			return errors.New("Source restore checkpoint provenance invalid")
-		}
-		return nil
 	}
 	bundle := saved.Bundle
 	// Factory binds this checkpoint's producer to the current Source lease.
@@ -76,16 +73,17 @@ func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorU
 	// it never adopts that Actor's runtime identity or resumes its snapshot.
 	actorCheckpoint := saved.ActorUID == reply.CheckpointActorUID && sourceRestoreUUID.MatchString(saved.ActorUID) &&
 		saved.SeedID == nil && reply.CheckpointSeedID == nil
-	// A Source-service export predates every Actor. Only the actual first
-	// assignment may import its explicit seed, never a later generation or Stop.
+	// Factory proves that no predecessor acquired Source before admitting a seed,
+	// including successors of stopped, never-granted Actors. Generation alone
+	// cannot establish that proof. A Stop-only restore still requires its Actor.
 	seedCheckpoint := saved.ActorUID == "" && reply.CheckpointActorUID == "" &&
 		saved.SeedID != nil && reply.CheckpointSeedID != nil && *saved.SeedID == *reply.CheckpointSeedID &&
-		sourceRestoreUUID.MatchString(*saved.SeedID) && generation == 1 && reply.InputStop == nil
+		sourceRestoreUUID.MatchString(*saved.SeedID) && reply.InputStop == nil
 	if !actorCheckpoint && !seedCheckpoint {
 		return errors.New("Source restore checkpoint provenance invalid")
 	}
 	if saved.WorkspaceID != workspaceID || !sourceRestoreUUID.MatchString(saved.ID) || saved.Generation == 0 ||
-		saved.WriterEpoch >= reply.WriterEpoch || bundle.Version != 1 || bundle.Bytes <= 0 ||
+		saved.WriterEpoch != reply.WriterEpoch-1 || bundle.Version != 1 || bundle.Bytes <= 0 ||
 		bundle.Bytes > workspacefiles.MaxSourceBundleBytes ||
 		len(bundle.Chunks) != int((bundle.Bytes+workspacefiles.SourceChunkBytes-1)/workspacefiles.SourceChunkBytes) {
 		return errors.New("Source restore identity/fidelity invalid")
@@ -94,6 +92,9 @@ func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorU
 }
 
 func sameSourceRestoreLease(current, original sourceRestoreResponse) bool {
+	// Policy may advance while the same immutable Source is imported. The
+	// final commit ACK, not either GET, supplies the role for native admission.
+	current.ChangeWriterEpoch, current.ReadOnly = original.ChangeWriterEpoch, original.ReadOnly
 	return reflect.DeepEqual(current, original)
 }
 
@@ -144,6 +145,110 @@ func readSubstrateSourceRestore(ctx context.Context, client *http.Client, reques
 	}
 }
 
+// Unlike checkpoint reads, this is a mutation with a possibly lost ACK. Retry
+// only these fixed bytes and identity, never lease acquisition or materialization.
+// Only an exact ACK may replace the lease's role with its current committed role.
+func commitSubstrateSourceRestore(ctx context.Context, client *http.Client, lease *http.Request, reply *sourceRestoreResponse) error {
+	if lease.Method != http.MethodGet || lease.URL.Scheme != "https" || reply == nil || reply.Checkpoint == nil || reply.Version != 2 {
+		return errors.New("Source restore commit requires its authenticated HTTPS v2 lease")
+	}
+	payload, err := json.Marshal(struct {
+		CheckpointID string `json:"checkpointID"`
+		WriterEpoch  uint64 `json:"writerEpoch"`
+	}{reply.Checkpoint.ID, reply.WriterEpoch})
+	if err != nil {
+		return err
+	}
+	type acknowledgement struct {
+		Version      int    `json:"version"`
+		ActorUID     string `json:"actorUID"`
+		CheckpointID string `json:"checkpointID"`
+		WriterEpoch  uint64 `json:"writerEpoch"`
+	}
+	expected := acknowledgement{2, reply.ActorUID, reply.Checkpoint.ID, reply.WriterEpoch}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	delay := 100 * time.Millisecond
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, lease.URL.String(), bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		request.Header = lease.Header.Clone()
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err == nil {
+			if response.StatusCode == http.StatusOK {
+				body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
+				response.Body.Close()
+				if len(body) > 4096 {
+					return errors.New("Source restore commit ACK exceeds bound")
+				}
+				if readErr == nil {
+					var ack struct {
+						acknowledgement
+						ChangeWriterEpoch uint64 `json:"changeWriterEpoch"`
+						ReadOnly          *bool  `json:"readOnly"`
+					}
+					d := json.NewDecoder(bytes.NewReader(body))
+					d.DisallowUnknownFields()
+					if d.Decode(&ack) != nil || d.Decode(new(any)) != io.EOF || ack.acknowledgement != expected ||
+						ack.ChangeWriterEpoch == 0 || ack.ReadOnly == nil || (reply.InputStop != nil && !*ack.ReadOnly) {
+						return errors.New("Source restore commit ACK differs")
+					}
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					reply.ChangeWriterEpoch, reply.ReadOnly = ack.ChangeWriterEpoch, *ack.ReadOnly
+					return nil
+				}
+				err = readErr
+			} else {
+				response.Body.Close()
+				if response.StatusCode != http.StatusBadGateway && response.StatusCode != http.StatusServiceUnavailable && response.StatusCode != http.StatusGatewayTimeout {
+					return errors.New("Source restore commit authority unavailable")
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			var invalid *tls.CertificateVerificationError
+			var record tls.RecordHeaderError
+			var alert tls.AlertError
+			var remote *net.OpError
+			if errors.As(err, &invalid) || errors.As(err, &record) || errors.As(err, &alert) ||
+				(errors.As(err, &remote) && remote.Op == "remote error") {
+				return errors.New("Source restore commit serving identity is invalid")
+			}
+			var requestError *url.Error
+			if errors.As(err, &requestError) {
+				err = requestError.Err
+			}
+			var network net.Error
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.As(err, &network) {
+				return errors.New("Source restore commit transport rejected")
+			}
+		}
+		if attempt == 4 {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay *= 2
+	}
+	return errors.New("Source restore commit unconfirmed")
+}
+
 // Invoked inside the verified RootlessKit namespace BEFORE dockerd. Neither a
 // retained container restart policy nor a watcher/Agent can race this import.
 func RunSubstrateSourceRestore(ctx context.Context) error {
@@ -183,16 +288,28 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	endpoint.Scheme = "https"
 	endpoint.Path = "/internal/substrate-source/" + b.Assignment.RuntimeAttemptID
 	endpoint.RawQuery = ""
+	return restoreSubstrateSource(ctx, b, actorUID, client, endpoint)
+}
+
+func restoreSubstrateSource(ctx context.Context, b bootstrap, actorUID string, client *http.Client, endpoint *url.URL) error {
+	// A marker from a preceding cold start cannot admit execution on an uncertain
+	// commit, even if this invocation is not entered through the normal launcher.
+	if err := os.Remove(filepath.Join(b.Assignment.ConnectorStateDir, "source-restored.json")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lease, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	lease.Header.Set("Authorization", "Bearer "+b.ParentToken)
+	lease.Header.Set("X-Factory-Runtime-Actor-UID", actorUID)
+	lease.Header.Set("X-Factory-Runtime-Generation", fmt.Sprint(b.Assignment.Generation))
+	lease.Header.Set("X-Factory-Source-Protocol", "2")
 	request := func(query string, epoch uint64) ([]byte, error) {
 		u := *endpoint
 		u.RawQuery = query
-		r, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-		if err != nil {
-			return nil, err
-		}
-		r.Header.Set("Authorization", "Bearer "+b.ParentToken)
-		r.Header.Set("X-Factory-Runtime-Actor-UID", actorUID)
-		r.Header.Set("X-Factory-Runtime-Generation", fmt.Sprint(b.Assignment.Generation))
+		r := lease.Clone(ctx)
+		r.URL = &u
 		if epoch != 0 {
 			r.Header.Set("X-Factory-Source-Writer-Epoch", fmt.Sprint(epoch))
 		}
@@ -220,7 +337,7 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	if saved := reply.Checkpoint; saved != nil {
 		finishDownload := startupPhase("source-restore-download")
 		bundle := saved.Bundle
-		staging, err := os.MkdirTemp("/home/rootless/persist", ".factory-source-restore-")
+		staging, err := os.MkdirTemp(filepath.Dir(b.Assignment.WorkspaceFolder), ".factory-source-restore-")
 		if err != nil {
 			return errors.New("private Source staging unavailable")
 		}
@@ -270,7 +387,9 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 			return err
 		}
 		var current sourceRestoreResponse
-		if json.Unmarshal(latest, &current) != nil || !sameSourceRestoreLease(current, reply) {
+		if json.Unmarshal(latest, &current) != nil ||
+			validateSourceRestoreLease(current, b.Source.WorkspaceID, actorUID, b.Assignment.Generation) != nil ||
+			!sameSourceRestoreLease(current, reply) {
 			return errors.New("Source owner changed before publication")
 		}
 		canonical := b.Assignment.WorkspaceFolder
@@ -289,6 +408,9 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 			return errors.New("Source publication failed; retained tree remains in private staging")
 		}
 	}
+	if err := commitSubstrateSourceRestore(ctx, client, lease, &reply); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(b.Assignment.ConnectorStateDir, 0700); err != nil {
 		return err
 	}
@@ -297,6 +419,7 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(temporary.Name())
 	if _, err := temporary.Write(marker); err != nil {
 		temporary.Close()
 		return err
@@ -306,5 +429,8 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 		return err
 	}
 	temporary.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return os.Rename(temporary.Name(), filepath.Join(b.Assignment.ConnectorStateDir, "source-restored.json"))
 }

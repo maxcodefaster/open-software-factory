@@ -42,7 +42,7 @@ import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/aut
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { CommandError } from "../command-error";
-import type { SubstrateSourceHandoff } from "../workspace/source-api";
+import { admitInitialSourceSeedIn, type SubstrateSourceHandoff } from "../workspace/source-api";
 import { agentConfiguration } from "./agent-configuration";
 import { runtimeAppOrigins } from "./app-origins";
 import {
@@ -713,12 +713,20 @@ export function createSubstrateWorkspaces(
               sourceRevision: revision,
               createdBy: userID,
             });
-          await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+          const grant = await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
           if ((await substrateWorkspaceRevisionIn(tx, workspaceID)) !== revision)
             throw new CommandError(
               "conflict",
               "Workspace execution revision changed before native provisioning",
             );
+          if (sources)
+            await admitInitialSourceSeedIn(tx, {
+              workspaceID,
+              projectID: grant.projectID,
+              repositoryURL: project.repository,
+              revision,
+              branch,
+            });
           if (!prior)
             await transaction
               .insert(substrateWorkspace)

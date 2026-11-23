@@ -19,7 +19,7 @@ test("a connected cold-start Source is readable before Dev Container readiness, 
       await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
     });
-    await source.attach(f.workspaceID, uid, f.database.client);
+    await f.admitActorSource(uid);
     f.hub.sourceConnected = () => false;
     expect(await controller.get(f.workspaceID, f.userID)).toMatchObject({
       state: "preparing",
@@ -80,7 +80,7 @@ test("native Source rechecks slow uploads, orders revocation after writes and cl
   try {
     const uid = (await runtime.get(f.attemptID))?.native?.actorUID;
     if (!uid) throw new Error("Native Source Actor is missing");
-    await source.attach(f.workspaceID, uid, f.database.client);
+    await f.admitActorSource(uid);
     await f.database.client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now()
       WHERE id=${f.attemptID}`;
     f.hub.sourceConnected = () => true;

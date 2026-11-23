@@ -8,10 +8,20 @@ import {
   substrateActorSelector,
   substrateTemplateSHA256,
 } from "../../apps/factory/src/runtime/substrate";
+import {
+  dispatchActorRPCIn,
+  intendActorRPCIn,
+} from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import { renderSubstrateTemplate } from "../../apps/factory/src/runtime/substrate-template";
+import { admitInitialSourceSeedIn } from "../../apps/factory/src/workspace/source-api";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
-import type { SourceRoleFence } from "../../apps/factory/src/workspace/source-role-fence";
+import {
+  initialSourceRoleIn,
+  type SourceRoleFence,
+  templateInitialSourceRole,
+} from "../../apps/factory/src/workspace/source-role-fence";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import {
   type NativeActor,
   SubstrateRPCError,
@@ -49,7 +59,7 @@ test.each([
   "late-source-only",
   "late-negative",
   "late-malformed",
-  "late-busy-runtime",
+  "late-busy-source",
   "late-wrong-attempt",
   "late-wrong-session",
   "late-preserved-offline-source",
@@ -135,6 +145,40 @@ test.each([
           actor.metadata.version = String(BigInt(actor.metadata.version) + 1n);
           actor.status.workerAssignment = { sandboxRuntime: f.config.runtime };
           if (resumes === 1) {
+            const actorUID = actor.metadata.uid;
+            const source = await sources.lease(f.workspaceID);
+            if (!source?.seed) throw Error("Owned independent Source seed missing");
+            expect(source).toMatchObject({
+              actorUID: null,
+              owner: "service",
+              writable: true,
+              writerEpoch: 1,
+              generation: 0,
+              serviceBase: source.seed.id,
+              seedConfirmedAt: null,
+            });
+            const checkpointID = crypto.randomUUID();
+            const checkpoint = {
+              id: checkpointID,
+              workspaceID: f.workspaceID,
+              actorUID: null,
+              seedID: source.seed.id,
+              writerEpoch: 2,
+              generation: 1,
+              bundle: { version: 1, bytes: 1, sha256: "a".repeat(64), chunks: ["a".repeat(64)] },
+            };
+            // Controlled complete Source2 import receipt, using the real storage
+            // constraints. Native materialization has its own acceptance lane.
+            await f.database.client.begin(async (sql) => {
+              await sql`UPDATE factory.substrate_source SET seed_confirmed_at=now()
+                WHERE workspace_id=${f.workspaceID}`;
+              await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,
+                checkpoint_id=${checkpointID} WHERE workspace_id=${f.workspaceID}`;
+              await sql`UPDATE factory.substrate_source SET generation=1,
+                checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE workspace_id=${f.workspaceID}`;
+              await sql`UPDATE factory.substrate_source SET owner='actor',actor_uid=${actorUID},
+                writer_epoch=3,writable=true,checkpoint_id=NULL WHERE workspace_id=${f.workspaceID}`;
+            });
             actor.status.state = "ACTOR_STATE_RESUMING";
             throw new SubstrateRPCError("Canceled", "Owned first bootstrap interrupted");
           }
@@ -143,6 +187,16 @@ test.each([
         }
         throw Error(`Uncommissioned native operation ${method}`);
       }, sources);
+      await f.database.client.begin(async (sql) => {
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+        await admitInitialSourceSeedIn(sql, {
+          workspaceID: f.workspaceID,
+          projectID: f.projectID,
+          repositoryURL: "https://example.invalid/fixture.git",
+          revision: "a".repeat(40),
+          branch: f.branch,
+        });
+      });
       const writers = createChangeWriterController({
         database: f.database,
         runtime,
@@ -209,15 +263,24 @@ test.each([
         "Owned first bootstrap interrupted",
       );
       expect((await runtime.get(f.attemptID))?.native?.state).toBe("ACTOR_STATE_RESUMING");
+      if (!actor) throw Error("Original native bootstrap Actor is missing");
       const initialSource = await sources.lease(f.workspaceID);
+      if (!initialSource?.seed) throw Error("Owned committed Source seed missing");
       expect(initialSource).toMatchObject({
         owner: "actor",
-        writerEpoch: 1,
-        generation: 0,
+        writerEpoch: 3,
+        generation: 1,
         writable: true,
         checkpointID: null,
-        checkpoint: null,
+        checkpoint: {
+          actorUID: null,
+          seedID: initialSource.seed.id,
+          writerEpoch: 2,
+          generation: 1,
+        },
+        serviceBase: initialSource.seed.id,
       });
+      expect(initialSource.seedConfirmedAt).not.toBeNull();
       if (fault === "bound-history")
         // Controlled historical dispatch fact. A bound intent can never be
         // cleared by production, even when its native Session was not confirmed.
@@ -338,7 +401,7 @@ test.each([
           });
         expect(prepared).toBe(false);
         expect({ creates, resumes }).toEqual({ creates: 1, resumes: 1 });
-        expect(initialSource?.actorUID).toBe(actor?.metadata.uid);
+        expect(initialSource?.actorUID).toBe(actor.metadata.uid);
         return;
       }
       // Only the strictly initial read-only role may await its first Parent.
@@ -358,7 +421,7 @@ test.each([
       expect(capabilityReads).toBe(1);
       await runtime.startPersisted(f.changeID, f.userID);
       expect({ creates, resumes }).toEqual({ creates: 1, resumes: 2 });
-      expect(initialSource?.actorUID).toBe(actor?.metadata.uid);
+      expect(initialSource?.actorUID).toBe(actor.metadata.uid);
       expect(await sources.lease(f.workspaceID)).toEqual(initialSource);
       expect(
         await f.database.client`SELECT change_id FROM factory.change_agent_session
@@ -403,7 +466,7 @@ test.each([
         roleReadOnly = !body.writable;
         return Response.json({ confirmed: true });
       };
-      let runtimeLock: ReturnType<typeof f.database.coordination> | undefined;
+      let sourceLock: ReturnType<typeof f.database.coordination> | undefined;
       try {
         switch (fault) {
           case "late-offline":
@@ -416,9 +479,9 @@ test.each([
           case "late-source-only":
             f.hub.ready = () => false;
             break;
-          case "late-busy-runtime":
-            runtimeLock = f.database.coordination();
-            await runtimeLock`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+          case "late-busy-source":
+            sourceLock = f.database.coordination();
+            await sourceLock`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
             break;
           case "late-preserved-offline-source":
             // postgres.js queries are lazy thenables. Start it explicitly
@@ -434,14 +497,14 @@ test.each([
           case "late-frozen-source": {
             const id = crypto.randomUUID();
             await f.database.client`UPDATE factory.substrate_source SET writable=false,
-            writer_epoch=2,checkpoint_id=${id} WHERE workspace_id=${f.workspaceID}`;
-            await f.database.client`UPDATE factory.substrate_source SET generation=1,
+            writer_epoch=writer_epoch+1,checkpoint_id=${id} WHERE workspace_id=${f.workspaceID}`;
+            await f.database.client`UPDATE factory.substrate_source SET generation=generation+1,
             checkpoint=${JSON.stringify({
               id,
               workspaceID: f.workspaceID,
               actorUID: actor?.metadata.uid,
-              writerEpoch: 2,
-              generation: 1,
+              writerEpoch: initialSource.writerEpoch + 1,
+              generation: initialSource.generation + 1,
               bundle: { version: 1, bytes: 1, sha256: "a".repeat(64), chunks: ["a".repeat(64)] },
             })}::text::jsonb WHERE workspace_id=${f.workspaceID}`;
             break;
@@ -518,13 +581,197 @@ test.each([
         WHERE change_id=${f.changeID}`,
         ).toHaveLength(0);
       } finally {
-        if (runtimeLock) {
-          await runtimeLock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
-          await runtimeLock.end({ timeout: 1 });
+        if (sourceLock) {
+          await sourceLock`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
+          await sourceLock.end({ timeout: 1 });
         }
       }
     } finally {
       await sourceController.close();
+      await f.dispose();
+    }
+  },
+  60_000,
+);
+
+test.each([
+  [1, true, true],
+  [2, true, true],
+  [1, false, true],
+  [1, true, false],
+] as const)(
+  "initial Source role requires an exact receipt: generation %s, seed %s, protocol2 %s",
+  async (generation, seeded, protocol2) => {
+    const f = await substrateFixture("a".repeat(40), "ticket");
+    const sources = createSubstrateSources(f.database, f.hub);
+    try {
+      if (seeded)
+        await f.database.client.begin(async (sql) => {
+          await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+          await admitInitialSourceSeedIn(sql, {
+            workspaceID: f.workspaceID,
+            projectID: f.projectID,
+            repositoryURL: "https://example.invalid/fixture.git",
+            revision: "a".repeat(40),
+            branch: f.branch,
+          });
+          await sql`UPDATE factory.substrate_source SET seed_confirmed_at=now()
+            WHERE workspace_id=${f.workspaceID}`;
+        });
+      const turns = createAgentTurnStore(f.database);
+      const [approval] = await f.database.client<{ revision: string }[]>`
+        SELECT requirement_revision_id AS revision FROM factory.requirement_approval
+        WHERE ticket_id=${f.ticketID}`;
+      if (!approval) throw Error("Owned initial role approval missing");
+      const { turn } = await turns.admit(
+        {
+          kind: "change-start",
+          commandId: crypto.randomUUID(),
+          projectId: f.projectID,
+          ticketId: f.ticketID,
+          changeId: f.changeID,
+          createdBy: f.userID,
+          conversationId: null,
+        },
+        {
+          mode: "build",
+          modelId: "owned-bootstrap",
+          skillRevisionIds: [],
+          requiredSkillRevisionIds: [],
+          requirementRevisionId: approval.revision,
+          conversationVersion: null,
+        },
+        (sql, record) => claimAgentWriterIn(sql, f.changeID, record.id, f.userID),
+      );
+      const owned = await turns.claimPending(turn.id);
+      const ownerToken = owned?.ownerToken;
+      if (!ownerToken) throw Error("Owned initial role lease missing");
+      await f.database.client`INSERT INTO factory.change_agent_turn_intent(
+        turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title)
+        VALUES(${turn.id},${f.changeID},'ses_owned_receipt','msg_owned_receipt','Owned receipt',true,'Owned receipt')`;
+      for (let current = 1; current <= generation; current++) {
+        const attemptID = runtimeIdentity(f.workspaceID, current).attemptID;
+        const atespace = `fa-${attemptID.replaceAll("-", "")}`;
+        const space = {
+          metadata: { ...f.space.metadata, name: atespace, uid: crypto.randomUUID() },
+        };
+        const workloadImage = `registry.test/native@sha256:${"a".repeat(64)}`;
+        const template = {
+          ...renderSubstrateTemplate(
+            atespace,
+            { workloadImage, workerSelector: {} },
+            {
+              sourceHandoff: true,
+              assignment: {
+                runtimeAttemptId: attemptID,
+                generation: current,
+                repositoryIdentity: f.projectID,
+                workspaceFolder: "/home/rootless/persist/project",
+                connectorStateDir: "/home/rootless/persist/connector",
+                preserveWorkspace: true,
+              },
+              source: { workspaceId: f.workspaceID, projectId: f.projectID },
+            },
+          ),
+          metadata: { ...f.template.metadata, atespace, uid: crypto.randomUUID() },
+        };
+        const templateSHA256 = substrateTemplateSHA256(template);
+        const actor = f.actor();
+        actor.metadata.name = `runtime-${attemptID.replaceAll("-", "")}`;
+        actor.metadata.atespace = atespace;
+        // Retained native/receipt facts only; this does not dispatch an Actor.
+        await f.database.client.begin(async (sql) => {
+          await sql`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent,
+            atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
+            VALUES(${f.workspaceID},${current},
+            ${JSON.stringify({
+              configuration: { deployment: "fresh-workspaces" },
+              revision: "a".repeat(40),
+              repositoryURL: "https://example.invalid/fixture.git",
+              branch: f.branch,
+              templateSHA256,
+            })}::jsonb,now(),${JSON.stringify(space)}::jsonb,now(),'{}'::jsonb,
+            now(),${JSON.stringify({ metadata: template.metadata })}::jsonb)`;
+          await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,
+            revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            VALUES(${attemptID},${f.projectID},${f.workspaceID},${f.changeID},${current},${"a".repeat(40)},
+            'create-intended','owned-parent','owned-child',now(),${f.userID})`;
+          await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
+            actor_uid,create_attempted_at,observation) VALUES(${attemptID},${atespace},${actor.metadata.name},
+            ${JSON.stringify({
+              ...f.config,
+              deployment: "fresh-workspaces",
+              generation: current,
+              atespaceUID: space.metadata.uid,
+              templateUID: template.metadata.uid,
+              templateSHA256,
+              ...(protocol2 ? { sourceRestoreProtocol: 2 } : {}),
+            })}::jsonb,${actor.metadata.uid},now(),${JSON.stringify(actor)}::jsonb)`;
+          if (current < generation) {
+            await sql`UPDATE factory.runtime_attempt SET state='stopped',stop_intended_at=now(),
+              stopped_at=now() WHERE id=${attemptID}`;
+            await sql`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
+              WHERE runtime_attempt_id=${attemptID}`;
+            return;
+          }
+          if (seeded) {
+            const seed = (await sources.lease(f.workspaceID, sql))?.seed;
+            if (!seed) throw Error("Owned receipt seed missing");
+            const id = crypto.randomUUID();
+            await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,
+              checkpoint_id=${id} WHERE workspace_id=${f.workspaceID}`;
+            await sql`UPDATE factory.substrate_source SET generation=1,checkpoint=${JSON.stringify({
+              id,
+              workspaceID: f.workspaceID,
+              actorUID: null,
+              seedID: seed.id,
+              writerEpoch: 2,
+              generation: 1,
+              bundle: { version: 1, bytes: 1, sha256: "a".repeat(64), chunks: ["a".repeat(64)] },
+            })}::jsonb WHERE workspace_id=${f.workspaceID}`;
+            await sql`UPDATE factory.substrate_source SET owner='actor',actor_uid=${actor.metadata.uid},
+              writer_epoch=3,writable=true,checkpoint_id=NULL WHERE workspace_id=${f.workspaceID}`;
+          } else {
+            // Negative control: seedless epoch-1 grants cannot use the exemption.
+            await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+              VALUES(${f.workspaceID},${actor.metadata.uid})`;
+          }
+          const resume = await intendActorRPCIn(sql, attemptID, "resume", null, actor);
+          await dispatchActorRPCIn(sql, attemptID, resume);
+          actor.status.state = "ACTOR_STATE_RESUMING";
+          await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(actor)}::jsonb
+            WHERE runtime_attempt_id=${attemptID}`;
+          await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${attemptID}`;
+          await sql`UPDATE factory.change SET state='starting',runtime_attempt_id=${attemptID}
+            WHERE id=${f.changeID}`;
+          await sql`UPDATE factory.change_writer SET fence_attempt_id=${attemptID},fence_required=false
+            WHERE change_id=${f.changeID}`;
+          const [writer] = await sql<{ epoch: string }[]>`SELECT epoch::text AS epoch
+            FROM factory.change_writer WHERE change_id=${f.changeID}`;
+          if (!writer) throw Error("Owned initial role writer missing");
+          expect(
+            await initialSourceRoleIn(sql, f.workspaceID, attemptID, writer.epoch, {
+              mode: "initial-bootstrap",
+              sql,
+              turnID: turn.id,
+              ownerToken,
+            }),
+          ).toBe(seeded && protocol2);
+        });
+        const identity = {
+          attemptID,
+          generation: current,
+          workspaceID: f.workspaceID,
+          projectID: f.projectID,
+          workloadImage,
+        };
+        expect(templateInitialSourceRole(template, identity)).toBe(true);
+        expect(templateInitialSourceRole(template, { ...identity, generation: current + 1 })).toBe(
+          false,
+        );
+      }
+    } finally {
+      await sources.close();
       await f.dispose();
     }
   },

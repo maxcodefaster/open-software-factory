@@ -36,6 +36,7 @@ import {
   initialSourceSeed,
   materializeInitialSource,
 } from "./source-initialization";
+import { boundedSourceBody } from "./source-body";
 import { sourceStartupContract } from "./source-startup";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -126,8 +127,8 @@ function checkedBundle(data: Uint8Array, saved: Checkpoint, index: number) {
   return data;
 }
 
-// Concrete Source handoff only. The existing Workspace runtime lock serializes
-// these bounded functions; this is not another runtime or lifecycle controller.
+// Source ownership has its own short lock. Native Resume waits for bootstrap,
+// which must be able to import Source without waiting on that Runtime lock.
 export function createSubstrateSources(
   database: Database,
   hub: RuntimeHub,
@@ -152,6 +153,30 @@ export function createSubstrateSources(
       ready: Promise<void>;
     }
   >();
+  async function locked<T>(
+    workspaceID: string,
+    sql: SQL,
+    action: (sql: SQL) => Promise<T>,
+  ): Promise<T> {
+    if ("savepoint" in sql)
+      return sql.savepoint(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${`source:${workspaceID}`}))`;
+        return action(tx);
+      });
+    // Freeze and object publication are durable facts even if a later external
+    // reply is lost. A session lock serializes them without rolling them back.
+    const owner = database.coordination();
+    try {
+      await owner`SELECT pg_advisory_lock(hashtext(${`source:${workspaceID}`}))`;
+      return await action(owner);
+    } finally {
+      try {
+        await owner`SELECT pg_advisory_unlock(hashtext(${`source:${workspaceID}`}))`;
+      } finally {
+        await owner.end({ timeout: 1 });
+      }
+    }
+  }
   async function lease(
     workspaceID: string,
     sql: SQL = database.client,
@@ -336,6 +361,7 @@ export function createSubstrateSources(
     if (
       retained?.base === row.serviceBase &&
       retained.child.exitCode === null &&
+      (retained.epoch === row.writerEpoch || !row.writable) &&
       (!row.seed || row.serviceBase !== row.seed.id || row.seedConfirmedAt !== null)
     ) {
       await retained.ready;
@@ -605,179 +631,235 @@ export function createSubstrateSources(
     if (result.length !== 1)
       throw new CommandError("conflict", "Source owner transfer lost its epoch");
   }
+  async function recipient(row: SubstrateSourceLease, actorUID: string, sql: SQL) {
+    if (row.owner !== "service")
+      throw new CommandError("conflict", "Independent Source owner changed");
+    const [current] =
+      row.actorUID === null && row.seed
+        ? await initialSourceActorIn(sql, row.seed, actorUID)
+        : await sql<{ id: string }[]>`
+          SELECT current.id FROM factory.runtime_attempt current
+          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
+          JOIN factory.substrate_workspace p ON p.workspace_id=current.workspace_id AND p.generation=current.generation
+          WHERE current.workspace_id=${row.workspaceID}
+            AND current.state IN ('create-intended','starting','paused')
+            AND current.stop_intended_at IS NULL
+            AND binding.actor_uid=${actorUID} AND NOT binding.create_rejected
+            AND binding.create_attempted_at IS NOT NULL
+            AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+            AND binding.intent->>'workspaceID'=${row.workspaceID}
+            AND binding.intent->>'generation'=current.generation::text
+            AND binding.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
+            AND binding.intent->>'templateUID'=p.template#>>'{metadata,uid}'
+            AND binding.intent->>'templateVersion'=p.template#>>'{metadata,version}'
+            AND binding.intent->>'templateSHA256'=p.intent->>'templateSHA256'
+            AND (${row.actorUID}::uuid=${actorUID}::uuid OR EXISTS(
+              SELECT 1 FROM factory.runtime_attempt predecessor
+              JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
+              WHERE predecessor.workspace_id=current.workspace_id
+                AND predecessor.generation<current.generation AND predecessor.state='stopped'
+                AND old_binding.actor_uid=${row.actorUID} AND old_binding.deleted_at IS NOT NULL
+                AND NOT EXISTS(
+                  SELECT 1 FROM factory.runtime_attempt skipped
+                  LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=skipped.id
+                  WHERE skipped.workspace_id=current.workspace_id
+                    AND skipped.generation>predecessor.generation AND skipped.generation<current.generation
+                    AND (skipped.state='stopped' AND retired.deleted_at IS NOT NULL
+                      AND retired.intent->>'sourceRestoreProtocol'='2') IS NOT TRUE)))
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+              WHERE newer.workspace_id=current.workspace_id AND newer.generation>current.generation)`;
+    if (!current)
+      throw new CommandError(
+        "conflict",
+        "Original Source Actor UID changed without a confirmed native successor",
+      );
+    return current.id;
+  }
+  async function ungrantedStop(workspaceID: string, actorUID: string, sql: SQL) {
+    const [attempt] = await sql<{ id: string }[]>`
+      SELECT a.id FROM factory.runtime_attempt a
+      JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+      JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id AND s.owner='service'
+      WHERE a.workspace_id=${workspaceID} AND a.stop_intended_at IS NOT NULL
+        AND b.actor_uid=${actorUID} AND b.intent->>'sourceRestoreProtocol'='2'
+        AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected
+        AND ((a.state='stopping' AND b.deleted_at IS NULL)
+          OR (a.state='stopped' AND b.deleted_at IS NOT NULL))
+        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+          WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+    return Boolean(attempt);
+  }
   return {
     lease,
     async startupContract(
       workspaceID: string,
       sql: SQL,
     ): Promise<SystemContract | null | undefined> {
-      let row = await lease(workspaceID, sql);
-      if (!row) return;
-      if (row.owner !== "service" || !row.writable)
-        throw new CommandError(
-          "unavailable",
-          "Independent Source is not ready for Workspace Start",
+      return locked(workspaceID, sql, async (sql) => {
+        let row = await lease(workspaceID, sql);
+        if (!row) return;
+        if (row.owner !== "service" || !row.writable)
+          throw new CommandError(
+            "unavailable",
+            "Independent Source is not ready for Workspace Start",
+          );
+        await service(row, sql);
+        row = await lease(workspaceID, sql);
+        if (!row)
+          throw new CommandError("unavailable", "Source owner changed before Workspace Start");
+        const role = await writer(row, sql);
+        return sourceStartupContract(sql, row, (operation, body) =>
+          this.forward(
+            workspaceID,
+            null,
+            operation,
+            new Request("http://source.internal/", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "X-Factory-Writer-Epoch": String(role.epoch),
+              },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(15_000),
+            }),
+            sql,
+          ),
         );
-      await service(row, sql);
-      row = await lease(workspaceID, sql);
-      if (!row)
-        throw new CommandError("unavailable", "Source owner changed before Workspace Start");
-      const role = await writer(row, sql);
-      return sourceStartupContract(sql, row, (operation, body) =>
-        this.forward(
-          workspaceID,
-          null,
-          operation,
-          new Request("http://source.internal/", {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "X-Factory-Writer-Epoch": String(role.epoch),
-            },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(15_000),
-          }),
-          sql,
-        ),
-      );
+      });
     },
     onTransfer(callback: (workspaceID: string) => void) {
       revoke = callback;
     },
     async available(workspaceID: string) {
-      // Status reads can arrive together or race Resume. Starting the Source
-      // process is serialized by the same Workspace lock as forwarding and
-      // owner transfer, never by a separate service/runtime coordinator.
-      // Materialization and process readiness must not occupy the application
-      // pool. The same Workspace lock still excludes a concurrent transfer.
+      // Source remains readable while native compute is starting. Process
+      // materialization never occupies the application connection pool.
       const sql = database.coordination();
       let held = false;
       try {
         const [lock] = await sql<
           { acquired: boolean }[]
-        >`SELECT pg_try_advisory_lock(hashtext(${`runtime:${workspaceID}`})) AS acquired`;
+        >`SELECT pg_try_advisory_lock(hashtext(${`source:${workspaceID}`})) AS acquired`;
         if (!lock?.acquired) return false;
         held = true;
         const row = await lease(workspaceID, sql);
-        if (row?.owner === "service" && row.writable) {
+        if (row?.owner === "service") {
           await service(row, sql);
           return true;
         }
         return false;
       } finally {
         try {
-          if (held) await sql`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceID}`}))`;
+          if (held) await sql`SELECT pg_advisory_unlock(hashtext(${`source:${workspaceID}`}))`;
         } finally {
           await sql.end({ timeout: 1 });
         }
       }
     },
     async attach(workspaceID: string, actorUID: string, sql: SQL) {
-      await drizzleTransaction(sql)
-        .insert(substrateSource)
-        .values({ workspaceId: workspaceID, actorUid: actorUID })
-        .onConflictDoNothing({ target: substrateSource.workspaceId });
-      let row = await lease(workspaceID, sql);
-      if (!row) throw new Error("Source owner is missing");
-      if (row.actorUID === actorUID) return;
-      if (row.actorUID === null && row.owner === "service" && !row.seedConfirmedAt) {
-        // Start can win the same Workspace lock immediately after seed
-        // admission. Complete only that retained seed before its first import.
-        await service(row, sql);
-        row = await lease(workspaceID, sql);
-        if (!row) throw new Error("Initial Source owner is missing");
-      }
-      // Authorize this exact native successor in one read of both generations
-      // and their frozen provisioning identities before exporting or changing UID.
-      const [successor] =
-        row.actorUID === null && row.seedConfirmedAt && row.seed
-          ? await initialSourceActorIn(sql, row.seed, actorUID)
-          : await sql<{ id: string }[]>`
-        SELECT current.id FROM factory.runtime_attempt predecessor
-        JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
-        JOIN factory.runtime_attempt current ON current.workspace_id=predecessor.workspace_id
-          AND current.generation=predecessor.generation+1
-        JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
-        JOIN factory.substrate_workspace p ON p.workspace_id=current.workspace_id AND p.generation=current.generation
-        WHERE predecessor.workspace_id=${workspaceID} AND predecessor.state='stopped'
-          AND old_binding.actor_uid=${row.actorUID} AND old_binding.deleted_at IS NOT NULL
-          AND current.state='create-intended' AND current.stop_intended_at IS NULL
-          AND new_binding.actor_uid=${actorUID} AND NOT new_binding.create_rejected
-          AND new_binding.create_attempted_at IS NOT NULL
-          AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
-          AND new_binding.intent->>'workspaceID'=${workspaceID}
-          AND new_binding.intent->>'generation'=current.generation::text
-          AND new_binding.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
-          AND new_binding.intent->>'templateUID'=p.template#>>'{metadata,uid}'
-          AND new_binding.intent->>'templateVersion'=p.template#>>'{metadata,version}'
-          AND new_binding.intent->>'templateSHA256'=p.intent->>'templateSHA256'
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-            WHERE newer.workspace_id=current.workspace_id AND newer.generation>current.generation)`;
-      if (!successor || row.owner !== "service")
-        throw new Error("Original Source Actor UID changed without a confirmed native successor");
-      // Freeze and export the latest offline edits, not the older pause bundle.
-      // Transfer only after the original Source process has actually exited.
-      const frozen = await confirm(await freeze(workspaceID, "service", sql), successor.id, sql);
-      await stopHost(workspaceID);
-      await transfer(frozen, "actor", sql, actorUID);
+      return locked(workspaceID, sql, async (sql) => {
+        const row = await lease(workspaceID, sql);
+        if (!row) throw new CommandError("unavailable", "Independent Source was not admitted");
+        if (row.owner === "actor" && row.actorUID === actorUID) return;
+        // Native allocation is not Source import or permission to execute.
+        // Leave the saved tree live until this exact recipient requests it.
+        await recipient(row, actorUID, sql);
+      });
     },
     async freezeActor(workspaceID: string, attemptID: string, sql: SQL) {
-      const current = await lease(workspaceID, sql);
-      if (current?.owner === "service") return;
-      if (
-        current &&
-        (current.writable || current.checkpoint?.id !== current.checkpointID) &&
-        !hub.sourceConnected(attemptID)
-      )
-        throw new CommandError(
-          "unavailable",
-          "Confirmed independent Source is unavailable; the original Parent was retained.",
-        );
-      const row = await freeze(workspaceID, "actor", sql);
-      if (row.checkpoint?.id === row.checkpointID) return;
-      await hub.parentOperation(attemptID, {
-        operationId: row.checkpointID,
-        action: "source-drain",
+      return locked(workspaceID, sql, async (sql) => {
+        const current = await lease(workspaceID, sql);
+        if (current?.owner === "service") return;
+        if (
+          current &&
+          (current.writable || current.checkpoint?.id !== current.checkpointID) &&
+          !hub.sourceConnected(attemptID)
+        )
+          throw new CommandError(
+            "unavailable",
+            "Confirmed independent Source is unavailable; the original Parent was retained.",
+          );
+        const row = await freeze(workspaceID, "actor", sql);
+        if (row.checkpoint?.id === row.checkpointID) return;
+        await hub.parentOperation(attemptID, {
+          operationId: row.checkpointID,
+          action: "source-drain",
+        });
+        await confirm(row, attemptID, sql);
       });
-      await confirm(row, attemptID, sql);
     },
     async makeIndependent(workspaceID: string, sql: SQL) {
-      const row = await lease(workspaceID, sql);
-      if (!row) throw new Error("Source owner is missing");
-      if (row.owner === "actor") await transfer(row, "service", sql);
-      const current = await lease(workspaceID, sql);
-      if (!current) throw new CommandError("unavailable", "Transferred Source owner is missing");
-      await service(current, sql);
+      return locked(workspaceID, sql, async (sql) => {
+        const row = await lease(workspaceID, sql);
+        if (!row) throw new Error("Source owner is missing");
+        if (row.owner === "actor") await transfer(row, "service", sql);
+        else if (!row.writable) {
+          const [attempt] = await sql<{ actorUID: string }[]>`
+          SELECT b.actor_uid AS "actorUID" FROM factory.runtime_attempt a
+          JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+          WHERE a.workspace_id=${workspaceID} AND a.state='stopping'
+            AND a.stop_intended_at IS NOT NULL AND b.actor_uid IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+              WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
+          if (!attempt || !(await ungrantedStop(workspaceID, attempt.actorUID, sql)))
+            throw new CommandError("conflict", "Source import has not been safely cancelled");
+          await stopHost(workspaceID);
+          revoke(workspaceID);
+          await drizzleTransaction(sql)
+            .update(substrateSource)
+            .set({
+              writable: true,
+              writerEpoch: expression`${substrateSource.writerEpoch}+1`,
+              checkpointId: null,
+            })
+            .where(
+              and(
+                eq(substrateSource.workspaceId, workspaceID),
+                eq(substrateSource.owner, "service"),
+                eq(substrateSource.writerEpoch, row.writerEpoch),
+                eq(substrateSource.writable, false),
+              ),
+            );
+        }
+        const current = await lease(workspaceID, sql);
+        if (!current) throw new CommandError("unavailable", "Transferred Source owner is missing");
+        await service(current, sql);
+      });
     },
     async requireIndependent(workspaceID: string, actorUID: string, sql: SQL) {
-      const row = await lease(workspaceID, sql);
-      if (
-        !row ||
-        row.actorUID !== actorUID ||
-        row.owner !== "service" ||
-        !row.writable ||
-        !row.checkpoint ||
-        !row.serviceBase
-      )
-        throw new CommandError(
-          "unavailable",
-          "Workspace Stop requires confirmed independent Source; the original Actor was retained",
-        );
-      // A durable ROOTFS is not the independent editable checkout. Confirm its
-      // retained materialization and live Source service before deleting it.
-      await service(row, sql);
+      return locked(workspaceID, sql, async (sql) => {
+        const row = await lease(workspaceID, sql);
+        if (
+          row?.owner !== "service" ||
+          !row.writable ||
+          !row.serviceBase ||
+          (!(await ungrantedStop(workspaceID, actorUID, sql)) &&
+            (row.actorUID !== actorUID || !row.checkpoint))
+        )
+          throw new CommandError(
+            "unavailable",
+            "Workspace Stop requires confirmed independent Source; the original Actor was retained",
+          );
+        // A durable ROOTFS is not the independent editable checkout. Confirm its
+        // retained materialization and live Source service before deleting it.
+        await service(row, sql);
+      });
     },
-    async resume(workspaceID: string, attemptID: string, sql: SQL) {
-      const current = await lease(workspaceID, sql);
-      if (!current) throw new Error("Source owner is missing");
-      if (current.owner === "actor") {
-        if (!current.writable)
-          throw new CommandError("unavailable", "Finish the recorded Source pause before resuming");
-        return;
-      }
-      const row = await confirm(await freeze(workspaceID, "service", sql), attemptID, sql);
-      await stopHost(workspaceID);
-      await transfer(row, "actor", sql);
+    async resume(workspaceID: string, attemptID: string, sql: SQL, inputStop = false) {
+      return locked(workspaceID, sql, async (sql) => {
+        const current = await lease(workspaceID, sql);
+        if (!current) throw new Error("Source owner is missing");
+        if (current.owner === "actor") {
+          if (!current.writable)
+            throw new CommandError(
+              "unavailable",
+              "Finish the recorded Source pause before resuming",
+            );
+          return;
+        }
+        // Stop-only continuation pins its exact offline export before native
+        // dispatch. Ordinary Start waits until the recipient actually fetches it.
+        if (inputStop) await confirm(await freeze(workspaceID, "service", sql), attemptID, sql);
+      });
     },
     async forward(
       workspaceID: string,
@@ -788,7 +870,10 @@ export function createSubstrateSources(
     ) {
       const row = await lease(workspaceID, sql);
       if (
-        !row?.writable ||
+        !row ||
+        (!row.writable &&
+          (row.owner !== "service" ||
+            !["stat", "list", "read", "search", "events"].includes(operation))) ||
         (row.owner === "actor" && (!attemptID || !hub.sourceConnected(attemptID)))
       )
         throw new CommandError(
@@ -865,136 +950,224 @@ export function createSubstrateSources(
         );
     },
     async restoreEndpoint(request: Request, attemptID: string) {
-      const newer = alias(runtimeAttempt, "newer");
-      const [attempt] = await database.db
-        .select({
-          workspaceID: developmentWorkspace.id,
-          projectID: runtimeAttempt.projectId,
-          userID: runtimeAttempt.createdBy,
-          token: runtimeAttempt.parentConnectorTokenHash,
-          actorUID: substrateBinding.actorUid,
-          generation: runtimeAttempt.generation,
-        })
-        .from(runtimeAttempt)
-        .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
-        .innerJoin(
-          developmentWorkspace,
-          and(
-            eq(developmentWorkspace.id, runtimeAttempt.workspaceId),
-            eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
-            expression`${developmentWorkspace.changeId} IS NOT DISTINCT FROM ${runtimeAttempt.changeId}`,
-          ),
-        )
-        .where(
-          and(
-            eq(runtimeAttempt.id, attemptID),
-            eq(runtimeAttempt.state, "starting"),
-            isNull(runtimeAttempt.stopIntendedAt),
-            isNull(substrateBinding.deleteIntendedAt),
-            isNull(substrateBinding.deletedAt),
-            notExists(
-              database.db
-                .select({ id: newer.id })
-                .from(newer)
-                .where(
-                  and(
-                    eq(newer.workspaceId, runtimeAttempt.workspaceId),
-                    gt(newer.generation, runtimeAttempt.generation),
-                  ),
-                ),
-            ),
-          ),
-        );
-      const auth = request.headers.get("authorization")?.replace(/^Bearer /, "");
       if (
-        !attempt ||
-        request.method !== "GET" ||
-        !auth ||
-        hashConnectorToken(auth) !== attempt.token ||
-        request.headers.get("X-Factory-Runtime-Actor-UID") !== attempt.actorUID ||
-        request.headers.get("X-Factory-Runtime-Generation") !== String(attempt.generation)
+        !["GET", "POST"].includes(request.method) ||
+        request.headers.get("X-Factory-Source-Protocol") !== "2"
       )
         return new Response(null, { status: 403 });
-      const inputStop = await nativeInputStopIn(database.client, attemptID);
-      if (inputStop && (!inputStop.resumed || inputStop.completed))
-        return new Response(null, { status: 409 });
-      if (!inputStop)
-        await database.client.begin(async (sql) => {
-          const principal = await substrateRuntimePrincipalIn(sql, attemptID);
-          await substrateWorkspaceGrantIn(database, sql, attempt.workspaceID, principal);
-        });
-      const row = await lease(attempt.workspaceID);
-      if (!row || row.actorUID !== attempt.actorUID || row.owner !== "actor" || !row.writable)
-        return new Response(null, { status: 409 });
-      if (
-        inputStop &&
-        (row.checkpoint?.id !== inputStop.sourceCheckpointID ||
-          row.writerEpoch !== inputStop.sourceWriterEpoch)
-      )
-        return new Response(null, { status: 409 });
-      if (row.checkpoint?.actorUID === null) {
-        if (
-          inputStop ||
-          attempt.generation !== 1 ||
-          !row.seedConfirmedAt ||
-          !row.seed ||
-          row.checkpoint.seedID !== row.seed.id ||
-          row.seed.workspaceID !== attempt.workspaceID
-        )
-          return new Response(null, { status: 409 });
-      } else if (row.checkpoint && row.checkpoint.actorUID !== attempt.actorUID) {
-        const [predecessor] = await database.db
-          .select({ actorUID: substrateBinding.actorUid })
-          .from(runtimeAttempt)
-          .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+      const commit =
+        request.method === "POST"
+          ? z
+              .strictObject({
+                checkpointID: z.uuid(),
+                writerEpoch: z.number().int().positive(),
+              })
+              .safeParse(
+                await boundedSourceBody(request)
+                  .then((body) => JSON.parse(new TextDecoder().decode(body)) as unknown)
+                  .catch(() => null),
+              )
+          : null;
+      if (commit && !commit.success) return new Response(null, { status: 400 });
+      return database.client.begin(async (sql) => {
+        const db = drizzleTransaction(sql);
+        const admitted = alias(runtimeAttempt, "restore_attempt");
+        const newer = alias(runtimeAttempt, "newer");
+        const [attempt] = await db
+          .select({
+            workspaceID: developmentWorkspace.id,
+            projectID: admitted.projectId,
+            userID: admitted.createdBy,
+            token: admitted.parentConnectorTokenHash,
+            actorUID: substrateBinding.actorUid,
+            generation: admitted.generation,
+          })
+          .from(admitted)
+          .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, admitted.id))
+          .innerJoin(
+            developmentWorkspace,
+            and(
+              eq(developmentWorkspace.id, admitted.workspaceId),
+              eq(developmentWorkspace.projectId, admitted.projectId),
+              expression`${developmentWorkspace.changeId} IS NOT DISTINCT FROM ${admitted.changeId}`,
+            ),
+          )
           .where(
             and(
-              eq(runtimeAttempt.workspaceId, attempt.workspaceID),
-              eq(runtimeAttempt.generation, attempt.generation - 1),
-              eq(runtimeAttempt.state, "stopped"),
-              expression`${substrateBinding.deletedAt} IS NOT NULL`,
-              eq(substrateBinding.actorUid, row.checkpoint.actorUID),
+              eq(admitted.id, attemptID),
+              eq(admitted.state, "starting"),
+              isNull(admitted.stopIntendedAt),
+              isNull(substrateBinding.deleteIntendedAt),
+              isNull(substrateBinding.deletedAt),
+              expression`${substrateBinding.intent}->>'sourceRestoreProtocol'='2'`,
+              notExists(
+                db
+                  .select({ id: newer.id })
+                  .from(newer)
+                  .where(
+                    and(
+                      eq(newer.workspaceId, admitted.workspaceId),
+                      gt(newer.generation, admitted.generation),
+                    ),
+                  ),
+              ),
             ),
+          )
+          .for("share", { of: admitted });
+        const auth = request.headers.get("authorization")?.replace(/^Bearer /, "");
+        if (
+          !attempt ||
+          !auth ||
+          hashConnectorToken(auth) !== attempt.token ||
+          request.headers.get("X-Factory-Runtime-Actor-UID") !== attempt.actorUID ||
+          request.headers.get("X-Factory-Runtime-Generation") !== String(attempt.generation)
+        )
+          return new Response(null, { status: 403 });
+        // Keep the authority transaction's shared locks, but publish Source
+        // facts durably on its dedicated connection before any external ACK.
+        return locked(attempt.workspaceID, database.client, async (owner) => {
+          const inputStop = await nativeInputStopIn(sql, attemptID);
+          if (inputStop && (!inputStop.resumed || inputStop.completed))
+            return new Response(null, { status: 409 });
+          if (!inputStop) {
+            const principal = await substrateRuntimePrincipalIn(sql, attemptID);
+            await substrateWorkspaceGrantIn(database, sql, attempt.workspaceID, principal);
+          }
+          let row = await lease(attempt.workspaceID, owner);
+          if (!row || !attempt.actorUID) return new Response(null, { status: 409 });
+          const receipt = commit?.success ? commit.data : null;
+          if (row.owner === "actor") {
+            // A lost ACK can only confirm the same committed grant. GET never
+            // replays a checkpoint over a tree this Actor may already have changed.
+            if (
+              !receipt ||
+              !row.writable ||
+              row.actorUID !== attempt.actorUID ||
+              row.writerEpoch !== receipt.writerEpoch ||
+              row.checkpoint?.id !== receipt.checkpointID
+            )
+              return new Response(null, { status: 409 });
+            const role = await writer(row, sql);
+            return Response.json(
+              {
+                version: 2,
+                actorUID: attempt.actorUID,
+                ...receipt,
+                changeWriterEpoch: role.epoch,
+                readOnly: Boolean(inputStop) || !role.writable,
+              },
+              { headers: { "cache-control": "no-store" } },
+            );
+          }
+          await recipient(row, attempt.actorUID, owner);
+          if (!receipt && (row.writable || row.checkpoint?.id !== row.checkpointID)) {
+            // A seed may not have been opened in the IDE before explicit Start.
+            // Its publication confirmation commits separately from this request.
+            await service(row, owner);
+            row = await lease(attempt.workspaceID, owner);
+            if (!row) throw new CommandError("unavailable", "Independent Source owner changed");
+            row = await confirm(
+              await freeze(attempt.workspaceID, "service", owner),
+              attemptID,
+              owner,
+            );
+          }
+          const plannedEpoch = row.writerEpoch + 1;
+          if (!row.checkpoint || row.writable || row.checkpoint.id !== row.checkpointID)
+            return new Response(null, { status: 409 });
+          if (
+            inputStop &&
+            (row.checkpoint?.id !== inputStop.sourceCheckpointID ||
+              plannedEpoch !== inputStop.sourceWriterEpoch)
+          )
+            return new Response(null, { status: 409 });
+          if (row.checkpoint?.actorUID === null) {
+            if (
+              inputStop ||
+              !row.seedConfirmedAt ||
+              !row.seed ||
+              row.checkpoint.seedID !== row.seed.id ||
+              row.seed.workspaceID !== attempt.workspaceID
+            )
+              return new Response(null, { status: 409 });
+          } else if (row.checkpoint.actorUID !== attempt.actorUID) {
+            const [predecessor] = await db
+              .select({ actorUID: substrateBinding.actorUid })
+              .from(runtimeAttempt)
+              .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
+              .where(
+                and(
+                  eq(runtimeAttempt.workspaceId, attempt.workspaceID),
+                  expression`${runtimeAttempt.generation}<${attempt.generation}`,
+                  eq(runtimeAttempt.state, "stopped"),
+                  expression`${substrateBinding.deletedAt} IS NOT NULL`,
+                  eq(substrateBinding.actorUid, row.checkpoint.actorUID),
+                ),
+              );
+            if (!predecessor) return new Response(null, { status: 409 });
+          }
+          if (receipt) {
+            if (receipt.checkpointID !== row.checkpoint.id || receipt.writerEpoch !== plannedEpoch)
+              return new Response(null, { status: 409 });
+            const role = await writer({ ...row, writable: true, writerEpoch: plannedEpoch }, sql);
+            await verifiedManifest(row.checkpoint);
+            await stopHost(attempt.workspaceID);
+            await transfer(row, "actor", owner, attempt.actorUID);
+            // This durable writer grant precedes the ACK. Docker starts only
+            // after receiving it; a lost ACK can confirm this exact receipt.
+            return Response.json(
+              {
+                version: 2,
+                actorUID: attempt.actorUID,
+                ...receipt,
+                changeWriterEpoch: role.epoch,
+                readOnly: Boolean(inputStop) || !role.writable,
+              },
+              { headers: { "cache-control": "no-store" } },
+            );
+          }
+          const url = new URL(request.url);
+          const chunk = url.searchParams.get("chunk");
+          if (chunk === null) {
+            if (row.checkpoint) await verifiedManifest(row.checkpoint);
+            const role = await writer({ ...row, writable: true, writerEpoch: plannedEpoch }, sql);
+            return Response.json(
+              {
+                version: 2,
+                actorUID: attempt.actorUID,
+                checkpointActorUID: row.checkpoint?.actorUID ?? null,
+                checkpointSeedID: row.checkpoint?.seedID ?? null,
+                writerEpoch: plannedEpoch,
+                changeWriterEpoch: role.epoch,
+                readOnly: Boolean(inputStop) || !role.writable,
+                checkpoint: row.checkpoint,
+                ...(inputStop ? { inputStop: inputStop.assignment } : {}),
+              },
+              { headers: { "cache-control": "no-store" } },
+            );
+          }
+          if (
+            !/^\d{1,4}$/.test(chunk) ||
+            !row.checkpoint ||
+            request.headers.get("X-Factory-Source-Writer-Epoch") !== String(plannedEpoch) ||
+            url.searchParams.get("checkpoint") !== row.checkpoint.id ||
+            Number(chunk) >= row.checkpoint.bundle.chunks.length
+          )
+            return new Response(null, { status: 409 });
+          return new Response(
+            new Uint8Array(
+              checkedBundle(
+                await objects.read(objectKey(row.checkpoint, `chunk-${Number(chunk)}`)),
+                row.checkpoint,
+                Number(chunk),
+              ),
+            ).buffer,
+            {
+              headers: { "content-type": "application/octet-stream", "cache-control": "no-store" },
+            },
           );
-        if (!predecessor) return new Response(null, { status: 409 });
-      }
-      const url = new URL(request.url);
-      const chunk = url.searchParams.get("chunk");
-      if (chunk === null) {
-        if (row.checkpoint) await verifiedManifest(row.checkpoint);
-        const role = await writer(row, database.client);
-        return Response.json(
-          {
-            actorUID: row.actorUID,
-            checkpointActorUID: row.checkpoint?.actorUID ?? null,
-            checkpointSeedID: row.checkpoint?.seedID ?? null,
-            writerEpoch: row.writerEpoch,
-            changeWriterEpoch: role.epoch,
-            readOnly: Boolean(inputStop) || !role.writable,
-            checkpoint: row.checkpoint,
-            ...(inputStop ? { inputStop: inputStop.assignment } : {}),
-          },
-          { headers: { "cache-control": "no-store" } },
-        );
-      }
-      if (
-        !/^\d{1,4}$/.test(chunk) ||
-        !row.checkpoint ||
-        request.headers.get("X-Factory-Source-Writer-Epoch") !== String(row.writerEpoch) ||
-        url.searchParams.get("checkpoint") !== row.checkpoint.id ||
-        Number(chunk) >= row.checkpoint.bundle.chunks.length
-      )
-        return new Response(null, { status: 409 });
-      return new Response(
-        new Uint8Array(
-          checkedBundle(
-            await objects.read(objectKey(row.checkpoint, `chunk-${Number(chunk)}`)),
-            row.checkpoint,
-            Number(chunk),
-          ),
-        ).buffer,
-        { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } },
-      );
+        });
+      });
     },
     async close() {
       for (const workspace of hosts.keys()) await stopHost(workspace);

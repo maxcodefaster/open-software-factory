@@ -8,6 +8,7 @@ import (
 
 func sourceSeedRestoreJSON() map[string]any {
 	return map[string]any{
+		"version":  2,
 		"actorUID": "526dbdeb-6396-42c2-a0ab-6a69f5173b36", "checkpointActorUID": nil,
 		"checkpointSeedID": "1ee029eb-4277-42d7-ad99-731398659749",
 		"writerEpoch":      2, "changeWriterEpoch": 1,
@@ -42,10 +43,8 @@ func TestSubstrateSourceRestoreAcceptsTruthfulPreActorSeed(t *testing.T) {
 	if sameSourceRestoreLease(decodeSourceRestoreTest(t, changed), reply) {
 		t.Fatal("publication check ignored a changed seed provenance")
 	}
-	for _, generation := range []uint64{0, 2, 3, 100} {
-		if err := validateSourceRestoreLease(reply, reply.Checkpoint.WorkspaceID, reply.ActorUID, generation); err == nil {
-			t.Fatalf("seed restore accepted actual assignment generation %d", generation)
-		}
+	if err := validateSourceRestoreLease(reply, reply.Checkpoint.WorkspaceID, reply.ActorUID, 0); err == nil {
+		t.Fatal("seed restore accepted an absent assignment generation")
 	}
 }
 

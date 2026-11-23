@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import {
@@ -13,7 +13,10 @@ import {
   intendActorRPCIn,
 } from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import { objectDigest } from "../../apps/factory/src/storage/objects";
-import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
+import {
+  createSubstrateSources,
+  type SubstrateSourceHandoff,
+} from "../../apps/factory/src/workspace/substrate-source";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
@@ -25,6 +28,24 @@ import {
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
+
+function controlledGrantedSource(
+  f: Awaited<ReturnType<typeof substrateFixture>>,
+  source: ReturnType<typeof createSubstrateSources>,
+): SubstrateSourceHandoff {
+  return {
+    ...source,
+    async attach(workspaceID, actorUID, sql) {
+      expect(workspaceID).toBe(f.workspaceID);
+      if (!(await source.lease(workspaceID, sql))) await f.admitActorSource(actorUID);
+      // These pause fixtures begin after a committed import, not native cold restore.
+      expect(await source.lease(workspaceID, sql)).toMatchObject({
+        actorUID,
+        owner: "actor",
+      });
+    },
+  };
+}
 
 async function handoffEvent<T>(promise: Promise<T>, name: string) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -137,7 +158,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
       throw Error(`Uncommissioned handoff effect: ${method}`);
     },
     {
-      attach: source.attach,
+      attach: controlledGrantedSource(f, source).attach,
       freezeActor: source.freezeActor,
       resume: source.resume,
       requireIndependent: source.requireIndependent,
@@ -264,12 +285,16 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
       async retainedExecution(call: SubstrateCall, changed = false) {
         const [saved] = await f.database.client<
           {
-            intent: SubstrateConfiguration & { actorSelector?: Record<string, string> };
+            intent: SubstrateConfiguration & {
+              actorSelector?: Record<string, string>;
+              sourceRestoreProtocol?: number;
+            };
           }[]
         >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
         if (!saved) throw Error("Original binding missing");
-        const { actorSelector, ...config } = saved.intent;
+        const { actorSelector, sourceRestoreProtocol, ...config } = saved.intent;
         expect(actorSelector).toEqual(f.config.workerSelector);
+        expect(sourceRestoreProtocol).toBe(2);
         return createSubstrateExecution(
           f.database,
           f.hub,
@@ -493,6 +518,7 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
   f.config.deployment = "fresh-workspaces";
   let actor: NativeActor | null = null;
   const source = createSubstrateSources(f.database, f.hub);
+  const granted = controlledGrantedSource(f, source);
   const controller = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
@@ -513,7 +539,7 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
       return { actor: structuredClone(actor) };
     }
     throw new Error(`Unexpected failed-bootstrap effect: ${method}`);
-  }, source);
+  }, granted);
   try {
     await controller.start(f.projectID, f.userID);
     const uid = nativeActor.parse(actor).metadata.uid;
@@ -547,6 +573,7 @@ test("a previously ready personal Workspace with its original frozen pause recov
   let actor: NativeActor | null = null;
   let resumes = 0;
   const source = createSubstrateSources(f.database, f.hub);
+  const granted = controlledGrantedSource(f, source);
   const controller = await f.controller(async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
@@ -568,7 +595,7 @@ test("a previously ready personal Workspace with its original frozen pause recov
       return { actor: structuredClone(actor) };
     }
     throw Error(`Read-only pause recovery dispatched ${method}`);
-  }, source);
+  }, granted);
   try {
     await controller.start(f.projectID, f.userID);
     const uid = nativeActor.parse(actor).metadata.uid;
@@ -673,7 +700,7 @@ test.each(["starting", "failed"])(
       }
       throw new Error(`Unexpected bootstrap effect: ${method}`);
     };
-    const controller = await f.controller(call, source);
+    const controller = await f.controller(call, controlledGrantedSource(f, source));
     try {
       await controller.start(f.projectID, f.userID);
       const uid = nativeActor.parse(actor).metadata.uid;
@@ -821,6 +848,7 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
     f.hub.parentOperation = async () => {
       throw new Error("Source drain remains unconfirmed");
     };
+    const granted = controlledGrantedSource(f, source);
     const controller = await f.controller(async (method) => {
       if (method === "GetAtespace") return f.space;
       if (method === "GetActorTemplate") return f.template;
@@ -845,7 +873,7 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
         throw new Error("Must not bypass Source settlement");
       }
       throw new Error(`Unexpected ${method}`);
-    }, source);
+    }, granted);
     try {
       if (scenario === "ticket")
         await f.database

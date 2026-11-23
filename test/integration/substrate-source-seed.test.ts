@@ -1,12 +1,19 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRuntimeEnvironmentEndpoint } from "../../apps/factory/src/environments/runtime";
+import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import {
   confirmInitialSourcePublication,
   initialSourceActorIn,
 } from "../../apps/factory/src/workspace/source-initialization";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { substrateSource } from "../../packages/db/src/schema/runtime";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { hashConnectorToken, runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
 type Fixture = Awaited<ReturnType<typeof substrateFixture>>;
@@ -20,7 +27,7 @@ function seedFor(f: Fixture, revision = "a".repeat(40)) {
     projectID: f.projectID,
     repositoryURL: "https://example.invalid/fixture.git",
     revision,
-    branch: "main",
+    branch: f.branch,
   };
 }
 
@@ -108,7 +115,7 @@ async function admitActor(
   };
   const provision = {
     revision: "a".repeat(40),
-    branch: "main",
+    branch: f.branch,
     repositoryURL: "https://example.invalid/fixture.git",
     templateSHA256: f.config.templateSHA256,
     ...provisionChanges,
@@ -118,10 +125,10 @@ async function admitActor(
     VALUES(${f.workspaceID},${generation},${JSON.stringify(provision)}::jsonb,
       now(),${JSON.stringify(space)}::jsonb,now(),'{}'::jsonb,
       now(),${JSON.stringify(template)}::jsonb)`;
-  await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
+  await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,
       parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-    VALUES(${attemptID},${f.projectID},${f.workspaceID},${generation},${"a".repeat(40)},
-      'create-intended','owned-parent-hash','owned-child-hash',now(),${f.userID})`;
+    VALUES(${attemptID},${f.projectID},${f.workspaceID},${f.kind === "ticket" ? f.changeID : null},${generation},${"a".repeat(40)},
+      'create-intended',${hashConnectorToken("owned-source-parent")},'owned-child-hash',now(),${f.userID})`;
   await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
       create_attempted_at,actor_uid,observation)
     VALUES(${attemptID},${atespace},${actorName},
@@ -188,6 +195,341 @@ test("first Actor authorization rejects a mismatched identity before freezing ed
     await f.dispose();
   }
 }, 60_000);
+
+// Controlled Source-service transport: these tests exercise real Factory/SQL
+// handoff and authentication, not native archive materialization acceptance.
+async function independentSourceFixture(kind: "personal" | "ticket" = "personal") {
+  const f = await substrateFixture("a".repeat(40), kind);
+  const seed = seedFor(f);
+  const directory = await mkdtemp(join(tmpdir(), "factory-source-commit-"));
+  const binary = join(directory, "controlled-source");
+  const content = Buffer.from("latest saved README\n");
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+const input = JSON.parse(await Bun.stdin.text());
+const bytes = Buffer.from(${JSON.stringify(content.toString("base64"))}, "base64");
+const bundle = {version:1,bytes:bytes.length,sha256:${JSON.stringify(sha256)},chunks:[${JSON.stringify(sha256)}]};
+const server = Bun.serve({unix:input.socket,fetch:async request => {
+  if(request.headers.get("authorization") !== "Bearer "+input.access.token) return new Response(null,{status:403});
+  const operation = new URL(request.url).pathname.split("/").at(-1);
+  if(operation === "checkpoint") return Response.json(bundle);
+  if(operation === "chunk") return new Response(bytes);
+  if(operation === "read") return Response.json({content:bytes.toString("base64"),version:bundle.sha256});
+  if(operation === "fence") return Response.json({confirmed:true});
+  return Response.json({kind:"directory"});
+}});
+process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
+`,
+    { mode: 0o700 },
+  );
+  await insertSeed(f, seed);
+  const base = join(directory, "workspace-source", f.workspaceID, seed.id);
+  await mkdir(join(base, "project"), { recursive: true });
+  await writeFile(join(base, "initial-source.json"), JSON.stringify(seed));
+  await confirmInitialSourcePublication(f.database, f.workspaceID, seed.id);
+  const priorState = process.env["FACTORY_STATE_DIRECTORY"];
+  const priorBinary = process.env["FACTORY_SOURCE_SERVICE_BINARY"];
+  process.env["FACTORY_STATE_DIRECTORY"] = directory;
+  process.env["FACTORY_SOURCE_SERVICE_BINARY"] = binary;
+  let source: ReturnType<typeof createSubstrateSources>;
+  try {
+    source = createSubstrateSources(f.database, f.hub, memoryPrivateObjects());
+  } finally {
+    if (priorState === undefined) delete process.env["FACTORY_STATE_DIRECTORY"];
+    else process.env["FACTORY_STATE_DIRECTORY"] = priorState;
+    if (priorBinary === undefined) delete process.env["FACTORY_SOURCE_SERVICE_BINARY"];
+    else process.env["FACTORY_SOURCE_SERVICE_BINARY"] = priorBinary;
+  }
+  const actor = await f.database.client.begin((sql) =>
+    admitActor(f, sql, 1, { sourceRestoreProtocol: 2 }),
+  );
+  if (kind === "ticket") {
+    await f.database
+      .client`UPDATE factory.change SET runtime_attempt_id=${actor.attemptID} WHERE id=${f.changeID}`;
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=2 WHERE change_id=${f.changeID}`;
+  }
+  await f.database
+    .client`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key)
+    VALUES(${actor.attemptID},'development',0,NULL)`;
+  await f.database
+    .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${actor.attemptID}`;
+  const controller = createWorkspaceSourceController(f.database, f.hub, source);
+  const request = (method: "GET" | "POST" = "GET", body?: unknown, query = "") =>
+    new Request(`https://factory.test/internal/substrate-source/${actor.attemptID}${query}`, {
+      method,
+      headers: {
+        authorization: "Bearer owned-source-parent",
+        "X-Factory-Runtime-Actor-UID": actor.actorUID,
+        "X-Factory-Runtime-Generation": "1",
+        "X-Factory-Source-Protocol": "2",
+        "X-Factory-Source-Writer-Epoch": "3",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const read = () =>
+    controller.forward(
+      f.workspaceID,
+      f.userID,
+      "read",
+      new Request("https://factory.test/source/read", {
+        method: "POST",
+        body: '{"path":"README.md"}',
+      }),
+    );
+  return {
+    ...f,
+    ...actor,
+    seed,
+    source,
+    controller,
+    request,
+    read,
+    content,
+    async dispose() {
+      await controller.close();
+      await f.dispose();
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+test("cold restore keeps Source readable during native Resume and grants execution only after exact import commit", async () => {
+  const f = await independentSourceFixture();
+  const lifecycle = f.database.coordination();
+  try {
+    await lifecycle`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await f.source.attach(f.workspaceID, f.actorUID, f.database.client);
+    expect(await (await f.read()).json()).toMatchObject({
+      content: f.content.toString("base64"),
+    });
+    const old = f.request();
+    old.headers.delete("X-Factory-Source-Protocol");
+    expect((await f.source.restoreEndpoint(old, f.attemptID)).status).toBe(403);
+    const environment = createRuntimeEnvironmentEndpoint(f.database, {
+      configured: true,
+      read: async () => {
+        throw new Error("Unadmitted environment was read");
+      },
+      create: async () => {
+        throw new Error("Restore must not create credentials");
+      },
+    });
+    expect((await environment(f.request(), f.attemptID)).status).toBe(401);
+    const prepared = await f.source.restoreEndpoint(f.request(), f.attemptID);
+    expect(prepared.status).toBe(200);
+    const metadata = await prepared.json();
+    expect(metadata).toMatchObject({
+      version: 2,
+      actorUID: f.actorUID,
+      checkpointActorUID: null,
+      checkpointSeedID: f.seed.id,
+      writerEpoch: 3,
+      changeWriterEpoch: 3,
+      readOnly: false,
+    });
+    expect(await f.source.lease(f.workspaceID)).toMatchObject({
+      owner: "service",
+      actorUID: null,
+      writable: false,
+      writerEpoch: 2,
+      checkpointID: metadata.checkpoint.id,
+    });
+    expect(await f.controller.get(f.workspaceID, f.userID)).toMatchObject({ state: "ready" });
+    expect((await f.read()).status).toBe(200);
+    await expect(
+      f.controller.forward(
+        f.workspaceID,
+        f.userID,
+        "write",
+        new Request("https://factory.test/source/write", {
+          method: "POST",
+          body: '{"path":"README.md","content":"eA=="}',
+        }),
+      ),
+    ).rejects.toThrow("frozen or unavailable");
+    const chunk = await f.source.restoreEndpoint(
+      f.request("GET", undefined, `?checkpoint=${metadata.checkpoint.id}&chunk=0`),
+      f.attemptID,
+    );
+    expect(Buffer.from(await chunk.arrayBuffer())).toEqual(f.content);
+    const receipt = { checkpointID: metadata.checkpoint.id, writerEpoch: metadata.writerEpoch };
+    expect(
+      (
+        await f.source.restoreEndpoint(
+          f.request("POST", { ...receipt, writerEpoch: 99 }),
+          f.attemptID,
+        )
+      ).status,
+    ).toBe(409);
+    await f.database
+      .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID}`;
+    await expect(
+      f.source.restoreEndpoint(f.request("POST", receipt), f.attemptID),
+    ).rejects.toThrow();
+    expect((await f.source.lease(f.workspaceID))?.owner).toBe("service");
+    await f.database
+      .client`UPDATE factory.project_membership SET role='developer' WHERE project_id=${f.projectID}`;
+    for (let i = 0; i < 2; i++) {
+      const ack = await f.source.restoreEndpoint(f.request("POST", receipt), f.attemptID);
+      expect(ack.status).toBe(200);
+      expect(await ack.json()).toEqual({
+        version: 2,
+        actorUID: f.actorUID,
+        ...receipt,
+        changeWriterEpoch: 3,
+        readOnly: false,
+      });
+    }
+    expect(await f.source.lease(f.workspaceID)).toMatchObject({
+      owner: "actor",
+      actorUID: f.actorUID,
+      writable: true,
+      writerEpoch: 3,
+      checkpointID: null,
+    });
+    expect((await environment(f.request(), f.attemptID)).status).toBe(200);
+    expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(409);
+  } finally {
+    await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lifecycle.end({ timeout: 1 });
+    await f.dispose();
+  }
+}, 60_000);
+
+test("first and repeated import ACKs report the current Ticket writer role, not the earlier GET role", async () => {
+  const f = await independentSourceFixture("ticket");
+  try {
+    const prepared = await f.source.restoreEndpoint(f.request(), f.attemptID);
+    expect(prepared.status).toBe(200);
+    const metadata = await prepared.json();
+    expect(metadata).toMatchObject({ changeWriterEpoch: 2, readOnly: false });
+    const receipt = { checkpointID: metadata.checkpoint.id, writerEpoch: metadata.writerEpoch };
+    for (const epoch of [3, 4]) {
+      await f.database
+        .client`UPDATE factory.change_writer SET epoch=${epoch} WHERE change_id=${f.changeID}`;
+      const ack = await f.source.restoreEndpoint(f.request("POST", receipt), f.attemptID);
+      expect(ack.status).toBe(200);
+      expect(await ack.json()).toMatchObject({
+        ...receipt,
+        changeWriterEpoch: epoch,
+        readOnly: false,
+      });
+    }
+    expect((await f.source.lease(f.workspaceID))?.writerEpoch).toBe(3);
+    expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(409);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
+test.each([false, true])(
+  "Stop before Source commit retains the saved independent tree (downloaded=%s)",
+  async (downloaded) => {
+    const f = await independentSourceFixture();
+    try {
+      await f.source.attach(f.workspaceID, f.actorUID, f.database.client);
+      if (downloaded)
+        expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(200);
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${f.attemptID}`;
+      await f.source.freezeActor(f.workspaceID, f.attemptID, f.database.client);
+      await f.source.makeIndependent(f.workspaceID, f.database.client);
+      await f.source.requireIndependent(f.workspaceID, f.actorUID, f.database.client);
+      expect(await f.source.lease(f.workspaceID)).toMatchObject({
+        owner: "service",
+        actorUID: null,
+        writable: true,
+        serviceBase: f.seed.id,
+      });
+      expect((await f.read()).status).toBe(200);
+      expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(403);
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
+
+test("native attachment leaves saved Source independent until the recipient commits its import", async () => {
+  const f = await substrateFixture();
+  const seed = seedFor(f);
+  const source = createSubstrateSources(f.database, f.hub);
+  try {
+    await insertSeed(f, seed);
+    await confirmInitialSourcePublication(f.database, f.workspaceID, seed.id);
+    const actor = await f.database.client.begin((sql) => admitActor(f, sql));
+    const outcome = await source.attach(f.workspaceID, actor.actorUID, f.database.client).then(
+      () => null,
+      (error: Error) => error.message,
+    );
+    // A native Actor can still fail before it ever requests Source. Merely
+    // creating it must not freeze the saved tree or remove its independent owner.
+    expect(await source.lease(f.workspaceID)).toMatchObject({
+      owner: "service",
+      actorUID: null,
+      writable: true,
+      writerEpoch: 1,
+      checkpointID: null,
+      generation: 0,
+      serviceBase: seed.id,
+    });
+    expect(outcome).toBeNull();
+    expect(f.hub.sourceConnected(f.attemptID)).toBe(false);
+  } finally {
+    await source.close();
+    await f.dispose();
+  }
+}, 60_000);
+
+test.each(["v2", "unversioned", "undeleted"] as const)(
+  "first Source recipient after a retired allocation requires its ungranted v2 proof (%s)",
+  async (prior) => {
+    const f = await substrateFixture();
+    const seed = seedFor(f);
+    try {
+      await insertSeed(f, seed);
+      await confirmInitialSourcePublication(f.database, f.workspaceID, seed.id);
+      const original = await f.database.client.begin((sql) =>
+        admitActor(f, sql, 1, prior === "unversioned" ? {} : { sourceRestoreProtocol: 2 }),
+      );
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now()
+        WHERE id=${original.attemptID}`;
+      if (prior !== "undeleted")
+        await f.database
+          .client`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
+          WHERE runtime_attempt_id=${original.attemptID}`;
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${original.attemptID}`;
+      const successor = () =>
+        f.database.client.begin((sql) => admitActor(f, sql, 2, { sourceRestoreProtocol: 2 }));
+      if (prior !== "v2") {
+        await expect(successor()).rejects.toThrow("exact cleanup and independent Source");
+        return;
+      }
+      const next = await successor();
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${next.attemptID}`;
+      const admitted = await initialSourceActorIn(f.database.client, seed, next.actorUID);
+      expect(admitted).toHaveLength(1);
+      const id = await freeze(f, 2);
+      const saved = { ...manifest(f, id, null, 2, 1), seedID: seed.id };
+      await confirm(f, saved, 1);
+      await transfer(f, next.actorUID);
+      expect((await f.database.db.select().from(substrateSource))[0]).toMatchObject({
+        owner: "actor",
+        actorUid: next.actorUID,
+        writerEpoch: 3,
+      });
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test.each([40, 64])(
   "initial service Source persists a %s-character seed before any Actor or Attempt",

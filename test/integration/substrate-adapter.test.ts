@@ -15,7 +15,7 @@ import {
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
-test("native Source forwarding uses current personal grants and the runtime lock without waking compute", async () => {
+test("native Source forwarding uses current personal grants and the Source owner lock without waking compute", async () => {
   const f = await substrateFixture();
   let actor: NativeActor | null = null;
   const calls: string[] = [];
@@ -54,7 +54,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
     await c.start(f.projectID, f.userID);
     const actorUID = (await c.get(f.attemptID))?.native?.actorUID;
     if (!actorUID) throw new Error("Native fixture Actor is missing");
-    await nativeSource.attach(f.workspaceID, actorUID, f.database.client);
+    await f.admitActorSource(actorUID);
     for (const role of ["parent", "child"] as const) {
       const socket = {
         data: { kind: "connector", role, attemptID: f.attemptID, generation: 1 },
@@ -91,7 +91,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
     await expect(source.forward(f.workspaceID, other, "write", request())).rejects.toThrow(
       "Workspace not found",
     );
-    await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lock`SELECT pg_advisory_lock(hashtext(${`source:${f.workspaceID}`}))`;
     held = true;
     const pending = source.forward(f.workspaceID, f.userID, "write", request());
     const observed = pending.then(
@@ -100,7 +100,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
     );
     await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
-    await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    await lock`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     held = false;
     expect(await observed).not.toBe("unexpectedly admitted");
     expect(forwarded).toHaveLength(2);
@@ -119,7 +119,7 @@ test("native Source forwarding uses current personal grants and the runtime lock
     ]).toEqual([{ source: null }]);
     expect("stop" in source).toBe(false);
   } finally {
-    if (held) await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
+    if (held) await lock`SELECT pg_advisory_unlock(hashtext(${`source:${f.workspaceID}`}))`;
     await lock.end({ timeout: 1 });
     await source.close();
     await f.dispose();

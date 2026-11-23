@@ -167,11 +167,19 @@ export async function substrateFixture(
     userID,
     projectID,
     workspaceID,
+    kind,
+    branch,
     changeID,
     ticketID,
     attemptID,
     atespace,
     hub,
+    // Controlled already-granted Source, not bootstrap/native acceptance.
+    // Real cold starts use the independent seed and authenticated v2 commit.
+    async admitActorSource(actorUID: string, sql = database.client) {
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${workspaceID},${actorUID})`;
+    },
     execution(call?: SubstrateCall, sources?: SubstrateSourceHandoff) {
       return createSubstrateExecution(
         database,

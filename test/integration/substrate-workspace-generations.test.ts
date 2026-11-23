@@ -80,6 +80,15 @@ async function proveGenerations(kind: "personal" | "ticket") {
   });
   const blobs = memoryPrivateObjects();
   const source = createSubstrateSources(f.database, f.hub, blobs);
+  const restoredSources = new Map<
+    string,
+    {
+      actorUID: string;
+      checkpointActorUID: string | null;
+      checkpoint: { id: string; bundle: { sha256: string } };
+      writerEpoch: number;
+    }
+  >();
   f.hub.sourceConnected = () => true;
   f.hub.parentOperation = async () => ({});
   f.hub.request = async (_attempt, _channel, request, path) => {
@@ -90,35 +99,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
   // Controlled Source-service observations, not Linux materialization or a live
   // Substrate proof. The actual lease constraints and restore endpoint run here.
   const sources: SubstrateSourceHandoff = {
-    async attach(workspaceID, actorUID, sql) {
-      const previous = await source.lease(workspaceID, sql);
-      if (!previous || previous.actorUID === actorUID) {
-        await source.attach(workspaceID, actorUID, sql);
-        return;
-      }
-      const id = crypto.randomUUID();
-      const saved = {
-        id,
-        workspaceID,
-        actorUID: previous.actorUID,
-        writerEpoch: previous.writerEpoch + 1,
-        generation: previous.generation + 1,
-        bundle: bundle(),
-      };
-      await blobs.put(
-        `workspace-source/v1/${workspaceID}/${id}/chunk-0`,
-        latestBytes,
-        "application/octet-stream",
-      );
-      await blobs.put(
-        `workspace-source/v1/${workspaceID}/${id}/manifest.json`,
-        new TextEncoder().encode(JSON.stringify(saved)),
-        "application/json",
-      );
-      await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=writer_epoch+1,checkpoint_id=${id} WHERE workspace_id=${workspaceID}`;
-      await sql`UPDATE factory.substrate_source SET generation=generation+1,checkpoint=${JSON.stringify(saved)}::text::jsonb WHERE workspace_id=${workspaceID}`;
-      await sql`UPDATE factory.substrate_source SET owner='actor',actor_uid=${actorUID},writer_epoch=writer_epoch+1,writable=true,checkpoint_id=NULL WHERE workspace_id=${workspaceID}`;
-    },
+    attach: source.attach,
     freezeActor: source.freezeActor,
     async makeIndependent(workspaceID, sql) {
       const row = await source.lease(workspaceID, sql);
@@ -126,7 +107,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
         await sql`UPDATE factory.substrate_source SET owner='service',writer_epoch=writer_epoch+1,
           writable=true,service_base=checkpoint_id,checkpoint_id=NULL WHERE workspace_id=${workspaceID}`;
     },
-    async resume() {},
+    resume: source.resume,
     async requireIndependent(workspaceID, actorUID, sql) {
       const row = await source.lease(workspaceID, sql);
       if (
@@ -139,6 +120,79 @@ async function proveGenerations(kind: "personal" | "ticket") {
         throw new Error("Controlled independent Source is unavailable");
     },
   };
+  async function commitColdRestore(actorUID: string) {
+    const [attempt] = await f.database.client<{ id: string; generation: number }[]>`
+      SELECT a.id,a.generation::float8 AS generation FROM factory.runtime_attempt a
+      JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE b.actor_uid=${actorUID}`;
+    const previous = await source.lease(f.workspaceID);
+    if (!attempt || !previous) throw new Error("Controlled Source recipient is missing");
+    expect(previous).toMatchObject({ owner: "service", writable: true });
+    if (previous.actorUID === null) {
+      if (!previous.seed) throw new Error("Controlled initial Source seed is missing");
+      await f.database.client`UPDATE factory.substrate_source SET seed_confirmed_at=now()
+        WHERE workspace_id=${f.workspaceID}`;
+    }
+    // Simulate only the service's complete export. Cold GET/POST owns the real
+    // first/successor Actor grant; allocation and Resume never transfer it.
+    const id = crypto.randomUUID();
+    const saved = {
+      id,
+      workspaceID: f.workspaceID,
+      actorUID: previous.actorUID,
+      ...(previous.actorUID === null ? { seedID: previous.seed?.id } : {}),
+      writerEpoch: previous.writerEpoch + 1,
+      generation: previous.generation + 1,
+      bundle: bundle(),
+    };
+    await f.database.client`UPDATE factory.substrate_source SET writable=false,
+      writer_epoch=writer_epoch+1,checkpoint_id=${id} WHERE workspace_id=${f.workspaceID}`;
+    await blobs.put(
+      `workspace-source/v1/${f.workspaceID}/${id}/chunk-0`,
+      latestBytes,
+      "application/octet-stream",
+    );
+    await blobs.put(
+      `workspace-source/v1/${f.workspaceID}/${id}/manifest.json`,
+      new TextEncoder().encode(JSON.stringify(saved)),
+      "application/json",
+    );
+    await f.database.client`UPDATE factory.substrate_source
+      SET generation=generation+1,checkpoint=${JSON.stringify(saved)}::text::jsonb
+      WHERE workspace_id=${f.workspaceID}`;
+    const headers = {
+      authorization: `Bearer ${runtimeConnectorTokens(secret, attempt.id, attempt.generation).parent}`,
+      "X-Factory-Runtime-Actor-UID": actorUID,
+      "X-Factory-Runtime-Generation": String(attempt.generation),
+      "X-Factory-Source-Protocol": "2",
+    };
+    const url = `https://factory.test/internal/substrate-source/${attempt.id}`;
+    const response = await source.restoreEndpoint(new Request(url, { headers }), attempt.id);
+    expect(response.status).toBe(200);
+    const prepared = await response.json();
+    expect(prepared).toMatchObject({
+      version: 2,
+      actorUID,
+      writerEpoch: saved.writerEpoch + 1,
+      checkpoint: saved,
+    });
+    expect((await source.lease(f.workspaceID))?.owner).toBe("service");
+    const committed = await source.restoreEndpoint(
+      new Request(url, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ checkpointID: id, writerEpoch: prepared.writerEpoch }),
+      }),
+      attempt.id,
+    );
+    expect(committed.status).toBe(200);
+    expect(await source.lease(f.workspaceID)).toMatchObject({
+      owner: "actor",
+      actorUID,
+      writable: true,
+      writerEpoch: prepared.writerEpoch,
+    });
+    restoredSources.set(attempt.id, prepared);
+  }
   const call: SubstrateCall = async (method, input) => {
     const request = input as Record<string, Record<string, unknown>>;
     let kind = method.replace(/^(Get|Create)/, "");
@@ -197,6 +251,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
         workerAssignment: { sandboxRuntime: config.runtime },
       };
       objects.set(actorKey, actor);
+      await commitColdRestore(actor.metadata.uid);
       return { actor: structuredClone(actor) };
     }
     if (method === "SuspendActor") {
@@ -345,24 +400,27 @@ async function proveGenerations(kind: "personal" | "ticket") {
     const second = await workspaces.forAttempt(secondID);
     if (!second) throw new Error("Successor native owner is missing");
     const newUID = (await second.get()).actorUID;
+    if (!newUID) throw new Error("Successor native Actor is missing");
     expect(newUID).not.toBe(oldUID);
     const token = runtimeConnectorTokens(secret, secondID, 2).parent;
     const request = (extra: Record<string, string> = {}) =>
       new Request(`https://factory.test/internal/substrate-source/${secondID}`, {
         headers: {
           authorization: `Bearer ${token}`,
-          "X-Factory-Runtime-Actor-UID": newUID ?? "",
+          "X-Factory-Runtime-Actor-UID": newUID,
           "X-Factory-Runtime-Generation": "2",
+          "X-Factory-Source-Protocol": "2",
           ...extra,
         },
       });
     const restored = await source.restoreEndpoint(request(), secondID);
-    expect(restored.status).toBe(200);
-    const restore = await restored.json();
+    expect(restored.status).toBe(409);
+    const restore = restoredSources.get(secondID);
+    if (!restore) throw new Error("Controlled cold import was not committed");
     expect(restore.actorUID).toBe(newUID);
     expect(restore.checkpointActorUID).toBe(oldUID);
     expect(restore.checkpoint.bundle.sha256).toBe(objectDigest(latestBytes));
-    expect(restore.writerEpoch).toBe(5);
+    expect(restore.writerEpoch).toBe(7);
     expect(
       (await source.restoreEndpoint(request({ "X-Factory-Runtime-Generation": "1" }), secondID))
         .status,
@@ -433,9 +491,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
     const lease = await source.lease(f.workspaceID);
     await expect(
       source.attach(f.workspaceID, crypto.randomUUID(), f.database.client),
-    ).rejects.toMatchObject({
-      cause: { message: expect.stringContaining("current original Actor binding") },
-    });
+    ).rejects.toThrow("Independent Source owner changed");
     expect(await source.lease(f.workspaceID)).toEqual(lease);
     await expect(
       Promise.resolve(f.database.client`

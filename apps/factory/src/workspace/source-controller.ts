@@ -103,10 +103,12 @@ export function createWorkspaceSourceController(
     current: NonNullable<Awaited<ReturnType<typeof nativeRow>>>,
   ): Promise<SourceWorkspaceView> {
     const ready = Boolean(
-      current.sourceWritable &&
-        (current.sourceOwner === "service"
-          ? await sources.available(current.workspaceID)
-          : current.readable && current.attemptID && hub.sourceConnected(current.attemptID)),
+      current.sourceOwner === "service"
+        ? await sources.available(current.workspaceID)
+        : current.sourceWritable &&
+            current.readable &&
+            current.attemptID &&
+            hub.sourceConnected(current.attemptID),
     );
     // An admitted cold start is still preparing, not evidence that Source was
     // frozen. Keep the editor's observation alive until its original Parent
@@ -178,7 +180,7 @@ export function createWorkspaceSourceController(
         // Handoff can hold Change elsewhere. Do not wait behind a save that is
         // itself waiting for that Change row.
         const [lock] = await sql<{ acquired: boolean }[]>`
-          SELECT pg_try_advisory_xact_lock(hashtext(${`runtime:${workspace.id}`})) AS acquired`;
+          SELECT pg_try_advisory_xact_lock(hashtext(${`source:${workspace.id}`})) AS acquired`;
         if (!lock?.acquired)
           throw new CommandError(
             "unavailable",
@@ -265,7 +267,7 @@ export function createWorkspaceSourceController(
             SELECT current_setting('lock_timeout') AS timeout`;
           await sql`SELECT set_config('lock_timeout','2000ms',true)`;
           try {
-            await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${workspaceID}`}))`;
+            await sql`SELECT pg_advisory_xact_lock(hashtext(${`source:${workspaceID}`}))`;
           } catch (cause) {
             if ((cause as { code?: string }).code !== "55P03") throw cause;
             throw new CommandError(
