@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, inArray, isNotNull, isNull, sql as query } from "drizzle-orm";
 import type { z } from "zod";
@@ -50,7 +49,7 @@ import {
   substrateStagingOwner,
 } from "./substrate-isolated-grant";
 import { substrateResourceReservation } from "./substrate-resources";
-import { renderSubstrateTemplate } from "./substrate-template";
+import { renderSubstrateTemplate, substrateBootstrapCA } from "./substrate-template";
 import {
   retainedSubstrateConfiguration,
   type SubstrateWorkspaceConfiguration,
@@ -314,7 +313,7 @@ export function createSubstrateIsolated(
       },
       parentToken: tokens.parent,
       childToken: tokens.child,
-      factoryCA: readFileSync(selected.factoryCAFile, "utf8"),
+      factoryCA: substrateBootstrapCA(selected.factoryCAFile),
     });
     const intent: Provision["intent"] = {
       configuration: selected,

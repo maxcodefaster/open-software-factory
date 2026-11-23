@@ -69,7 +69,7 @@ import {
   substrateWorkspaceRevisionIn,
 } from "./substrate-grant";
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
-import { renderSubstrateTemplate } from "./substrate-template";
+import { renderSubstrateTemplate, substrateBootstrapCA } from "./substrate-template";
 
 const installationConfiguration = z.strictObject({
   deployment: z.enum(["owned-test", "fresh-workspaces"]),
@@ -677,7 +677,7 @@ export function createSubstrateWorkspaces(
           },
           parentToken: tokens.parent,
           childToken: tokens.child,
-          factoryCA: readFileSync(config.factoryCAFile, "utf8"),
+          factoryCA: substrateBootstrapCA(config.factoryCAFile),
         };
         const template = renderSubstrateTemplate(atespace, config, bootstrap);
         const intent = {

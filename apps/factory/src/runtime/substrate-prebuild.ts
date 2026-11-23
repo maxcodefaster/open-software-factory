@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, isNull, notExists, sql as query } from "drizzle-orm";
 import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
@@ -34,7 +33,7 @@ import {
 import type { createSubstrateCapacity } from "./substrate-capacity";
 import { substratePrebuildAuthorityIn } from "./substrate-prebuild-grant";
 import { substrateResourceReservation } from "./substrate-resources";
-import { renderSubstrateTemplate } from "./substrate-template";
+import { renderSubstrateTemplate, substrateBootstrapCA } from "./substrate-template";
 import {
   retainedSubstrateConfiguration,
   type SubstrateWorkspaceConfiguration,
@@ -299,7 +298,7 @@ export function createSubstratePrebuild(
           },
           parentToken: tokens.parent,
           childToken: tokens.child,
-          factoryCA: readFileSync(selected.factoryCAFile, "utf8"),
+          factoryCA: substrateBootstrapCA(selected.factoryCAFile),
         });
         const intent: Provision["intent"] = {
           configuration: selected,

@@ -21,6 +21,8 @@ the live ARM product path from packaging, source-launcher and other architecture
   and a digest-pinned native Actor image selected in the installation configuration. Publish those
   images where the cluster and Actor-private Docker can pull them. Node image-pull trust remains
   an operator prerequisite, not a privileged installer DaemonSet.
+  For a private registry CA, `registryCASecret` supplies a public `ca.crt` to new native
+  environments, including browser-image downloads. It adds neither credentials nor egress access.
 - Factory and Forgejo public TLS origins and reachable DNS. Native Git
   requires a DNS Forgejo hostname on port 443, admitted by the frozen native egress configuration.
   Factory's isolated browser hosts also need `*.runtime.<factory-hostname>` in DNS.

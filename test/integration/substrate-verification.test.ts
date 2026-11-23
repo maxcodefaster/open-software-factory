@@ -21,11 +21,17 @@ test("native Verification continues initial capacity rejection on its exact-job 
   const directory = await mkdtemp(join(tmpdir(), "native-verification-"));
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
+  const registryCA =
+    "-----BEGIN CERTIFICATE-----\nowned-extra-registry-ca\n-----END CERTIFICATE-----\n";
+  const registryCAFile = join(directory, "registry-ca.pem");
+  await writeFile(registryCAFile, registryCA);
   const previous = {
     api: process.env["FACTORY_FORGEJO_API_URL"],
     public: process.env["FACTORY_FORGEJO_PUBLIC_URL"],
     owner: process.env["FACTORY_FORGEJO_OWNER"],
+    registryCA: process.env["FACTORY_REGISTRY_CA_FILE"],
   };
+  process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
   process.env["FACTORY_FORGEJO_API_URL"] = "http://forgejo.cluster.svc:3000/api/v1/";
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
   process.env["FACTORY_FORGEJO_OWNER"] = "owned";
@@ -395,6 +401,8 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect(environment).toEqual({ environment: "development", version: 0 });
     const template = objects.get("ActorTemplate") as { containers: { env: { value: string }[] }[] };
     const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
+    const factoryCA = await Bun.file(configuration.factoryCAFile).text();
+    expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
     expect(bootstrap.sourceHandoff).toBe(false);
     expect(bootstrap.assignment.revision).toBe("d".repeat(40));
     expect(bootstrap.assignment.channels.map((channel: { kind: string }) => channel.kind)).toEqual([
@@ -550,6 +558,8 @@ test("native Verification continues initial capacity rejection on its exact-job 
     else process.env["FACTORY_FORGEJO_PUBLIC_URL"] = previous.public;
     if (previous.owner === undefined) delete process.env["FACTORY_FORGEJO_OWNER"];
     else process.env["FACTORY_FORGEJO_OWNER"] = previous.owner;
+    if (previous.registryCA === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    else process.env["FACTORY_REGISTRY_CA_FILE"] = previous.registryCA;
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }

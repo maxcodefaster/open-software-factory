@@ -235,11 +235,17 @@ async function isolatedFixture() {
 
 test("native initial Staging retains original creates, serves only its bootstrap Source and starts a new generation only after UID-confirmed Stop", async () => {
   const owned = await isolatedFixture();
+  const previous = process.env["FACTORY_REGISTRY_CA_FILE"];
   const { f } = owned;
   const runtime = owned.controller();
   const attemptID = runtimeIdentity(substrateStagingOwner(f.projectID), 1).attemptID;
   const workspaces = await f.database.client`SELECT * FROM factory.development_workspace`;
   try {
+    const registryCA =
+      "-----BEGIN CERTIFICATE-----\nowned-extra-registry-ca\n-----END CERTIFICATE-----\n";
+    const registryCAFile = join(owned.repo, "../registry-ca.pem");
+    await writeFile(registryCAFile, registryCA);
+    process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
     await expect(runtime.ensureStaging(f.projectID, crypto.randomUUID())).rejects.toThrow();
     expect(owned.creates.size).toBe(0);
     owned.lose("CreateAtespace");
@@ -295,6 +301,12 @@ test("native initial Staging retains original creates, serves only its bootstrap
     );
     const originalTemplate = objects.get("ActorTemplate");
     if (!originalTemplate) throw new Error("Original native template is missing");
+    const bootstrap = JSON.parse(
+      (originalTemplate["containers"] as { env: { value: string }[] }[])[0]?.env[0]?.value ??
+        "null",
+    );
+    const factoryCA = await Bun.file(owned.config.factoryCAFile).text();
+    expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
     expect((originalTemplate["containers"] as { image: string }[])[0]?.image).toBe(originalImage);
     expect((await runtime.ensureStaging(f.projectID, f.userID))?.id).toBe(attemptID);
     expect(owned.counts().resumes).toBe(1);
@@ -327,6 +339,8 @@ test("native initial Staging retains original creates, serves only its bootstrap
         to_regclass('factory.factorybox_worker') AS worker`),
     ]).toEqual([{ source: null, worker: null }]);
   } finally {
+    if (previous === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    else process.env["FACTORY_REGISTRY_CA_FILE"] = previous;
     await owned.dispose();
   }
 }, 60_000);

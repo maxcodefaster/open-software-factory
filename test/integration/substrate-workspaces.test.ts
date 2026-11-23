@@ -11,10 +11,15 @@ import { createDeliveryCoordination } from "../../apps/factory/src/delivery/coor
 import { createChangeIntegration } from "../../apps/factory/src/delivery/integration";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
+import { substrateTemplateSHA256 } from "../../apps/factory/src/runtime/substrate";
 import {
   substrateWorkspaceGrantIn,
   substrateWorkspaceSourceIn,
 } from "../../apps/factory/src/runtime/substrate-grant";
+import {
+  renderSubstrateTemplate,
+  substrateBootstrapCA,
+} from "../../apps/factory/src/runtime/substrate-template";
 import {
   createSubstrateWorkspaces,
   type SubstrateInstallationConfiguration,
@@ -33,10 +38,104 @@ import {
   type SubstrateCall,
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
 const starterSourceFile = (path: string) => !path.split(/[\\/]/).includes("node_modules");
+
+test("native Workspace bootstrap carries installation registry CA without changing Project Environment", async () => {
+  const f = await nativeRuntimeFixture();
+  const previous = process.env["FACTORY_REGISTRY_CA_FILE"];
+  try {
+    const registryCA =
+      "-----BEGIN CERTIFICATE-----\nowned-extra-registry-ca\n-----END CERTIFICATE-----\n";
+    const registryCAFile = resolve(f.repository, "../registry-ca.pem");
+    await writeFile(registryCAFile, registryCA);
+    process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
+    const environment = await f.database
+      .client`SELECT * FROM factory.project_environment WHERE project_id=${f.projectID}`;
+    await writeFile(registryCAFile, `${registryCA}-----BEGIN PRIVATE KEY-----\nowned-invalid`);
+    await expect(f.controller().start(f.projectID, f.userID)).rejects.toThrow(
+      "public certificates only",
+    );
+    expect(f.calls.some((call) => call.method.startsWith("Create"))).toBe(false);
+    await writeFile(registryCAFile, registryCA);
+    const started = await f.controller().start(f.projectID, f.userID);
+    if (!started) throw new Error("Owned native Workspace was not admitted");
+    const template = f.resources
+      .get(`fa-${started.id.replaceAll("-", "")}`)
+      ?.get("ActorTemplate") as { containers: { env: { value: string }[] }[] } | undefined;
+    if (!template) throw new Error("Owned native template missing");
+    const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
+    const factoryCA = await Bun.file(f.configuration.factoryCAFile).text();
+    expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
+    expect(
+      await f.database
+        .client`SELECT * FROM factory.project_environment WHERE project_id=${f.projectID}`,
+    ).toEqual(environment);
+    const originalTemplate = structuredClone(template);
+    const creates = f.calls.filter((call) => call.method.startsWith("Create")).length;
+    // Installation trust changes must never replace or rebootstrap an existing Actor.
+    await writeFile(registryCAFile, `${registryCA}-----BEGIN PRIVATE KEY-----\nowned-invalid`);
+    expect((await f.controller().start(f.projectID, f.userID))?.id).toBe(started.id);
+    expect(template).toEqual(originalTemplate);
+    expect(f.calls.filter((call) => call.method.startsWith("Create"))).toHaveLength(creates);
+  } finally {
+    if (previous === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    else process.env["FACTORY_REGISTRY_CA_FILE"] = previous;
+    await f.dispose();
+  }
+}, 60_000);
+
+test("native bootstrap trust preserves no-extra template hashes and refuses private keys", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-bootstrap-trust-"));
+  const previous = process.env["FACTORY_REGISTRY_CA_FILE"];
+  try {
+    const factoryCA =
+      "\n-----BEGIN CERTIFICATE-----\nowned-factory-ca\n-----END CERTIFICATE-----\n\n";
+    const ca = join(directory, "factory-ca.pem");
+    const extra = join(directory, "registry-ca.pem");
+    await writeFile(ca, factoryCA);
+    await writeFile(extra, factoryCA.trim());
+    const config = {
+      workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
+      workerSelector: { "factory.dev/deployment": "owned" },
+    };
+    const original = renderSubstrateTemplate("owned", config, { factoryCA });
+    for (const file of [undefined, "/etc/ssl/certs/ca-certificates.crt", ca, extra]) {
+      if (file === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+      else process.env["FACTORY_REGISTRY_CA_FILE"] = file;
+      const trust = substrateBootstrapCA(ca);
+      expect(trust).toBe(factoryCA);
+      expect(
+        substrateTemplateSHA256(renderSubstrateTemplate("owned", config, { factoryCA: trust })),
+      ).toBe(substrateTemplateSHA256(original));
+    }
+    process.env["FACTORY_REGISTRY_CA_FILE"] = extra;
+    for (const kind of [
+      "PRIVATE KEY",
+      "RSA PRIVATE KEY",
+      "EC PRIVATE KEY",
+      "ENCRYPTED PRIVATE KEY",
+      "OPENSSH PRIVATE KEY",
+    ]) {
+      await writeFile(extra, `${factoryCA}-----BEGIN ${kind}-----\nowned-invalid`);
+      expect(() => substrateBootstrapCA(ca)).toThrow("public certificates only");
+    }
+    await writeFile(extra, "not a public certificate");
+    expect(() => substrateBootstrapCA(ca)).toThrow("public certificates only");
+    process.env["FACTORY_REGISTRY_CA_FILE"] = join(directory, "missing.pem");
+    expect(() => substrateBootstrapCA(ca)).toThrow();
+    delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    await writeFile(ca, `${factoryCA}-----BEGIN PRIVATE KEY-----\nowned-invalid`);
+    expect(() => substrateBootstrapCA(ca)).toThrow("public certificates only");
+  } finally {
+    if (previous === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    else process.env["FACTORY_REGISTRY_CA_FILE"] = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Starter fixture copies source without local installed dependencies", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-starter-copy-"));

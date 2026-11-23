@@ -54,9 +54,15 @@ async function publicationEnvironment(
 
 test("imported devcontainer-only explicit preparation retains native grants without App/QA setup confirmation", async () => {
   const f = await nativeRuntimeFixture("personal", false);
+  const previous = process.env["FACTORY_REGISTRY_CA_FILE"];
   const preparationID = crypto.randomUUID();
   const attemptID = runtimeIdentity(preparationID, 1).attemptID;
   try {
+    const registryCA =
+      "-----BEGIN CERTIFICATE-----\nowned-extra-registry-ca\n-----END CERTIFICATE-----\n";
+    const registryCAFile = join(f.repository, "../registry-ca.pem");
+    await writeFile(registryCAFile, registryCA);
+    process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
     await mkdir(join(f.repository, ".devcontainer"));
     await writeFile(
       join(f.repository, ".devcontainer/devcontainer.json"),
@@ -83,6 +89,13 @@ test("imported devcontainer-only explicit preparation retains native grants with
       egressHosts: ["registry.test"],
     });
     await runtime.startProjectPrebuild(preparationID);
+    const template = f.resources.get(`fa-${attemptID.replaceAll("-", "")}`)?.get("ActorTemplate") as
+      | { containers: { env: { value: string }[] }[] }
+      | undefined;
+    if (!template) throw new Error("Owned native prebuild template missing");
+    const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
+    const factoryCA = await Bun.file(f.configuration.factoryCAFile).text();
+    expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
     expect(await runtime.get(attemptID)).toMatchObject({
       state: "starting",
       runtimeKind: "prebuild",
@@ -162,6 +175,8 @@ test("imported devcontainer-only explicit preparation retains native grants with
     expect(await Bun.file(join(f.repository, ".factory/system.json")).exists()).toBe(false);
     expect((await runtime.stop(attemptID))?.state).toBe("stopped");
   } finally {
+    if (previous === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
+    else process.env["FACTORY_REGISTRY_CA_FILE"] = previous;
     await f.dispose();
   }
 }, 60_000);
