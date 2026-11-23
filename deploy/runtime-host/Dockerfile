@@ -94,6 +94,9 @@ RUN npm run build
 FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS developer-ide
 COPY --from=theia /src/deploy/theia-ide/browser-app/lib /opt/factory/theia/lib
 COPY --from=theia /src/deploy/theia-ide/browser-app/package.json /opt/factory/theia/package.json
+# Source checkouts can have a restrictive umask. This published application
+# bundle, including Theia's runtime-read metadata, must be readable by UID 1000.
+RUN chmod -R u=rwX,go=rX /opt/factory/theia
 USER 1000:1000
 ENV XDG_CONFIG_HOME=/home/node/.factory-theia
 ENV THEIA_CONFIG_DIR=/home/node/.factory-theia

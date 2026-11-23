@@ -264,6 +264,10 @@ test("runtime publication compares config digests, not Docker's manifest ID", as
   expect(command).toContain(
     'test "$(docker image inspect --format \'{{.Id}}\' "$image")" = "$image_id"',
   );
+  expect(command).toContain('elif [[ "$role" == developer-ide ]]');
+  expect(command).toContain("--read-only --cap-drop=ALL --user 1000:1000");
+  expect(command).toContain('fs.readFileSync("/opt/factory/theia/package.json", "utf8")');
+  expect(command).toContain('fs.readdirSync("/opt/factory/theia"');
   const comparison = command.split("\n").find((line) => line.includes('test "$published_config"'));
   if (!comparison) throw new Error("Missing published config comparison");
   const configDigest = `sha256:${"a".repeat(64)}`;

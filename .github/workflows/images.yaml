@@ -193,7 +193,7 @@ jobs:
                 --label "org.opencontainers.image.version=$RELEASE"
                 --file "$dockerfile" "${target[@]}" "${build_args[@]}" --tag "$image")
               attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
-              if [[ "$role" == runtime-host || "$role" == substrate-runtime ]]; then
+              if [[ "$role" == runtime-host || "$role" == developer-ide || "$role" == substrate-runtime ]]; then
                 "${build[@]}" --provenance=false --sbom=false --load \
                   --metadata-file "$RUNNER_TEMP/$role-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
@@ -209,6 +209,15 @@ jobs:
                   bash scripts/runtime/compose-inputs-proof.sh "$image_id"
                   registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
                   bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
+                elif [[ "$role" == developer-ide ]]; then
+                  docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
+                    --security-opt=no-new-privileges --cpus=1 --memory=256m --entrypoint node "$image_id" -e '
+                      const fs = require("node:fs"), path = require("node:path"), assert = require("node:assert/strict");
+                      assert.equal(process.getuid(), 1000);
+                      assert.equal(JSON.parse(fs.readFileSync("/opt/factory/theia/package.json", "utf8")).name, "factory-theia-browser");
+                      for (const entry of fs.readdirSync("/opt/factory/theia", { recursive: true, withFileTypes: true }))
+                        fs.accessSync(path.join(entry.parentPath, entry.name), fs.constants.R_OK | (entry.isDirectory() ? fs.constants.X_OK : 0));
+                    '
                 else
                   bash scripts/runtime/substrate-image-proof.sh "$image_id"
                 fi
