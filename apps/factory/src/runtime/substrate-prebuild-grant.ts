@@ -3,7 +3,6 @@ import { type DatabaseTransaction, drizzleTransaction } from "../../../../packag
 import { runtimeAttempt } from "../../../../packages/db/src/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { requireSetupReady } from "../setup/execution-gate";
 
 export async function substratePrebuildAuthorityIn(
   sql: DatabaseTransaction,
@@ -11,7 +10,6 @@ export async function substratePrebuildAuthorityIn(
   preparationID: string,
   attemptID: string,
 ) {
-  await requireSetupReady(sql, projectID);
   const [scope] = await sql<
     {
       userID: string;

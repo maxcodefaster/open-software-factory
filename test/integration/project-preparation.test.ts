@@ -5,6 +5,40 @@ import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { substrateFixture } from "../fixtures/substrate";
 
+test("imported preparation admission without explicit intent stays setup-gated before resolving inputs", async () => {
+  const f = await substrateFixture();
+  let heads = 0;
+  let starts = 0;
+  try {
+    await f.database
+      .client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+      VALUES(${crypto.randomUUID()},${crypto.randomUUID()},${f.userID},${f.projectID},'Owned import',${`native-${f.projectID}`},'import',
+        'https://example.invalid/import.git',${"a".repeat(64)},'committed')`;
+    const preparation = createProjectPreparation({
+      database: f.database,
+      head: async () => {
+        heads++;
+        return "a".repeat(40);
+      },
+      start: async () => {
+        starts++;
+      },
+    });
+    await expect(preparation.ensure(f.projectID)).rejects.toThrow(
+      "Confirm this Project's configuration",
+    );
+    await preparation.drain();
+    expect(heads).toBe(0);
+    expect(starts).toBe(0);
+    expect(await f.database.client`SELECT id FROM factory.project_image_preparation`).toHaveLength(
+      0,
+    );
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
 for (const producerEnvironment of ["development", "main-preview"] as const)
   test.each(["runtime-only", "build-variable", "registry"] as const)(
     `native image lookup isolates changed %s inputs from ${producerEnvironment}`,

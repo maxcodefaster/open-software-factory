@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { createSubstratePrebuild } from "../../apps/factory/src/runtime/substrate-prebuild";
 import {
+  substratePrebuildAuthorityIn,
+  substratePrebuildGrantIn,
   substratePrebuildPrincipalIn,
   substratePrebuildSourceIn,
 } from "../../apps/factory/src/runtime/substrate-prebuild-grant";
@@ -20,10 +22,11 @@ import {
   SubstrateRPCError,
 } from "../../packages/runtime-kubernetes/src/substrate-control";
 import upstream from "../../upstream.json";
+import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { substrateFixture } from "../fixtures/substrate";
 
 async function publicationEnvironment(
-  f: Awaited<ReturnType<typeof substrateFixture>>,
+  f: Pick<Awaited<ReturnType<typeof substrateFixture>>, "database" | "projectID" | "userID">,
   environment: "development" | "main-preview",
   publish = true,
 ) {
@@ -48,6 +51,120 @@ async function publicationEnvironment(
       VALUES(${f.projectID},${environment},1,${JSON.stringify(manifest)}::text::jsonb,${secretKey})`;
   });
 }
+
+test("imported devcontainer-only explicit preparation retains native grants without App/QA setup confirmation", async () => {
+  const f = await nativeRuntimeFixture("personal", false);
+  const preparationID = crypto.randomUUID();
+  const attemptID = runtimeIdentity(preparationID, 1).attemptID;
+  try {
+    await mkdir(join(f.repository, ".devcontainer"));
+    await writeFile(
+      join(f.repository, ".devcontainer/devcontainer.json"),
+      JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
+    );
+    await Bun.$`git -C ${f.repository} add .devcontainer/devcontainer.json`.quiet();
+    await Bun.$`git -C ${f.repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m devcontainer`.quiet();
+    const revision = (await Bun.$`git -C ${f.repository} rev-parse HEAD`.text()).trim();
+    await f.database
+      .client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+      VALUES(${crypto.randomUUID()},${crypto.randomUUID()},${f.userID},${f.projectID},'Owned import',${`native-${f.projectID}`},'import',
+        'https://example.invalid/import.git',${"a".repeat(64)},'committed')`;
+    await f.database
+      .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
+      VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
+    await publicationEnvironment(f, "development");
+    // Controlled explicit preparation intent, not admission from a read, import or repair.
+    await f.database
+      .client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
+      VALUES(${preparationID},${f.projectID},'development',${revision},1)`;
+    const runtime = f.controller({
+      ...f.configuration,
+      prebuildRegistry: "registry.test",
+      egressHosts: ["registry.test"],
+    });
+    await runtime.startProjectPrebuild(preparationID);
+    expect(await runtime.get(attemptID)).toMatchObject({
+      state: "starting",
+      runtimeKind: "prebuild",
+      workspaceId: null,
+      changeId: null,
+      revision,
+    });
+    expect(
+      await f.database.client.begin((sql) =>
+        substratePrebuildGrantIn(sql, f.projectID, preparationID, attemptID, f.userID),
+      ),
+    ).toEqual({ projectID: f.projectID, changeID: null, revision });
+    expect(await f.database.client.begin((sql) => substratePrebuildSourceIn(sql, attemptID))).toBe(
+      `file://${f.repository}`,
+    );
+    const missingID = crypto.randomUUID();
+    await expect(
+      f.database.client.begin((sql) =>
+        substratePrebuildAuthorityIn(
+          sql,
+          f.projectID,
+          missingID,
+          runtimeIdentity(missingID, 1).attemptID,
+        ),
+      ),
+    ).rejects.toThrow("Current native prebuild authority is required");
+    await expect(
+      f.database.client.begin((sql) =>
+        substratePrebuildGrantIn(sql, f.projectID, preparationID, attemptID, crypto.randomUUID()),
+      ),
+    ).rejects.toThrow("Confirmed native prebuild provisioning is required");
+    const preparation = createProjectPreparation({
+      database: f.database,
+      head: async () => {
+        throw new Error("Image lookup must not resolve or admit new Project inputs");
+      },
+      start: async () => {
+        throw new Error("Image lookup must not start preparation");
+      },
+    });
+    const image = `registry.test/open-factory/prebuilds/${f.projectID}@sha256:${"d".repeat(64)}`;
+    const request = (method: "GET" | "POST", token = f.connectorTokens(attemptID).parent) =>
+      new Request(`https://factory.test/internal/project-image/${attemptID}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-factory-runtime-generation": "1",
+          "content-type": "application/json",
+        },
+        ...(method === "POST" ? { body: JSON.stringify({ identity: "c".repeat(64), image }) } : {}),
+      });
+    const calls = f.calls.length;
+    const lookup = await preparation.endpoint(request("GET"), attemptID);
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toBeNull();
+    expect(f.calls).toHaveLength(calls);
+    expect((await preparation.endpoint(request("POST", "wrong"), attemptID)).status).toBe(401);
+    await f.database
+      .client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${f.userID}`;
+    expect((await preparation.endpoint(request("POST"), attemptID)).status).toBe(401);
+    await f.database
+      .client`UPDATE factory.account_access SET disabled_at=NULL WHERE user_id=${f.userID}`;
+    expect((await preparation.endpoint(request("POST"), attemptID)).status).toBe(204);
+    expect((await preparation.endpoint(request("POST"), attemptID)).status).toBe(204);
+    const prepared = await preparation.endpoint(request("GET"), attemptID);
+    expect(await prepared.json()).toEqual({ identity: "c".repeat(64), image });
+    expect(await f.database.client`SELECT id FROM factory.project_image_preparation`).toHaveLength(
+      1,
+    );
+    expect([
+      ...(await f.database
+        .client`SELECT state FROM factory.project_setup_readiness WHERE project_id=${f.projectID} AND task='configuration'`),
+    ]).toEqual([{ state: "pending" }]);
+    expect(
+      await f.database.client`SELECT inspection_id FROM factory.project_setup_confirmation`,
+    ).toHaveLength(0);
+    expect(await Bun.file(join(f.repository, ".factory/system.json")).exists()).toBe(false);
+    expect((await runtime.stop(attemptID))?.state).toBe("stopped");
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
 
 async function qualifyNativePrebuild(architecture: "amd64" | "arm64") {
   const f = await substrateFixture();
