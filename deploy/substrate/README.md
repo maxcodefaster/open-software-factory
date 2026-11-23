@@ -316,6 +316,9 @@ exporting and never captures a new ROOTFS merely to delete that Actor. Missing i
 blocks Delete. Lost replies retain the original intent until the same Actor is independently
 absent; concurrent Start cannot wake it. Startup recovery and the bounded Stop-cleanup sweep
 continue that recorded operation without new compute, hooks or input.
+During startup, the authenticated Source drain cancels and joins preparation instead of
+waiting behind a blocked Dev Container command. The same queued checkpoint request then
+reaches the retained Source owner; cancellation alone is not a drain acknowledgement.
 
 An explicit Workspace Start after confirmed Stop selects the next generation only after
 re-observing the original Actor's absence and independent Source. Every generation keeps its own

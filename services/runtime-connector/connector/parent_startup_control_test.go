@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,6 +20,251 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestParentStartupSourceDrainCancelsAndJoinsBeforeRetainedOwnerAcknowledges(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		fullQueue bool
+		lostReply bool
+	}{
+		{name: "queued-drain"},
+		{name: "full-queue", fullQueue: true},
+		{name: "lost-drain-reply", lostReply: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			assignment := validAssignment()
+			assignment.nativeActorUID = "owned-startup-actor"
+			assignment.nativeRetainedSource = true
+			assignment.PreserveWorkspace = true
+			assignment.nativeSource = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "starting Source")
+			})
+			directory := t.TempDir()
+			trace := filepath.Join(directory, "docker-trace")
+			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>"+fmt.Sprintf("%q", trace)+"\n[ \"$1\" = ps ]\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FACTORY_SUBSTRATE_ACTOR_UID", assignment.nativeActorUID)
+			const token = "owned-startup-capability"
+			peers := make(chan *websocket.Conn, 2)
+			upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+token ||
+					r.Header.Get("X-Factory-Runtime-Actor-UID") != assignment.nativeActorUID ||
+					r.Header.Get("X-Factory-Runtime-Attempt") != assignment.RuntimeAttemptID ||
+					r.Header.Get("X-Factory-Runtime-Generation") != strconv.FormatUint(assignment.Generation, 10) ||
+					r.Header.Get("X-Factory-Connector-Role") != "parent" {
+					http.Error(w, "unadmitted Parent", http.StatusForbidden)
+					return
+				}
+				peer, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer peer.Close()
+				select {
+				case peers <- peer:
+				case <-ctx.Done():
+					return
+				}
+				<-ctx.Done()
+			}))
+			assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
+			started, cleaning, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			startupDone, ownFailure, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var releaseOnce, ownerOnce sync.Once
+			var startupErr error
+			var control, original *controlConnection
+			serving := false
+			t.Cleanup(func() {
+				cancel()
+				releaseOnce.Do(func() { close(release) })
+				ownerOnce.Do(func() { close(ownFailure) })
+				if serving {
+					select {
+					case <-finished:
+					case <-time.After(time.Second):
+						t.Error("startup/failure owner did not join")
+						return
+					}
+				}
+				for _, connection := range []*controlConnection{original, control} {
+					if connection != nil {
+						connection.close()
+						<-connection.readerDone
+					}
+				}
+				server.Close()
+			})
+			var err error
+			control, err = dialControl(ctx, assignment, "parent", token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := control.write(Message{Type: "hello", Role: "parent"}); err != nil {
+				t.Fatal(err)
+			}
+			original = control
+			var peer *websocket.Conn
+			select {
+			case peer = <-peers:
+			case <-ctx.Done():
+				t.Fatal("authenticated startup socket did not open")
+			}
+			deadline, _ := ctx.Deadline()
+			_ = peer.SetReadDeadline(deadline)
+			_ = peer.SetWriteDeadline(deadline)
+			read := func() Message {
+				t.Helper()
+				var message Message
+				if err := peer.ReadJSON(&message); err != nil {
+					t.Fatal(err)
+				}
+				return message
+			}
+			write := func(message Message) {
+				t.Helper()
+				if err := peer.WriteJSON(message); err != nil {
+					t.Fatal(err)
+				}
+			}
+			checkSource := func(id string) {
+				t.Helper()
+				write(Message{Type: "http-request", StreamID: id, Channel: "source", Method: "GET", Path: "/v1/workspaces/owned/tree"})
+				for _, kind := range []string{"http-response", "stream-data", "stream-end"} {
+					if got := read(); got.Type != kind || got.StreamID != id ||
+						(kind == "stream-data" && got.Data != base64.StdEncoding.EncodeToString([]byte("starting Source"))) {
+						t.Fatalf("Source lost or startup dispatched a queued operation: %#v", got)
+					}
+				}
+			}
+			if got := read(); got.Type != "hello" {
+				t.Fatalf("unexpected startup handshake: %#v", got)
+			}
+			serving = true
+			go func() {
+				defer close(finished)
+				startupErr = withParentStartupControl(ctx, assignment, token, &control, func(ctx context.Context) error {
+					close(started)
+					<-ctx.Done()
+					close(cleaning)
+					<-release // Simulate joining the CLI and its last writer.
+					return ctx.Err()
+				})
+				close(startupDone)
+				<-ownFailure
+				_ = retainParentStartupFailure(ctx, assignment, token, &control, startupErr)
+			}()
+			<-started
+			queued := []Message{
+				{Type: "operation-request", Action: "workspace-git", OperationID: "queued-writer"},
+				{Type: "operation-request", Action: "source-drain"},
+				{Type: "operation-response", Action: "source-drain", OperationID: "not-a-request"},
+				{Type: "operation-request", Action: "Source-drain", OperationID: "not-the-action"},
+			}
+			if scenario.fullQueue {
+				for len(queued) < controlReadQueueLimit {
+					queued = append(queued, Message{Type: "operation-request", Action: "workspace-git", OperationID: fmt.Sprint(len(queued))})
+				}
+			}
+			for _, message := range queued {
+				write(message)
+			}
+			checkSource("before-drain")
+			select {
+			case <-cleaning:
+				t.Fatal("an arbitrary operation or identity-free drain cancelled preparation")
+			default:
+			}
+			checkpoint := Message{Type: "operation-request", Action: "source-drain", OperationID: "original-checkpoint"}
+			write(checkpoint)
+			select {
+			case <-cleaning:
+			case <-time.After(time.Second):
+				t.Fatal("authenticated Source drain did not cancel blocked preparation")
+			}
+			if ctx.Err() != nil || control.sourceCtx.Err() != nil {
+				t.Fatal("Source drain cancelled the Parent or its Source")
+			}
+			select {
+			case <-startupDone:
+				t.Fatal("startup returned before its preparation writers joined")
+			case <-time.After(25 * time.Millisecond):
+			}
+			if !scenario.fullQueue {
+				checkSource("while-joining")
+			}
+			if _, err := os.Stat(trace); !os.IsNotExist(err) {
+				t.Fatal("startup dispatched Docker work before joining preparation")
+			}
+			if scenario.lostReply {
+				_ = peer.Close()
+			}
+			releaseOnce.Do(func() { close(release) })
+			select {
+			case <-startupDone:
+			case <-ctx.Done():
+				t.Fatal("startup did not join cancelled preparation")
+			}
+			if !errors.Is(startupErr, context.Canceled) || cap(control.incoming) != controlReadQueueLimit ||
+				len(control.incoming) < min(len(queued)+1, controlReadQueueLimit) {
+				t.Fatalf("startup lost cancellation or consumed its bounded queue: %v", startupErr)
+			}
+			if err := withParentStartupControl(ctx, assignment, token, &control, func(context.Context) error {
+				t.Error("queued drain started another preparation phase")
+				return nil
+			}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("queued drain allowed startup to resume: %v", err)
+			}
+			ownerOnce.Do(func() { close(ownFailure) })
+			if scenario.lostReply {
+				select {
+				case peer = <-peers:
+				case <-ctx.Done():
+					t.Fatal("retained failure owner did not reconnect after lost drain reply")
+				}
+				_ = peer.SetReadDeadline(deadline)
+				_ = peer.SetWriteDeadline(deadline)
+				if got := read(); got.Type != "hello" {
+					t.Fatalf("failure owner did not authenticate its reconnect: %#v", got)
+				}
+			}
+			if got := read(); got.Type != "status" || got.Phase != "failed" {
+				t.Fatalf("drain was acknowledged before the joined failure handoff: %#v", got)
+			}
+			expected := append(queued, checkpoint)
+			if scenario.lostReply {
+				different := checkpoint
+				different.OperationID = "different-checkpoint"
+				expected = []Message{different, checkpoint}
+				for _, message := range expected {
+					write(message)
+				}
+			}
+			for _, message := range expected {
+				if message.Type != "operation-request" {
+					continue
+				}
+				got := read()
+				if got.Type != "operation-response" || got.Action != message.Action || got.OperationID != message.OperationID ||
+					(got.Error == "") != reflect.DeepEqual(message, checkpoint) {
+					t.Fatalf("failure owner lost/reordered/dispatched startup operations: %#v for %#v", got, message)
+				}
+			}
+			checkSource("after-drain")
+			commands, err := os.ReadFile(trace)
+			drains := 1
+			if scenario.lostReply {
+				drains++
+			}
+			if err != nil || string(commands) != strings.Repeat("ps --quiet --no-trunc\nps --quiet --no-trunc\n", drains) {
+				t.Fatalf("failure owner replayed preparation or failed to drain: %q %v", commands, err)
+			}
+		})
+	}
+}
 
 func TestParentStartupControlReconnectsBeforeBlockedPreparationReturns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -419,5 +667,21 @@ func TestParentStartupControlKeepsSuccessfulPreparationContextAlive(t *testing.T
 	case <-preparedContext.Done():
 	default:
 		t.Fatal("prepared Child context no longer follows Parent cancellation")
+	}
+}
+
+func TestParentStartupControlCancelsFailedPreparationContext(t *testing.T) {
+	control := &controlConnection{done: make(chan struct{})}
+	failure := errors.New("owned preparation failure")
+	var preparedContext context.Context
+	err := withParentStartupControl(t.Context(), validAssignment(), "unused", &control, func(ctx context.Context) error {
+		preparedContext = ctx
+		return failure
+	})
+	if !errors.Is(err, failure) || !errors.Is(preparedContext.Err(), context.Canceled) {
+		t.Fatalf("failed startup lost its error or retained its preparation context: %v / %v", err, preparedContext.Err())
+	}
+	if t.Context().Err() != nil {
+		t.Fatal("failed preparation cancelled its Parent context")
 	}
 }

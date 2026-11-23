@@ -30,7 +30,14 @@ func cleanupFailedParentStartup(ctx context.Context, assignment Assignment, fail
 // failure. No Project command, Git operation, browser, Child or hook is retried.
 // Factory's existing Source drain/checkpoint and native Suspend still own Stop.
 func retainParentStartupFailure(ctx context.Context, assignment Assignment, token string, control **controlConnection, failure error) error {
-	reportParentStartupFailure(ctx, assignment, token, control, failure)
+	if (*control).sourceDrainRequested() {
+		// Startup already joined its writers. Keep the original queued drain
+		// (and Source) on this socket; replacing it here would lose the request.
+		// A lost reply still reconciles through the fence below on reconnect.
+		_ = (*control).write(Message{Type: "status", Phase: "failed", Error: failure.Error()})
+	} else {
+		reportParentStartupFailure(ctx, assignment, token, control, failure)
+	}
 	if !keepsParentStartupSource(assignment) {
 		return failure
 	}

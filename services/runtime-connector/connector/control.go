@@ -21,6 +21,7 @@ type controlConnection struct {
 	writeLock    sync.Mutex
 	readOnce     sync.Once
 	incoming     chan controlFrame
+	sourceDrain  chan struct{}
 	readerDone   chan struct{}
 	closeOnce    sync.Once
 	done         chan struct{}
@@ -140,6 +141,7 @@ func (control *controlConnection) armReadDeadline(timeout time.Duration) {
 func (control *controlConnection) startReader() {
 	control.readOnce.Do(func() {
 		control.incoming = make(chan controlFrame, controlReadQueueLimit)
+		control.sourceDrain = make(chan struct{})
 		control.readerDone = make(chan struct{})
 		go func() {
 			defer close(control.readerDone)
@@ -165,6 +167,13 @@ func (control *controlConnection) startReader() {
 						continue
 					}
 				}
+				if frame.err == nil && frame.message.Type == "operation-request" &&
+					frame.message.Action == "source-drain" && frame.message.OperationID != "" && !control.sourceDrainRequested() {
+					// Wake startup even if this frame must wait for queue space.
+					// Do not consume, dispatch or acknowledge it: the existing
+					// owner must drain only after preparation has joined.
+					close(control.sourceDrain)
+				}
 				select {
 				case control.incoming <- frame:
 				case <-control.done:
@@ -176,6 +185,15 @@ func (control *controlConnection) startReader() {
 			}
 		}()
 	})
+}
+
+func (control *controlConnection) sourceDrainRequested() bool {
+	select {
+	case <-control.sourceDrain:
+		return true
+	default:
+		return false
+	}
 }
 
 // Preserve the socket's receive order, including complete frames received before
