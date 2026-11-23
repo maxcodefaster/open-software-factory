@@ -239,36 +239,38 @@ async function proveGenerations(kind: "personal" | "ticket") {
   };
   const contractRevisions: string[] = [];
   let submitDuringContractRead = false;
-  const workspaces = createSubstrateWorkspaces(
-    f.database,
-    f.hub,
-    secret,
-    config,
-    call,
-    call,
-    async (_repository, revision) => {
-      contractRevisions.push(revision);
-      if (submitDuringContractRead) {
-        submitDuringContractRead = false;
-        submitted = "f".repeat(40);
-        await recordSubmission(submitted, 3);
-      }
-      return {
-        version: 1,
-        primaryApp: "web",
-        apps: [
-          {
-            id: "web",
-            label: "Owned",
-            command: ["node", "server.mjs"],
-            port: 4300,
-            healthPath: "/",
-          },
-        ],
-      };
-    },
-    sources,
-  );
+  const createWorkspaces = () =>
+    createSubstrateWorkspaces(
+      f.database,
+      f.hub,
+      secret,
+      config,
+      call,
+      call,
+      async (_repository, revision) => {
+        contractRevisions.push(revision);
+        if (submitDuringContractRead) {
+          submitDuringContractRead = false;
+          submitted = "f".repeat(40);
+          await recordSubmission(submitted, 3);
+        }
+        return {
+          version: 1,
+          primaryApp: "web",
+          apps: [
+            {
+              id: "web",
+              label: "Owned",
+              command: ["node", "server.mjs"],
+              port: 4300,
+              healthPath: "/",
+            },
+          ],
+        };
+      },
+      sources,
+    );
+  let workspaces = createWorkspaces();
   const start = (userID = f.userID) =>
     kind === "ticket"
       ? workspaces.start(userID, f.changeID)
@@ -290,6 +292,10 @@ async function proveGenerations(kind: "personal" | "ticket") {
     await expect(start()).rejects.toThrow("retired");
     expect(creates).toHaveLength(5);
     await first.stop();
+    // A normal operator admission must neither rebind the deleted predecessor
+    // nor brick this Workspace's next explicit, independently owned generation.
+    config.egressHosts = ["westeurope.data.mcr.microsoft.com"];
+    workspaces = createWorkspaces();
     if (kind === "ticket") {
       await recordSubmission(submitted, 1);
       await recordSubmission("e".repeat(40), 2, "failed");
@@ -405,6 +411,15 @@ async function proveGenerations(kind: "personal" | "ticket") {
       >`SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=2`
     )[0]?.intent;
     expect(successor?.revision).toBe(revision);
+    expect([
+      ...(await f.database.client<{ generation: string; hosts: string[] }[]>`
+        SELECT generation,intent#>'{configuration,egressHosts}' AS hosts
+        FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}
+        ORDER BY generation`),
+    ]).toEqual([
+      { generation: "1", hosts: [] },
+      { generation: "2", hosts: ["westeurope.data.mcr.microsoft.com"] },
+    ]);
     expect((await first.get()).state).toBe("deleted");
     const provisions = await f.database
       .client`SELECT generation FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} ORDER BY generation`;

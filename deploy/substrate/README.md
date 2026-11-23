@@ -243,6 +243,10 @@ The publication decision stays in Factory; the Connector receives only its selec
 credentials, not that control-plane permission. Lost replies observe the same
 names, and a published result releases the producer only after exact-UID Delete
 is confirmed. Registry/image selection changes do not rewrite retained owners.
+Additional installation-level egress admissions apply only to fresh owners. Retained
+owners keep their exact original host list; adding an admitted download host does not block
+their observation or a new generation after confirmed Stop. Removing an original admission
+or changing native trust/placement still fails closed rather than rebinding the old Actor.
 Native prebuild recipe checks run Git against canonical Source as development UID 1000;
 their temporary build checkout stays private. Consumer image inspection uses the same
 Actor-private Docker connection as acquisition, and still checks the exact input label and platform.

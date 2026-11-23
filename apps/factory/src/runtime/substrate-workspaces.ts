@@ -121,6 +121,11 @@ export function retainedSubstrateConfiguration(
 ) {
   const retained = configuration.parse(value);
   const selected = { ...desired, workloadImage: retained.workloadImage };
+  // An operator may admit another download host for fresh generations. Keep
+  // this owner's exact original policy; never add hosts to a retained Actor.
+  // A removed admission still invalidates continuation rather than ignoring it.
+  if (retained.egressHosts.every((host) => desired.egressHosts.includes(host)))
+    selected.egressHosts = retained.egressHosts;
   // Publication selection is for fresh producers, never a retained Workspace's
   // bootstrap or permission to change its egress.
   if (retained.prebuildRegistry) selected.prebuildRegistry = retained.prebuildRegistry;

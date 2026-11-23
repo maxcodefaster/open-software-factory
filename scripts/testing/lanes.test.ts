@@ -376,6 +376,7 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
     expect(controllerNeedsDatabase(path)).toBe(false);
   }
   expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/source-startup.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-source-seed.test.ts")).toBe(false);
   expect(integrationNeedsApplicationBuild("test/integration/substrate-source-seed.test.ts")).toBe(
     false,
@@ -437,6 +438,8 @@ test("database-only feature checks skip the application build while endpoint che
     "workspace-container-files",
     "substrate-source",
     "substrate-source-access",
+    "source-startup",
+    "substrate-workspace-generations",
     "developer-ide",
     "developer-ide-access-recovery",
   ])

@@ -133,6 +133,7 @@ export function integrationNeedsApplicationBuild(path: string) {
     "substrate-source-seed.test.ts",
     "source-startup.test.ts",
     "substrate-workspaces.test.ts",
+    "substrate-workspace-generations.test.ts",
     "developer-ide.test.ts",
     "developer-ide-access-recovery.test.ts",
   ].includes(basename(path));

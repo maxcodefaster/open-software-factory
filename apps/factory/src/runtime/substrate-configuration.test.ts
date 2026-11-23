@@ -60,3 +60,31 @@ test("Project bindings freeze their own identity under one installation configur
   expect(() => retainedSubstrateConfiguration(another, original)).toThrow("immutable intent");
   expect(() => substrateWorkspaceConfiguration(configuration)).toThrow();
 });
+
+test("admitting new egress hosts keeps retained owners on their original exact policy", () => {
+  const original = substrateWorkspaceConfiguration({
+    ...configuration,
+    projectID: crypto.randomUUID(),
+    egressHosts: ["mcr.microsoft.com"],
+  });
+  const admitted = {
+    ...original,
+    egressHosts: ["mcr.microsoft.com", "westeurope.data.mcr.microsoft.com"],
+  };
+  expect(retainedSubstrateConfiguration(admitted, original)).toEqual(original);
+  expect(original.egressHosts).toEqual(["mcr.microsoft.com"]);
+  expect(admitted.egressHosts).toEqual(["mcr.microsoft.com", "westeurope.data.mcr.microsoft.com"]);
+  for (const egressHosts of [[], ["westeurope.data.mcr.microsoft.com"]])
+    expect(() => retainedSubstrateConfiguration({ ...original, egressHosts }, original)).toThrow(
+      "immutable intent",
+    );
+  expect(() =>
+    retainedSubstrateConfiguration(
+      {
+        ...admitted,
+        connection: { ...admitted.connection, endpoint: "another-cluster.invalid:443" },
+      },
+      original,
+    ),
+  ).toThrow("immutable intent");
+});
