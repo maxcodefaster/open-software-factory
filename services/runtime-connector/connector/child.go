@@ -344,7 +344,11 @@ func (runtime *childRuntime) handleOperation(message Message) {
 		if err == nil {
 			switch message.Action {
 			case "file-context":
-				value = map[string]any{"workspaceFolder": runtime.assignment.WorkspaceFolder, "userID": os.Geteuid()}
+				context := map[string]any{"workspaceFolder": runtime.assignment.WorkspaceFolder, "userID": os.Geteuid()}
+				if runtime.assignment.CheckoutFolder != "" {
+					context["checkoutFolder"] = runtime.assignment.CheckoutFolder
+				}
+				value = context
 			case "file-stat":
 				value, err = runtime.files.stat(input)
 			case "file-read":

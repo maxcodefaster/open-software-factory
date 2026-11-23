@@ -45,6 +45,13 @@ to inspect or edit the source. Its first access prepares a pinned canonical chec
 starting an Actor, Docker, Project hooks or inference. The first explicit compute Start imports
 the latest saved checkout before Project execution. Open the Preview to use the App. The Substrate
 integration uses cold restart rather than promising continuity of running processes.
+An existing standard Dev Container is enough for Workspace compute and Coding; `.factory/system.json`
+and a Factory verification workflow are not prerequisites for that development path. The pinned
+Dev Containers CLI selects the actual container folder and user, including its default folder
+and custom image, Dockerfile or Compose workspaces. Factory does not rewrite those settings or
+require `/workspace/project`. App Preview, Staging and exact-commit Verification need their own
+explicitly configured commands and checks; opening Source or starting compute does not supply or pass them.
+Installation security and egress policy still apply; privileged or host-bound recipes are not portable.
 If you opened Source before confirming Project setup, Start adds only the exact approved missing
 configuration files. Saved edits and Git history stay intact; conflicting local configuration is
 preserved and reported instead of overwritten.
@@ -94,7 +101,7 @@ local agent can change a Ticket checkout. It does not start Coding or approve re
 
 File tools default to `location: "checkout"`, with paths relative to retained source. Those reads
 do not wake compute. Select `location: "container"` for absolute paths inside the actual Dev
-Container. `getContainerContext` reports its Workspace folder and effective user ID. Container
+Container. `getContainerContext` reports its Workspace folder, observed checkout root and effective user ID. Container
 access requires development scope and collaboration permission. Keep the returned file version
 when changing an existing file. Versions detect observed changes; they do not coordinate arbitrary
 concurrent shell, formatter or Git writes, or save another editor's unsaved buffer.

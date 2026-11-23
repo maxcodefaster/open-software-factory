@@ -8,8 +8,10 @@ import {
   ensureOpenCodeMessageBoundary,
   installedOpenCodeSkillIDs,
   interruptOpenCodeSession,
+  listOpenCodeSessionTree,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
+  readOpenCodeWorkspace,
   syncOpenCodeInputGuidance,
 } from "./opencode-adapter";
 import { checkTerminalOpenCodeInbox } from "./opencode-terminal";
@@ -28,6 +30,31 @@ const receipt = {
   delivery: "queue" as const,
   payload: { text: input.text },
 };
+
+test.each(["/workspaces/project", "/code/my-python-app", "/code/monorepo/backend"])(
+  "discovers native OpenCode context %s without a Factory directory override",
+  async (directory) => {
+    const client = createOpenCodeClient(async (request, path) => {
+      expect(request.method).toBe("GET");
+      expect(path).toBe("/api/location");
+      return Response.json({ directory, project: { directory } });
+    });
+    expect(await readOpenCodeWorkspace(client)).toEqual({
+      location: { directory },
+      checkoutDirectory: directory,
+    });
+  },
+);
+
+test.each(["/", "../project", "/code/../project", "/code/project/", "/code/\nproject"])(
+  "does not admit invalid native OpenCode context %s",
+  async (directory) => {
+    const client = createOpenCodeClient(async () =>
+      Response.json({ directory, project: { directory } }),
+    );
+    await expect(readOpenCodeWorkspace(client)).rejects.toThrow("directory is invalid");
+  },
+);
 
 test("native built-in Skill URIs do not count as extra installed packages", () => {
   const id = `factory-${crypto.randomUUID()}`;
@@ -263,6 +290,10 @@ describe("native OpenCode 2 admission", () => {
         expect(await request.json()).toMatchObject({ text: input.text, id: input.promptID });
         return Response.json({ data: receipt });
       }
+      if (path === `/api/session/${input.sessionID}`)
+        return Response.json({
+          data: { id: input.sessionID, location: { directory: "/code/project" } },
+        });
       return Response.json({ interrupted: true });
     });
     expect(
@@ -467,6 +498,7 @@ function controlled(
       return Response.json({
         data: {
           id: options.sessionID ?? input.sessionID,
+          location: { directory: "/code/project" },
           ...(options.revert ? { revert: {} } : {}),
         },
       });
@@ -475,6 +507,46 @@ function controlled(
 }
 
 describe("ordered native Stop", () => {
+  test.each(["/workspaces/project", "/code/my-python-app", "/code/monorepo/backend"])(
+    "native child ancestry uses the recorded root directory %s, not a Factory path",
+    async (directory) => {
+      const client = createOpenCodeClient(async (_request, path) => {
+        const url = new URL(path, "http://opencode.runtime");
+        if (url.pathname === `/api/session/${input.sessionID}`)
+          return Response.json({ data: { id: input.sessionID, location: { directory } } });
+        if (url.pathname !== "/api/session")
+          throw new Error("Ancestry observation must only read the root and its children");
+        return Response.json({
+          data:
+            url.searchParams.get("parentID") === input.sessionID
+              ? [{ id: "ses_child", parentID: input.sessionID, location: { directory } }]
+              : [],
+          cursor: {},
+        });
+      });
+      expect(await listOpenCodeSessionTree(client, input.sessionID)).toEqual([
+        input.sessionID,
+        "ses_child",
+      ]);
+    },
+  );
+  test("a native child in a different directory cannot join the admitted tree", async () => {
+    const client = createOpenCodeClient(async (_request, path) =>
+      Response.json({
+        data: path.includes(`/api/session/${input.sessionID}`)
+          ? { id: input.sessionID, location: { directory: "/code/project" } }
+          : [
+              {
+                id: "ses_child",
+                parentID: input.sessionID,
+                location: { directory: "/code/another-project" },
+              },
+            ],
+        cursor: {},
+      }),
+    );
+    await expect(listOpenCodeSessionTree(client, input.sessionID)).rejects.toThrow("ancestry");
+  });
   test("an idle primary cannot release its writer while a background shell runs", async () => {
     const client = createOpenCodeClient(async (_request, path) => {
       if (path.startsWith("/api/shell"))
@@ -544,7 +616,9 @@ describe("ordered native Stop", () => {
       }
       if (path.endsWith("/inbox")) return Response.json({ data: pending ? [receipt] : [] });
       if (path.endsWith("/active")) return Response.json({ data: {} });
-      return Response.json({ data: { id: input.sessionID } });
+      return Response.json({
+        data: { id: input.sessionID, location: { directory: "/code/project" } },
+      });
     });
     expect(await cancelQueuedOpenCodeInput(client, input.sessionID, input.promptID)).toBe(true);
     expect(paths).toContain(`DELETE /api/session/${input.sessionID}/inbox/${input.promptID}`);

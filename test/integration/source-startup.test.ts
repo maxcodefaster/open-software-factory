@@ -172,6 +172,29 @@ async function inspection(
   return id;
 }
 
+test.each(["initial", "after Stop"] as const)(
+  "devcontainer-only Source %s returns explicit contract absence without setup confirmation",
+  async (phase) => {
+    const f = await fixture();
+    try {
+      f.source.files.set(
+        ".devcontainer/devcontainer.json",
+        JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
+      );
+      const before = new Map(f.source.files);
+      const lease = phase === "initial" ? f.lease : { ...f.lease, actorUID: crypto.randomUUID() };
+      expect(await sourceStartupContract(f.database.client, lease, f.source.forward)).toBeNull();
+      expect(f.source.files).toEqual(before);
+      expect(f.source.mutations()).toEqual([]);
+      expect(f.source.calls).toEqual([{ operation: "read", body: { path: systemPath } }]);
+      expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
+
 test("Source seeded before setup confirmation gains only missing approved files and retains README edits", async () => {
   const f = await fixture();
   try {
@@ -269,7 +292,7 @@ test.each([
   "open questions",
   "non-setup file",
 ] as const)(
-  "initial startup cannot apply %s setup",
+  "initial startup never applies unapproved or invalid %s setup",
   async (scenario) => {
     const f = await fixture();
     try {
@@ -301,9 +324,10 @@ test.each([
           ? { ...f.lease, seed: { ...f.seed, workspaceID: crypto.randomUUID() } }
           : f.lease;
       const before = new Map(f.source.files);
-      await expect(
-        sourceStartupContract(f.database.client, lease, f.source.forward),
-      ).rejects.toThrow();
+      const start = sourceStartupContract(f.database.client, lease, f.source.forward);
+      if (["seed Workspace mismatch", "open questions", "non-setup file"].includes(scenario))
+        await expect(start).rejects.toThrow();
+      else expect(await start).toBeNull();
       expect(f.source.files).toEqual(before);
       expect(f.source.mutations()).toEqual([]);
     } finally {
@@ -389,21 +413,21 @@ test("Source after Stop reads the actual canonical contract without replaying in
   }
 }, 60_000);
 
-test.each([undefined, "{invalid JSON", JSON.stringify({ ...contract, primaryApp: "missing" })])(
-  "Source after Stop rejects missing or invalid canonical contract %# instead of restoring old setup",
+test.each([undefined, "", "{invalid JSON", JSON.stringify({ ...contract, primaryApp: "missing" })])(
+  "Source after Stop preserves absent or invalid canonical contract %# instead of restoring old setup",
   async (content) => {
     const f = await fixture();
     try {
       await inspection(f);
       if (content !== undefined) f.source.files.set(systemPath, content);
       const before = new Map(f.source.files);
-      await expect(
-        sourceStartupContract(
-          f.database.client,
-          { ...f.lease, actorUID: crypto.randomUUID() },
-          f.source.forward,
-        ),
-      ).rejects.toThrow();
+      const start = sourceStartupContract(
+        f.database.client,
+        { ...f.lease, actorUID: crypto.randomUUID() },
+        f.source.forward,
+      );
+      if (content === undefined) expect(await start).toBeNull();
+      else await expect(start).rejects.toThrow();
       expect(f.source.files).toEqual(before);
       expect(f.source.mutations()).toEqual([]);
     } finally {
@@ -412,3 +436,38 @@ test.each([undefined, "{invalid JSON", JSON.stringify({ ...contract, primaryApp:
   },
   60_000,
 );
+
+test("Source contract absence never masks access, transport or integrity failures", async () => {
+  const f = await fixture();
+  try {
+    const before = new Map(f.source.files);
+    for (const forward of [
+      async () => new Response(null, { status: 403 }),
+      async () => new Response(null, { status: 503 }),
+      async () => {
+        throw new Error("Owned Source reply lost");
+      },
+      async () => Response.json({ content: "", version: "unconfirmed" }),
+      async () =>
+        Response.json({
+          content: Buffer.from(JSON.stringify(contract)).toString("base64"),
+          version: "a".repeat(64),
+        }),
+    ])
+      await expect(sourceStartupContract(f.database.client, f.lease, forward)).rejects.toThrow();
+    for (const lease of [
+      { ...f.lease, writable: false },
+      { ...f.lease, owner: "actor" as const },
+      { ...f.lease, seed: null },
+      { ...f.lease, seedConfirmedAt: null },
+    ])
+      await expect(
+        sourceStartupContract(f.database.client, lease, f.source.forward),
+      ).rejects.toThrow();
+    expect(f.source.files).toEqual(before);
+    expect(f.source.mutations()).toEqual([]);
+    expect(f.source.calls).toEqual([]);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);

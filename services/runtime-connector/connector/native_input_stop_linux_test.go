@@ -51,6 +51,9 @@ func TestNativeInputStopPrivateBindRestrictions(t *testing.T) {
 }
 
 func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("private Stop root construction runs as root in the owned Linux lane")
+	}
 	root := t.TempDir()
 	previous := syscall.Umask(0077)
 	defer syscall.Umask(previous)
@@ -63,6 +66,9 @@ func TestNativeInputStopDirectoriesIgnorePrivateUmask(t *testing.T) {
 		}
 		if path != root && (!info.IsDir() || info.Mode().Perm() != 0755) {
 			t.Errorf("private worker path is not a traversable directory: %s %v", path, info.Mode())
+		}
+		if metadata, ok := info.Sys().(*syscall.Stat_t); !ok || metadata.Uid != 1000 || metadata.Gid != 1000 {
+			t.Errorf("private worker cannot create its empty native location below %s", path)
 		}
 		return nil
 	}); err != nil {

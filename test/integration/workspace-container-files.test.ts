@@ -49,7 +49,11 @@ async function fileFixture() {
       actions.push(request.action);
       let result: unknown;
       if (request.action === "file-context")
-        result = { workspaceFolder: "/workspaces/project", userID: 1000 };
+        result = {
+          workspaceFolder: "/workspaces/project/services/python",
+          checkoutFolder: "/workspaces/project",
+          userID: 1000,
+        };
       else if (request.action === "file-read") {
         const content = published.get(input.path) ?? Buffer.from("A€B");
         const version = sha256(content);
@@ -435,7 +439,8 @@ test("container access rechecks sharing, preserves actor ownership and refuses e
       expectedVersion: 1,
     });
     expect(await f.files.context(f.guest, f.workspaceID)).toEqual({
-      workspaceFolder: "/workspaces/project",
+      workspaceFolder: "/workspaces/project/services/python",
+      checkoutFolder: "/workspaces/project",
       userID: 1000,
     });
     expect(

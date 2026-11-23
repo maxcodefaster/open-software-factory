@@ -112,6 +112,7 @@ test("native setup inspection has a final-output step after sequential source re
   const paths = ["package.json", "README.md", "src/server.ts", "src/database.ts"];
   const loaded: string[] = [];
   let requests = 0;
+  let instructions = "";
   const previousProposal = {
     purpose: "Retained configuration under explicit review",
     services: [],
@@ -141,9 +142,17 @@ test("native setup inspection has a final-output step after sequential source re
         stream?: boolean;
         messages: { role: string; content: string | { text: string }[] }[];
       };
-      expect(JSON.stringify(body.messages)).toContain("cap_drop: [NET_RAW, SYS_PTRACE]");
-      expect(JSON.stringify(body.messages)).toContain("--cap-drop=NET_RAW");
-      expect(JSON.stringify(body.messages)).toContain("..:/workspace/project");
+      instructions = body.messages
+        .filter((message) => message.role === "system")
+        .flatMap((message) =>
+          typeof message.content === "string"
+            ? [message.content]
+            : message.content.map((part) => part.text),
+        )
+        .join("\n");
+      expect(instructions).toContain("private runtime-only override");
+      expect(instructions).toContain("preserve any existing stronger drops");
+      expect(instructions).not.toContain("--cap-drop=NET_RAW");
       expect(JSON.stringify(body.messages)).toContain("sleep");
       expect(JSON.stringify(body.messages)).toContain("postCreateCommand");
       expect(JSON.stringify(body.messages)).toContain("Factory starts App commands");
@@ -245,6 +254,15 @@ test("native setup inspection has a final-output step after sequential source re
     expect(result).toEqual(proposal);
     expect(loaded).toEqual(paths);
     expect(requests).toBe(5);
+    expect(instructions).not.toContain("/workspace/project");
+    expect(instructions).toContain("Preserve omitted or custom workspaceFolder");
+    expect(instructions).toContain("default workspace mount");
+    expect(instructions).toContain("existing repository bind");
+    expect(instructions).toContain('run: test "$(git rev-parse HEAD)"');
+    expect(instructions).toContain("run: REPLACE_WITH_EXISTING_CHECK_COMMAND");
+    expect(instructions).toContain(
+      "Never add capabilities, privileged mode, host namespaces, infrastructure sockets or bind mounts outside the checkout",
+    );
   } finally {
     await provider.stop(true);
   }

@@ -7,6 +7,7 @@ test("activity navigation uses structured tool identities, never guessed output 
       "read",
       { path: "/workspace/project/src/app.ts", content: "not exposed" },
       {},
+      "/workspace/project",
     ),
   ).toEqual({ path: "src/app.ts" });
   expect(
@@ -32,6 +33,21 @@ test("activity navigation uses structured tool identities, never guessed output 
   ).toBeUndefined();
 });
 
+test.each(["/workspaces/project", "/code/python", "/code/monorepo"])(
+  "absolute tool links use only the observed checkout root %s",
+  (root) => {
+    expect(activityNavigation("edit", { path: `${root}/src/app.py` }, {}, root)).toEqual({
+      path: "src/app.py",
+    });
+    expect(
+      activityNavigation("read", { path: `${root}-another/src/app.py` }, {}, root),
+    ).toBeUndefined();
+    expect(activityNavigation("read", { path: `${root}/src/app.py` }, {})).toBeUndefined();
+    expect(
+      activityNavigation("read", { path: "/workspace/project/src/app.py" }, {}, root),
+    ).toBeUndefined();
+  },
+);
 test("a shortened recorded diff is labeled and never includes tool input content", () => {
   const target = activityNavigation(
     "write",

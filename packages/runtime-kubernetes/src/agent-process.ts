@@ -20,7 +20,7 @@ export function runtimeAgentProcess(agent: RuntimeAgentConfiguration, generation
     command: [
       "sh",
       "-c",
-      "umask 077; export OPENCODE_DB=/workspace/project/.git/factory-opencode.db; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
+      'umask 077; git_dir=$(git rev-parse --absolute-git-dir) || exit; export OPENCODE_DB="$git_dir/factory-opencode.db"; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs',
     ],
     env: {
       FACTORY_BUILD_BROWSER_COMMAND: `/tmp/factory-runtime-connector-${generation}`,

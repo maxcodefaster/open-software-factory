@@ -52,7 +52,7 @@ test("Starter fixture copies source without local installed dependencies", async
   }
 });
 
-test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; lost replies keep the same native intent", async () => {
+test("devcontainer-only Start needs no setup confirmation; lost replies keep the same native intent", async () => {
   const f = await substrateFixture();
   const directory = await mkdtemp(join(tmpdir(), "substrate-provision-"));
   const ca = join(directory, "ca.pem");
@@ -81,21 +81,18 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
   const repo = join(directory, "repository");
   await Bun.$`git init -b main ${repo}`.quiet();
   await writeFile(join(repo, "README"), "owned source\n");
-  await Bun.$`mkdir -p ${join(repo, ".factory")}`.quiet();
+  await mkdir(join(repo, ".devcontainer"));
   await writeFile(
-    join(repo, ".factory/system.json"),
-    JSON.stringify({
-      version: 1,
-      primaryApp: "web",
-      apps: [
-        { id: "web", label: "Owned", command: ["node", "server.mjs"], port: 4300, healthPath: "/" },
-      ],
-    }),
+    join(repo, ".devcontainer/devcontainer.json"),
+    JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
   );
   await Bun.$`git -C ${repo} add .`.quiet();
   await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
   await f.database
     .client`UPDATE factory.project SET repository_url=${`file://${repo}`} WHERE id=${f.projectID}`;
+  await f.database
+    .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
+    VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
   const objects = new Map<string, Record<string, unknown>>();
   let extraAttemptID: string | undefined;
   const creates = new Map<string, number>();
@@ -169,6 +166,19 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
     const c = controller();
     await expect(c.start(f.projectID, crypto.randomUUID())).rejects.toThrow();
     expect(creates.size).toBe(0);
+    await expect(c.ensureStaging(f.projectID, f.userID)).rejects.toThrow(
+      "Confirm this Project's configuration",
+    );
+    expect(creates.size).toBe(0);
+    await f.database
+      .client`UPDATE factory.project_setup_readiness SET state='ready' WHERE project_id=${f.projectID}`;
+    await expect(c.ensureStaging(f.projectID, f.userID)).rejects.toThrow(
+      ".factory/system.json is required for Staging",
+    );
+    expect(await f.database.client`SELECT project_id FROM factory.staging_preview`).toHaveLength(0);
+    expect(creates.size).toBe(0);
+    await f.database
+      .client`UPDATE factory.project_setup_readiness SET state='pending' WHERE project_id=${f.projectID}`;
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("lost provisioning reply");
     lose = "CreateAtespaceAccessPolicy";
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("lost provisioning reply");
@@ -215,6 +225,19 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
     ]).toEqual([{ source: null, worker: null }]);
     const [saved] = await f.database
       .client`SELECT intent,template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+    expect(saved?.["intent"].systemContract).toBeNull();
+    const bootstrap = JSON.parse(
+      (objects.get("ActorTemplate") as { containers: { env: { value: string }[] }[] }).containers[0]
+        ?.env[0]?.value ?? "null",
+    );
+    expect(bootstrap.assignment.channels).toEqual([
+      { name: "ide", kind: "ide", target: "", healthPath: "" },
+    ]);
+    expect(bootstrap.assignment.processes).toEqual([]);
+    expect(bootstrap.assignment.devcontainerPath).toBe(".devcontainer/devcontainer.json");
+    const [attempt] = await f.database
+      .client`SELECT declared_apps FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    expect(attempt?.["declared_apps"]).toEqual([]);
     expect(JSON.stringify(saved)).not.toContain("parentToken");
     const spec = objects.get("ActorTemplate");
     expect(JSON.stringify(spec)).toContain("native-parent");
@@ -361,7 +384,7 @@ test("normal Start provisions a fresh owned Workspace/Atespace/grant/template; l
   }
 }, 60_000);
 
-test("startPersisted provisions a real Ticket identity for a commissioned Contributor, retaining lost Actor create and native Source role fences", async () => {
+test("devcontainer-only startPersisted retains commissioned Contributor, lost Actor create and native Source role fences", async () => {
   await mkdir(".factory/test-results", { recursive: true });
   const directory = await mkdtemp(resolve(".factory/test-results/native-ticket-controller-"));
   const repo = join(directory, "repository");
@@ -369,6 +392,7 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
     recursive: true,
     filter: starterSourceFile,
   });
+  await rm(join(repo, ".factory/system.json"));
   await Bun.$`git init -b main ${repo}`.quiet();
   await Bun.$`git -C ${repo} add .`.quiet();
   await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
@@ -458,6 +482,9 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
     await f.database
       .client`UPDATE factory.project SET repository_url=${`file://${repo}`} WHERE id=${f.projectID}`;
     await f.database
+      .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
+      VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
+    await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID}`;
     await expect(runtime.startPersisted(f.changeID, f.userID)).rejects.toThrow(
       "commissioned Ticket writer",
@@ -538,8 +565,18 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
       name: "agent",
       kind: "agent",
       target: "http://127.0.0.1:4096",
-      healthPath: "/api/health",
+      healthPath: "/api/info",
     });
+    expect(bootstrap.assignment.channels.map((channel: { kind: string }) => channel.kind)).toEqual([
+      "ide",
+      "agent",
+    ]);
+    expect(bootstrap.assignment.processes.map((process: { name: string }) => process.name)).toEqual(
+      ["agent"],
+    );
+    const [provision] = await f.database
+      .client`SELECT intent->'systemContract' AS contract FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+    expect(provision?.["contract"]).toBeNull();
     expect(
       bootstrap.assignment.processes.find((p: { name: string }) => p.name === "agent").env
         .FACTORY_OPENCODE_TOKEN,
@@ -718,43 +755,183 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
   }
 }, 60_000);
 
-test("first Start uses the canonical Source contract when setup was confirmed after Source admission", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "factory-source-before-setup-"));
-  const repository = join(directory, "repository");
-  await Bun.$`git init -b main ${repository}`.quiet();
-  await writeFile(join(repository, "README"), "Saved before setup\n");
-  await Bun.$`git -C ${repository} add .`.quiet();
-  await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m source`.quiet();
-  const revision = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
-  const f = await substrateFixture(revision);
-  const sources = createSubstrateSources(f.database, f.hub);
-  const contract = {
-    version: 1 as const,
-    primaryApp: "python",
-    apps: [
-      { id: "python", label: "Python", command: ["python", "app.py"], port: 9000, healthPath: "/" },
-    ],
-  };
-  await mkdir(join(repository, ".factory"));
-  await writeFile(join(repository, ".factory/system.json"), JSON.stringify(contract));
-  await Bun.$`git -C ${repository} add .`.quiet();
-  await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m setup`.quiet();
-  await f.database
-    .client`UPDATE factory.project SET repository_url=${`file://${repository}`} WHERE id=${f.projectID}`;
+test.each([
+  "saved contract",
+  "saved absence",
+  "no Source",
+  "missing repository contract",
+  "invalid repository contract",
+  "Source failure",
+  "unavailable revision",
+  "unavailable repository",
+] as const)(
+  "Workspace Start selects authoritative Source configuration: %s",
+  async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-source-before-setup-"));
+    const repository = join(directory, "repository");
+    const contract = {
+      version: 1 as const,
+      primaryApp: "python",
+      apps: [
+        {
+          id: "python",
+          label: "Python",
+          command: ["python", "app.py"],
+          port: 9000,
+          healthPath: "/",
+        },
+      ],
+    };
+    await Bun.$`git init -b main ${repository}`.quiet();
+    await writeFile(join(repository, "README"), "Saved before setup\n");
+    await mkdir(join(repository, ".devcontainer"));
+    await writeFile(
+      join(repository, ".devcontainer/devcontainer.json"),
+      JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
+    );
+    if (!["saved contract", "missing repository contract"].includes(scenario)) {
+      await mkdir(join(repository, ".factory"));
+      await writeFile(
+        join(repository, ".factory/system.json"),
+        scenario === "invalid repository contract" ? "{invalid JSON" : JSON.stringify(contract),
+      );
+    }
+    await Bun.$`git -C ${repository} add .`.quiet();
+    await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m source`.quiet();
+    const revision =
+      scenario === "unavailable revision"
+        ? "e".repeat(40)
+        : (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
+    const f = await substrateFixture(revision);
+    const sources = createSubstrateSources(f.database, f.hub);
+    if (scenario === "saved contract") {
+      await mkdir(join(repository, ".factory"));
+      await writeFile(join(repository, ".factory/system.json"), JSON.stringify(contract));
+      await Bun.$`git -C ${repository} add .`.quiet();
+      await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m setup`.quiet();
+    }
+    await f.database
+      .client`UPDATE factory.project SET repository_url=${`file://${repository}`} WHERE id=${f.projectID}`;
+    const ca = join(directory, "ca.pem");
+    await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
+    let canonicalReads = 0;
+    Object.assign(sources, {
+      async startupContract(workspaceID: string) {
+        expect(workspaceID).toBe(f.workspaceID);
+        canonicalReads++;
+        if (scenario === "Source failure") throw new Error("owned-source-read-failure");
+        if (scenario === "saved contract") return contract;
+        if (scenario === "saved absence") return null;
+        return undefined;
+      },
+    });
+    const call: SubstrateCall = async (method) => {
+      if (method.startsWith("Get")) throw new SubstrateRPCError("NotFound", "absent");
+      throw new Error("owned-provisioning-boundary");
+    };
+    const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
+      configuration: {
+        deployment: "fresh-workspaces",
+        database: f.config.database,
+        connection: f.config.connection,
+        provisioner: { ...f.config.connection, tokenFile: "/owner-token" },
+        editorPrincipal: "user:system:serviceaccount:owned:factory-control",
+        connectorURL: f.config.connectorURL,
+        factoryCAFile: ca,
+        workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
+        profile: f.config.profile,
+        runtime: f.config.runtime,
+        workerSelector: {
+          "factory.runtime/profile": f.config.profile,
+          "factory.dev/deployment": "owned",
+        },
+        egressHosts: [],
+      },
+      sources,
+      call,
+      provisionerCall: call,
+    });
+    try {
+      if (scenario === "unavailable repository")
+        await rm(repository, { recursive: true, force: true });
+      const failure =
+        scenario === "Source failure"
+          ? "owned-source-read-failure"
+          : scenario === "invalid repository contract"
+            ? ".factory/system.json is not valid JSON"
+            : scenario.startsWith("unavailable")
+              ? "Cannot read .factory/system.json"
+              : null;
+      await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.toThrow(
+        failure ?? "owned-provisioning-boundary",
+      );
+      expect(canonicalReads).toBe(1);
+      const [provision] = await f.database.client<
+        { intent: { systemContract: unknown; revision: string } }[]
+      >`
+      SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      if (failure) expect(provision).toBeUndefined();
+      else {
+        expect(provision?.intent.systemContract).toEqual(
+          scenario === "saved absence" || scenario === "missing repository contract"
+            ? null
+            : contract,
+        );
+        expect(provision?.intent.revision).toBe(revision);
+      }
+      expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+    } finally {
+      await sources.close();
+      await f.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test("Forge contract absence requires an available exact tree and never masks invalid or failed reads", async () => {
+  const f = await substrateFixture();
+  const directory = await mkdtemp(join(tmpdir(), "factory-optional-forge-contract-"));
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
-  let canonicalReads = 0;
-  Object.assign(sources, {
-    async startupContract(workspaceID: string) {
-      expect(workspaceID).toBe(f.workspaceID);
-      canonicalReads++;
-      return contract;
+  let mode = "invalid";
+  const reads: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      reads.push(url.pathname);
+      if (url.pathname.endsWith("/contents/.factory/system.json")) {
+        expect(url.searchParams.get("ref")).toBe("a".repeat(40));
+        if (mode === "access") return new Response(null, { status: 403 });
+        if (mode === "transport") return new Response(null, { status: 503 });
+        if (mode === "invalid")
+          return Response.json({
+            content: Buffer.from("{invalid JSON").toString("base64"),
+            encoding: "base64",
+            sha: "b".repeat(40),
+          });
+        return new Response(null, { status: 404 });
+      }
+      if (url.pathname.endsWith(`/git/trees/${"a".repeat(40)}`)) {
+        if (mode === "missing revision") return new Response(null, { status: 404 });
+        return Response.json({
+          tree:
+            mode === "inconsistent"
+              ? [{ path: ".factory/system.json", type: "blob", sha: "b".repeat(40) }]
+              : [],
+        });
+      }
+      throw new Error("Unexpected owned Forge request");
     },
   });
+  let nativeCalls = 0;
   const call: SubstrateCall = async (method) => {
+    nativeCalls++;
     if (method.startsWith("Get")) throw new SubstrateRPCError("NotFound", "absent");
     throw new Error("owned-provisioning-boundary");
   };
+  process.env["FACTORY_FORGEJO_API_URL"] = `${server.url.origin}/api/v1`;
   const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
     configuration: {
       deployment: "fresh-workspaces",
@@ -773,26 +950,32 @@ test("first Start uses the canonical Source contract when setup was confirmed af
       },
       egressHosts: [],
     },
-    sources,
     call,
     provisionerCall: call,
   });
   try {
-    // The old initialization commit intentionally has no System Contract. A
-    // saved Source may already contain the later confirmed configuration.
+    await f.database
+      .client`UPDATE factory.project SET repository_url=${`${server.url.origin}/owned-runtime-fixture/fixture.git`} WHERE id=${f.projectID}`;
+    for (mode of ["invalid", "access", "transport", "missing revision", "inconsistent"]) {
+      await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.toThrow(
+        mode === "invalid" ? "not valid JSON" : "Cannot read .factory/system.json",
+      );
+      expect(nativeCalls).toBe(0);
+      expect(
+        await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+      ).toHaveLength(0);
+    }
+    mode = "absent";
     await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.toThrow(
       "owned-provisioning-boundary",
     );
-    expect(canonicalReads).toBe(1);
-    const [provision] = await f.database.client<
-      { intent: { systemContract: unknown; revision: string } }[]
-    >`
-      SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
-    expect(provision?.intent.systemContract).toEqual(contract);
-    expect(provision?.intent.revision).toBe(revision);
+    const [provision] = await f.database
+      .client`SELECT intent->'systemContract' AS contract FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+    expect(provision?.["contract"]).toBeNull();
+    expect(reads.at(-1)).toEndWith(`/git/trees/${"a".repeat(40)}`);
     expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
   } finally {
-    await sources.close();
+    await server.stop(true);
     await f.dispose();
     await rm(directory, { recursive: true, force: true });
   }

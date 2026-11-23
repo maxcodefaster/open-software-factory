@@ -129,6 +129,12 @@ func createInputStopDirectories(root string) error {
 	// Construct the entire fixed skeleton before any bind mounts. Mkdir's mode
 	// is filtered by bootstrap's private umask; explicitly permit traversal
 	// after dropping to UID 1000 without changing that process-wide umask.
+	// This new private skeleton is writable only by that development UID, so
+	// the SDK worker can create an empty recorded container location. Mounted
+	// tools remain read-only; the retained Git bind is never chowned here.
+	if err := os.Chown(root, 1000, 1000); err != nil {
+		return err
+	}
 	// Never chmod a mounted tool or the original retained metadata.
 	for _, directory := range []string{
 		"/lib", "/usr", "/usr/lib", "/usr/bin", "/bin",
@@ -143,6 +149,9 @@ func createInputStopDirectories(root string) error {
 			return err
 		}
 		if err := os.Chmod(path, 0755); err != nil {
+			return err
+		}
+		if err := os.Chown(path, 1000, 1000); err != nil {
 			return err
 		}
 	}

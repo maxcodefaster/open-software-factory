@@ -8,7 +8,7 @@ import {
   setupInspectionOutput,
 } from "../../../../packages/project-domain/src/setup";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
-import { type ResolvedModelConnection } from "../models/inference-contracts";
+import type { ResolvedModelConnection } from "../models/inference-contracts";
 import { modelProviderOptions, nativeModel } from "../models/native";
 import { createMastraUsage, type MastraUsageSink } from "../usage/model-api";
 import { requiredConfiguration } from "./configuration";
@@ -119,23 +119,23 @@ For Compose, devcontainer.json must select dockerComposeFile:"compose.yaml" and 
 Propose only missing files needed for Factory development: .devcontainer/devcontainer.json, its Dockerfile/compose.yaml,
 .factory/system.json and .forgejo/workflows/factory-verification.yml. Never replace an existing configuration file.
 The System Contract has version:1, primaryApp, and apps with id,label,command:string[],port,healthPath.
-Only System Contract App commands use argv, never shell -c. Primary port is >=1024; maximum four Apps. The workspace is /workspace/project.
+Only System Contract App commands use argv, never shell -c. Primary port is >=1024; maximum four Apps.
 Dev Container lifecycle hooks and Forgejo run steps use their normal upstream shell syntax; sequential commands such as npm ci && npm run db:migrate are allowed there.
 Dev Container uses the upstream specification. Do not invent application dependencies, credentials, repository scripts or health endpoints.
 For a required missing Dockerfile, write standard installation commands for already-established system tools and exact approved versions. This is proposed configuration, not a claim that those commands already exist in the repository. Use official pinned upstream distribution URLs and the actual native architecture, never an AMD64-only asset or checksum on ARM64.
 Use bounded retry/backoff only for idempotent upstream artifact GET downloads. For curl, use --retry 3 --retry-all-errors with --fail --location and --output to a file, then verify the approved checksum before installing or executing it. A retry must replace a partial file, never append or pipe an unverified download into a shell. Persistent transfer errors and checksum mismatches must fail the build. Never retry a whole build, lifecycle hook, installer or verification command: these can have side effects.
-Factory requires the primary Dev Container to drop NET_RAW and SYS_PTRACE. For Compose put cap_drop: [NET_RAW, SYS_PTRACE] on its primary service. For an image recipe set runArgs: ["--cap-drop=NET_RAW", "--cap-drop=SYS_PTRACE"].
+Factory applies its primary capability drops in a private runtime-only override. Do not add Factory-specific runArgs or cap_drop entries to an otherwise suitable Project recipe; preserve any existing stronger drops.
 Never add capabilities, privileged mode, host namespaces, infrastructure sockets or bind mounts outside the checkout. Keep normal repository-scoped mounts and named service data volumes.
-Dev Container MUST include "workspaceFolder":"/workspace/project" and "remoteUser":"node" for a Node image.
+Preserve omitted or custom workspaceFolder and workspaceMount settings; never rewrite them for Factory. Use "remoteUser":"node" for a Node image.
 Ensure that user and group really exist before chown/install -o node or USER node. A Playwright/Ubuntu base is not a Node user image: safely rename an existing UID/GID 1000 account/group or create them only when those IDs are free.
-For an image recipe include workspaceMount:"source=\${localWorkspaceFolder},target=/workspace/project,type=bind".
-For Compose the CLI does NOT mount the repository automatically. The primary service MUST declare volumes: ["..:/workspace/project"] in .devcontainer/compose.yaml. Named data volumes are for service data, never the project checkout.
+For an image or Dockerfile recipe, rely on the Dev Containers CLI's default workspace mount unless an existing standard workspaceMount is needed.
+For Compose the CLI does NOT mount the repository automatically. Keep an existing repository bind at its real container folder. The primary service must have a writable repository bind, with workspaceFolder inside it when specified. For a new .devcontainer/compose.yaml use the repository-relative bind source "..", not an arbitrary host path. Named data volumes are for service data, never the project checkout.
 Factory starts App commands from the System Contract only after Dev Container hooks complete. Do not copy an App command into Compose command or entrypoint: dependencies may not exist yet, and a second App would collide on its port.
 Keep the Compose primary service alive with command: ["sleep", "infinity"], or explicitly use Dev Container overrideCommand:true. Install repository dependencies in postCreateCommand before Factory starts the App.
 Do not add a Dockerfile just to set WORKDIR. Use the existing suitable upstream image when possible.
 Fresh Verification starts the same declared Dev Container stack, including its Compose services and lifecycle hooks, with exact checked-out source and repository dependencies.
 Factory securely injects environment variables explicitly approved for runtime/verification in Settings. Required substitutions should use \${NAME:?Required}; never invent or commit their values.
-Never use actions/checkout or any other uses step. Use only run steps. The workflow MUST have this structure:
+Never use actions/checkout or any other uses step. Use only run steps, relative to the Dev Container's current working directory instead of a fixed checkout path. The workflow MUST have this structure:
 name: Factory Verification
 on:
   pull_request:
@@ -145,9 +145,9 @@ jobs:
     runs-on: factory-verification
     steps:
       - name: Confirm the assigned commit
-        run: test "$(cat /workspace/project/.git/HEAD)" = "\${{ forgejo.event.pull_request.head.sha }}"
+        run: test "$(git rev-parse HEAD)" = "\${{ forgejo.event.pull_request.head.sha }}"
       - name: Run repository checks
-        run: cd /workspace/project && REPLACE_WITH_EXISTING_CHECK_COMMAND
+        run: REPLACE_WITH_EXISTING_CHECK_COMMAND
 Replace only REPLACE_WITH_EXISTING_CHECK_COMMAND with a check established by source or confirmed answers.
 Include established behavioral test commands when available or explicitly requested; type checking alone must not silently replace those tests.
 Never echo secrets or propose committed credentials.

@@ -61,6 +61,7 @@ import {
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   readOpenCodeInputMessages,
+  readOpenCodeWorkspace,
   syncOpenCodeInputGuidance,
 } from "./opencode-adapter";
 import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
@@ -104,8 +105,6 @@ type AgentRow = {
   stopID: string | null;
 };
 
-const workspaceDirectory = "/workspace/project";
-
 function opencode(hub: RuntimeHub, attemptID: string) {
   return createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path));
 }
@@ -126,10 +125,7 @@ async function awaitConfiguredModel(
       await client.server.info({ signal: AbortSignal.timeout(2_000) });
       if (!(await authorized()))
         throw new CommandError("conflict", "Build authority changed during startup");
-      const models = await client.model.list(
-        { location: { directory: workspaceDirectory } },
-        { signal: AbortSignal.timeout(2_000) },
-      );
+      const models = await client.model.list(undefined, { signal: AbortSignal.timeout(2_000) });
       if (models.data.some((model) => model.providerID === "factory" && model.id === modelID))
         return;
     } catch (cause) {
@@ -503,6 +499,7 @@ export function createAgentController(
       await awaitConfiguredModel(client, owned.authority.modelId, () =>
         closed ? Promise.resolve(false) : turns.validateExecution(turnID, ownerToken),
       );
+      const { location } = await readOpenCodeWorkspace(client);
       if (intent.skillLoading === "native") {
         const manifest = nativeSkillManifestInput.parse(intent.skillManifest);
         if (manifest.files.length > 0)
@@ -528,9 +525,7 @@ export function createAgentController(
         const expected = skillRevisionIDs.map((id) => `factory-${id}`).sort();
         let ready = false;
         for (let probe = 0; probe < 40; probe++) {
-          const observed = installedOpenCodeSkillIDs(
-            (await client.skill.list({ location: { directory: workspaceDirectory } })).data,
-          );
+          const observed = installedOpenCodeSkillIDs((await client.skill.list({ location })).data);
           if (JSON.stringify(observed) === JSON.stringify(expected)) {
             ready = true;
             break;
@@ -637,7 +632,7 @@ export function createAgentController(
         ? await client.session.create({
             id: intent.sessionID,
             title: intent.title,
-            location: { directory: workspaceDirectory },
+            location,
             model: { providerID: "factory", id: owned.authority.modelId },
             permissions: owned.authority.review
               ? candidateReviewPermissions
@@ -658,7 +653,7 @@ export function createAgentController(
         : await client.session.get({ sessionID: intent.sessionID });
       if (
         session.id !== intent.sessionID ||
-        session.location.directory !== workspaceDirectory ||
+        session.location.directory !== location.directory ||
         session.model?.providerID !== "factory" ||
         session.model.id !== owned.authority.modelId
       ) {
@@ -845,13 +840,14 @@ export function createAgentController(
         let work: Awaited<ReturnType<typeof observeOpenCodeWork>>;
         let messages: Awaited<ReturnType<typeof readOpenCodeInputMessages>>;
         try {
+          const { location } = await readOpenCodeWorkspace(client);
           const retained = await client.session.get(
             { sessionID: intent.sessionID },
             { signal: AbortSignal.any([observationController.signal, AbortSignal.timeout(5_000)]) },
           );
           if (
             retained.id !== intent.sessionID ||
-            retained.location.directory !== workspaceDirectory ||
+            retained.location.directory !== location.directory ||
             retained.model?.providerID !== "factory" ||
             retained.model.id !== owned.authority.modelId
           )
@@ -2201,6 +2197,11 @@ export function createAgentController(
             { sessionID: session.sessionID, limit: 100 },
             { signal: AbortSignal.timeout(2_000) },
           );
+          const checkoutDirectory = includeNavigation
+            ? await readOpenCodeWorkspace(client)
+                .then((workspace) => workspace.checkoutDirectory)
+                .catch(() => undefined)
+            : undefined;
           const sessionIntents = intents.filter((intent) => intent.sessionID === session.sessionID);
           messages = projectMessages(
             page,
@@ -2210,6 +2211,7 @@ export function createAgentController(
                 intent.bootstrap ? null : intent.text,
               ]),
             ),
+            checkoutDirectory,
           );
           if (
             session.implementationSessionConfirmed &&
@@ -2231,6 +2233,7 @@ export function createAgentController(
                       .filter((intent) => intent.sessionID === session.implementationSessionID)
                       .map((intent) => [intent.promptID, intent.bootstrap ? null : intent.text]),
                   ),
+                  checkoutDirectory,
                 ),
                 ...messages,
               ].sort((a, b) => a.at - b.at);

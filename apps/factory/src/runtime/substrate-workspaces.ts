@@ -154,7 +154,7 @@ type Provision = {
     devcontainerPath: string;
     templateSHA256: string;
     environment: { version: number; secretKey: string | null };
-    systemContract: SystemContract;
+    systemContract: SystemContract | null;
   };
   atespace: Resource | null;
   policy: Resource | null;
@@ -176,7 +176,7 @@ export function createSubstrateWorkspaces(
   input: SubstrateWorkspaceConfiguration,
   editorCall?: SubstrateCall,
   provisionerCall?: SubstrateCall,
-  readContract?: (repository: string, revision: string) => Promise<SystemContract>,
+  readContract?: (repository: string, revision: string) => Promise<SystemContract | null>,
   sources?: SubstrateSourceHandoff,
   capacity?: SubstrateCapacity,
   shutdownCoding = createCodingRuntimeShutdown(database, hub),
@@ -234,6 +234,7 @@ export function createSubstrateWorkspaces(
     if (!row.atespace || !row.template || !row.policy)
       throw new Error("Native provisioning outcome is unconfirmed");
     const config = retainedConfiguration(row.intent.configuration);
+    const systemContract = row.intent.systemContract;
     const bound: SubstrateConfiguration = {
       deployment: config.deployment,
       database: config.database,
@@ -252,9 +253,12 @@ export function createSubstrateWorkspaces(
       templateVersion: row.template.metadata.version,
       templateSHA256: row.intent.templateSHA256,
       environment: row.intent.environment,
-      declaredApps: row.intent.systemContract.apps.map((app) =>
-        app.id === row.intent.systemContract.primaryApp ? "app" : `app-${app.id}`,
-      ),
+      declaredApps:
+        systemContract === null
+          ? []
+          : systemContract.apps.map((app) =>
+              app.id === systemContract.primaryApp ? "app" : `app-${app.id}`,
+            ),
     };
     return createSubstrateExecution(database, hub, secret, bound, shutdownCoding, editor, sources);
   }
@@ -563,7 +567,12 @@ export function createSubstrateWorkspaces(
                 return sources.startupContract?.(workspaceID, tx);
               })
             : undefined;
-        const systemContract = sourceContract ?? (await readContract(project.repository, revision));
+        // null is authoritative absence in saved Source; only undefined means
+        // no Source owner supplied configuration for this checkout.
+        const systemContract =
+          sourceContract === undefined
+            ? await readContract(project.repository, revision)
+            : sourceContract;
         const [currentEnvironment] = await db
           .select({
             version: projectEnvironment.version,
@@ -578,11 +587,15 @@ export function createSubstrateWorkspaces(
           );
         const environment = prior?.intent.environment ??
           currentEnvironment ?? { version: 0, secretKey: null };
-        const appName = (id: string) => (id === systemContract.primaryApp ? "app" : `app-${id}`);
+        const apps = systemContract === null ? [] : systemContract.apps;
+        const appName = (id: string) => (id === systemContract?.primaryApp ? "app" : `app-${id}`);
         const tokens = runtimeConnectorTokens(secret, attemptID, generation);
         const endpoint = new URL(config.connectorURL);
         const factoryOrigin = `https://${endpoint.host}`;
-        const origins = runtimeAppOrigins(factoryOrigin, attemptID, systemContract);
+        const origins =
+          systemContract === null
+            ? undefined
+            : runtimeAppOrigins(factoryOrigin, attemptID, systemContract);
         const repositoryURL = new URL(
           `/internal/runtime-source/${attemptID}/${runtimeSourceCapability(attemptID)}`,
           factoryOrigin,
@@ -606,7 +619,7 @@ export function createSubstrateWorkspaces(
           environmentVersion: environment.version,
         };
         assignment.channels.push(
-          ...systemContract.apps.map((app) => ({
+          ...apps.map((app) => ({
             name: appName(app.id),
             kind: "app",
             target: `http://127.0.0.1:${app.port}`,
@@ -618,7 +631,7 @@ export function createSubstrateWorkspaces(
           label?: string;
           command: readonly string[];
           env?: Record<string, string>;
-        }[] = systemContract.apps.map((app) => ({
+        }[] = apps.map((app) => ({
           name: appName(app.id),
           label: app.label,
           command: app.command,
@@ -640,7 +653,7 @@ export function createSubstrateWorkspaces(
             name: "agent",
             kind: "agent",
             target: "http://127.0.0.1:4096",
-            healthPath: "/api/health",
+            healthPath: "/api/info",
           });
           processes.push(runtimeAgentProcess(agent, generation));
         }

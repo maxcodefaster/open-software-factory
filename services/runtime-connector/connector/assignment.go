@@ -24,11 +24,14 @@ var (
 )
 
 type Assignment struct {
-	Version                     int                 `json:"version"`
-	RuntimeAttemptID            string              `json:"runtimeAttemptId"`
-	Generation                  uint64              `json:"generation"`
-	WorkspaceFolder             string              `json:"workspaceFolder"`
-	RemoteWorkspaceFolder       string              `json:"remoteWorkspaceFolder"`
+	Version               int    `json:"version"`
+	RuntimeAttemptID      string `json:"runtimeAttemptId"`
+	Generation            uint64 `json:"generation"`
+	WorkspaceFolder       string `json:"workspaceFolder"`
+	RemoteWorkspaceFolder string `json:"remoteWorkspaceFolder"`
+	// Parent's observed container-side canonical checkout bind, distinct from
+	// WorkspaceFolder when the CLI selects a repository subdirectory.
+	CheckoutFolder              string              `json:"checkoutFolder,omitempty"`
 	RepositoryURL               string              `json:"repositoryUrl"`
 	RepositoryIdentity          string              `json:"repositoryIdentity"`
 	PreserveWorkspace           bool                `json:"preserveWorkspace"`
@@ -134,6 +137,13 @@ func (assignment Assignment) Validate() error {
 	}
 	if !filepath.IsAbs(assignment.RemoteWorkspaceFolder) || filepath.Clean(assignment.RemoteWorkspaceFolder) != assignment.RemoteWorkspaceFolder {
 		return errors.New("remote workspace folder must be a clean absolute path")
+	}
+	if assignment.CheckoutFolder != "" {
+		relative, err := filepath.Rel(assignment.CheckoutFolder, assignment.WorkspaceFolder)
+		if !filepath.IsAbs(assignment.CheckoutFolder) || filepath.Clean(assignment.CheckoutFolder) != assignment.CheckoutFolder ||
+			err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return errors.New("checkout folder must be a clean absolute ancestor of the workspace folder")
+		}
 	}
 	if !repositoryurl.Valid(assignment.RepositoryURL) {
 		return errors.New("repository URL must use HTTPS, file, or the local Factory bridge without credentials")

@@ -2,7 +2,7 @@ import type { SessionTransferData } from "@opencode/client";
 import { z } from "zod";
 import upstream from "../../../../upstream.json";
 import { objectDigest, type PrivateObjects } from "../storage/objects";
-import type { createOpenCodeClient } from "./opencode-adapter";
+import { type createOpenCodeClient, readOpenCodeWorkspace } from "./opencode-adapter";
 
 type Client = ReturnType<typeof createOpenCodeClient>;
 const maximumBytes = 125 * 1024 ** 2;
@@ -164,7 +164,7 @@ export async function importNativeSessionArchive(client: Client, native: Session
   delete info.revert;
   delete info.parentID;
   delete info.fork;
-  const location = { directory: "/workspace/project" };
+  const { location } = await readOpenCodeWorkspace(client);
   return client.session.import(
     { info: { ...info, location }, messages: native.messages, location },
     { signal: AbortSignal.timeout(30_000) },

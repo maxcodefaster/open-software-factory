@@ -15,11 +15,30 @@ test.each([
   "unsafe-sidecar",
   "observe-queued",
   "observe-settled",
+  "default-workspace",
+  "custom-workspace",
 ] as const)(
   "metadata-only native input worker settles the original database without Project execution: %s",
   async (state) => {
-    const process = await pinnedOpenCode();
+    const directory =
+      state === "default-workspace"
+        ? "/workspaces/project"
+        : state === "custom-workspace"
+          ? "/code/python/backend"
+          : "/workspace/project";
+    const process = await pinnedOpenCode(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      directory,
+    );
     const connectorProof = Bun.env["FACTORY_INPUT_STOP_CONNECTOR_TEST_BINARY"];
+    const candidateWorker = Bun.env["FACTORY_INPUT_STOP_TEST_WORKER"];
     const id = crypto.randomUUID();
     const container = `factory-owned-input-stop-${id}`;
     const evidence = resolve(".factory/test-results/substrate-only/native-input-worker", id);
@@ -73,22 +92,13 @@ test.each([
         "-s",
         "/opt/factory/opencode/server/input-stop.mjs",
       );
+      await docker("exec", process.container, "git", "-C", directory, "init", "-b", "main");
       await docker(
         "exec",
         process.container,
         "git",
         "-C",
-        "/workspace/project",
-        "init",
-        "-b",
-        "main",
-      );
-      await docker(
-        "exec",
-        process.container,
-        "git",
-        "-C",
-        "/workspace/project",
+        directory,
         "-c",
         "user.name=Owned metadata proof",
         "-c",
@@ -105,7 +115,7 @@ test.each([
       await observe(
         () =>
           process.client.model
-            .list({ location: { directory: "/workspace/project" } })
+            .list({ location: { directory } })
             .then((value) => value.data.some((model) => model.providerID === "factory"))
             .catch(() => false),
         (value) => value,
@@ -113,7 +123,7 @@ test.each([
       await process.client.session.create({
         id: sessionID,
         title: "Owned metadata Stop",
-        location: { directory: "/workspace/project" },
+        location: { directory },
         model: { providerID: "factory", id: buildModelID },
       });
       await process.client.session.switchAgent({ sessionID, agent: "build" });
@@ -154,14 +164,7 @@ test.each([
       const before = (await process.control()).providerRequests;
       await process.control("/kill", "POST");
       if (connectorProof)
-        await docker(
-          "exec",
-          process.container,
-          "chown",
-          "-R",
-          "1000:1000",
-          "/workspace/project/.git",
-        );
+        await docker("exec", process.container, "chown", "-R", "1000:1000", `${directory}/.git`);
       if (state === "unsafe-sidecar") {
         originalSidecar = await rename(sidecar, savedSidecar)
           .then(() => true)
@@ -189,7 +192,7 @@ test.each([
         process.container,
         "git",
         "-C",
-        "/workspace/project",
+        directory,
         "config",
         "core.fsmonitor",
         ".git/hooks/metadata-hook",
@@ -205,7 +208,20 @@ test.each([
       };
       await writeFile(
         resolve(evidence, "intent.json"),
-        JSON.stringify({ container, owner: id, input, image: process.artifactImage }),
+        JSON.stringify({
+          container,
+          owner: id,
+          input,
+          image: process.artifactImage,
+          candidateWorker: candidateWorker
+            ? {
+                path: resolve(candidateWorker),
+                sha256: new Bun.CryptoHasher("sha256")
+                  .update(await Bun.file(candidateWorker).arrayBuffer())
+                  .digest("hex"),
+              }
+            : null,
+        }),
       );
       intended = true;
       await docker(
@@ -235,9 +251,16 @@ test.each([
         "/tmp",
         "--tmpfs",
         "/workspace",
+        ...(!connectorProof && directory !== "/workspace/project" ? ["--tmpfs", directory] : []),
         "--interactive",
         "--mount",
         `type=bind,src=${resolve(project, ".git")},dst=/home/rootless/persist/project/.git`,
+        ...(candidateWorker
+          ? [
+              "--mount",
+              `type=bind,src=${resolve(candidateWorker)},dst=/opt/factory/opencode/server/input-stop.mjs,readonly`,
+            ]
+          : []),
         "--entrypoint",
         connectorProof ? "/owned/input-stop-tests" : "/opt/factory/opencode/musl/bun",
         process.artifactImage,

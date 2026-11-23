@@ -79,7 +79,9 @@ func TestNativeLifecyclePinnedCLIMetadataExactlyOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			primary[0]["NetworkSettings"] = map[string]any{"Ports": map[string]any{}}
-			primary[0]["Mounts"] = []any{}
+			primary[0]["Mounts"] = []map[string]any{{
+				"Type": "bind", "Source": directory, "Destination": "/workspace/project", "RW": true,
+			}}
 			primary[0]["Config"].(map[string]any)["Env"] = []string{"PATH=/usr/bin:/bin"}
 			labels := primary[0]["Config"].(map[string]any)["Labels"].(map[string]any)
 			if recipe != "image-without-metadata" {

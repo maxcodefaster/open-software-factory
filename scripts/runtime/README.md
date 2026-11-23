@@ -172,6 +172,20 @@ environment or registry credentials. The reserve/template-fork, captured-process
 and private prepared-primary image paths have been removed, including their component recipes.
 Normal startup still validates prebuild input identity, native dependency images and required hooks.
 
+Pinned OpenCode process checks exercise actual default/custom Workspace directories, native
+tool execution, retained history and metadata-only Stop without paid model keys:
+
+```sh
+FACTORY_OPENCODE_TEST_IMAGE='your-registry/runtime-host@sha256:YOUR_CACHED_DIGEST' \
+  mise exec -- bun run test:native opencode-history opencode-input-stop-worker
+```
+
+For focused worker-source iteration, build with
+`mise exec -- bun scripts/factory/build-input-stop.ts .factory/test-results/input-stop-candidate`
+and set `FACTORY_INPUT_STOP_TEST_WORKER` to that output's absolute `input-stop.mjs` path.
+The fixture records its checksum and mounts only that candidate read-only. This qualifies the
+candidate SDK executor, not the packaged image; omit the override for final package qualification.
+
 Controlled controller tests use real PostgreSQL and Factory owners with explicit RPC responses.
 Cold restart is the accepted model, without preserved process IDs or warm memory.
 

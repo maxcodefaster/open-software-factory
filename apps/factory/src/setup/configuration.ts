@@ -171,7 +171,7 @@ function devContainer(content: string, existingPaths: readonly string[]) {
       dockerComposeFile: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
       service: z.string().optional(),
       overrideCommand: z.boolean().optional(),
-      workspaceFolder: z.literal("/workspace/project"),
+      workspaceFolder: z.string().min(1).optional(),
     })
     .loose()
     .refine((value) =>
@@ -265,6 +265,13 @@ export function validateConfiguration(
           "Factory starts App commands after Dev Container hooks. Keep the primary service idle or set overrideCommand:true.",
         );
       const volumes = services[value.service ?? ""]?.["volumes"];
+      const workspaceFolder = value.workspaceFolder;
+      const repositoryTarget = (target: string) => {
+        if (!posix.isAbsolute(target)) return false;
+        if (workspaceFolder === undefined) return true;
+        const relative = posix.relative(target, workspaceFolder);
+        return relative !== ".." && !relative.startsWith("../");
+      };
       const mounted =
         Array.isArray(volumes) &&
         volumes.some((volume: unknown) => {
@@ -273,7 +280,8 @@ export function validateConfiguration(
             return (
               source !== undefined &&
               posix.normalize(source).replace(/\/$/, "") === ".." &&
-              target === value.workspaceFolder &&
+              target !== undefined &&
+              repositoryTarget(target) &&
               !options?.split(",").includes("ro")
             );
           }
@@ -288,12 +296,12 @@ export function validateConfiguration(
           return (
             binding.success &&
             posix.normalize(binding.data.source).replace(/\/$/, "") === ".." &&
-            binding.data.target === value.workspaceFolder &&
+            repositoryTarget(binding.data.target) &&
             binding.data.read_only !== true
           );
         });
       if (!mounted)
-        throw new Error("Compose primary service must mount the repository at /workspace/project");
+        throw new Error("Compose primary service must mount the repository into its workspace");
     }
   }
   for (const file of files) {

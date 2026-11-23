@@ -47,6 +47,130 @@ test("Starter configuration validates without AI, including its Compose referenc
     ),
   ).not.toThrow();
 });
+test.each([undefined, "/workspaces/project"])(
+  "standard image and Dockerfile recipes accept workspaceFolder %s without rewriting mounts",
+  (workspaceFolder) => {
+    for (const recipe of [{ image: "node:24" }, { build: { dockerfile: "Dockerfile" } }]) {
+      const files = [
+        {
+          path: ".devcontainer/devcontainer.json",
+          content: JSON.stringify({ ...recipe, workspaceFolder }),
+        },
+        { path: ".devcontainer/Dockerfile", content: "FROM node:24\n" },
+      ];
+      expect(() =>
+        validateConfiguration(
+          files,
+          files.map((file) => file.path),
+        ),
+      ).not.toThrow();
+    }
+  },
+);
+test.each([
+  { workspaceFolder: undefined, target: "/workspaces/project" },
+  { workspaceFolder: "/workspaces/project", target: "/workspaces/project" },
+  { workspaceFolder: "/workspaces/project/apps/web", target: "/workspaces/project" },
+  {
+    workspaceFolder: `/workspaces/\${localWorkspaceFolderBasename}`,
+    target: `/workspaces/\${localWorkspaceFolderBasename}`,
+  },
+])("Compose keeps its repository bind at $target for workspaceFolder $workspaceFolder", (entry) => {
+  for (const volume of [
+    `..:${entry.target}`,
+    `../:${entry.target}:cached`,
+    { type: "bind", source: "..", target: entry.target },
+  ]) {
+    const files = [
+      {
+        path: ".devcontainer/devcontainer.json",
+        content: JSON.stringify({
+          dockerComposeFile: "compose.yaml",
+          service: "app",
+          workspaceFolder: entry.workspaceFolder,
+        }),
+      },
+      {
+        path: ".devcontainer/compose.yaml",
+        content: JSON.stringify({
+          services: { app: { image: "node:24", volumes: [volume] } },
+        }),
+      },
+    ];
+    expect(() =>
+      validateConfiguration(
+        files,
+        files.map((file) => file.path),
+      ),
+    ).not.toThrow();
+  }
+});
+test.each([undefined, "/workspaces/project"])(
+  "standard Compose workspaceFolder %s still requires a writable repository bind",
+  (workspaceFolder) => {
+    for (const volume of [
+      "data:/workspaces/project",
+      "../src:/workspaces/project",
+      "/tmp:/workspaces/project",
+      "..:/workspaces/project:ro",
+      "..:relative",
+      "..:",
+      { type: "volume", source: "..", target: "/workspaces/project" },
+      { type: "bind", source: "../src", target: "/workspaces/project" },
+      { type: "bind", source: "..", target: "/workspaces/project", read_only: true },
+    ]) {
+      const files = [
+        {
+          path: ".devcontainer/devcontainer.json",
+          content: JSON.stringify({
+            dockerComposeFile: "compose.yaml",
+            service: "app",
+            workspaceFolder,
+          }),
+        },
+        {
+          path: ".devcontainer/compose.yaml",
+          content: JSON.stringify({
+            services: { app: { image: "node:24", volumes: [volume] } },
+          }),
+        },
+      ];
+      expect(() =>
+        validateConfiguration(
+          files,
+          files.map((file) => file.path),
+        ),
+      ).toThrow("mount the repository");
+    }
+  },
+);
+test.each(["/workspaces/project-other", "/workspaces/other", "/workspaces/project/../other"])(
+  "Compose workspaceFolder %s must remain inside the repository bind",
+  (workspaceFolder) => {
+    const files = [
+      {
+        path: ".devcontainer/devcontainer.json",
+        content: JSON.stringify({
+          dockerComposeFile: "compose.yaml",
+          service: "app",
+          workspaceFolder,
+        }),
+      },
+      {
+        path: ".devcontainer/compose.yaml",
+        content: JSON.stringify({
+          services: { app: { image: "node:24", volumes: ["..:/workspaces/project"] } },
+        }),
+      },
+    ];
+    expect(() =>
+      validateConfiguration(
+        files,
+        files.map((file) => file.path),
+      ),
+    ).toThrow("mount the repository");
+  },
+);
 test("assisted Compose proposal must mount the repository into its primary workspace", () => {
   const recipe = {
     path: ".devcontainer/devcontainer.json",
@@ -223,10 +347,7 @@ test("setup rejects missing recipe files, wrong runners, malformed YAML and unre
     { dockerComposeFile: "compose.yaml", service: "app" },
   ])
     expect(() =>
-      validateConfiguration(
-        [{ path, content: JSON.stringify({ ...recipe, workspaceFolder: "/workspace/project" }) }],
-        [path],
-      ),
+      validateConfiguration([{ path, content: JSON.stringify(recipe) }], [path]),
     ).toThrow("unavailable");
   for (const content of [
     "on: push\njobs: {}",

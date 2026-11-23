@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -105,6 +106,11 @@ func TestDevelopmentAgentHealthDoesNotBlockIDE(t *testing.T) {
 func TestDevelopmentChildServesAgentWhilePreviewIsUnhealthy(t *testing.T) {
 	// Exercise actual Child admission and HTTP forwarding, not a readiness flag
 	// or PID. The controlled Agent endpoint is not real model acceptance.
+	checkout := t.TempDir()
+	workspace := filepath.Join(checkout, "services", "api")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
 	preview := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
@@ -147,6 +153,33 @@ func TestDevelopmentChildServesAgentWhilePreviewIsUnhealthy(t *testing.T) {
 			completed <- fmt.Errorf("unexpected Child admission: %#v", hello)
 			return
 		}
+		if err := connection.WriteJSON(Message{Type: "operation-request", OperationID: "observed-context",
+			Action: "file-context", Data: "{}"}); err != nil {
+			completed <- err
+			return
+		}
+		for {
+			var message Message
+			if err := connection.ReadJSON(&message); err != nil {
+				completed <- fmt.Errorf("observed Child context unavailable: %w", err)
+				return
+			}
+			if message.OperationID != "observed-context" {
+				continue
+			}
+			var observed struct {
+				WorkspaceFolder string `json:"workspaceFolder"`
+				CheckoutFolder  string `json:"checkoutFolder"`
+				UserID          int    `json:"userID"`
+			}
+			if message.Type != "operation-response" || message.Action != "file-context" || message.Error != "" ||
+				json.Unmarshal([]byte(message.Data), &observed) != nil ||
+				observed.WorkspaceFolder != workspace || observed.CheckoutFolder != checkout || observed.UserID != os.Geteuid() {
+				completed <- fmt.Errorf("Child context lost its effective directory or user: %#v", message)
+				return
+			}
+			break
+		}
 		if err := connection.WriteJSON(Message{Type: "http-request", StreamID: "agent-info",
 			Channel: "agent", Method: http.MethodGet, Path: "/api/info"}); err != nil {
 			completed <- err
@@ -188,7 +221,7 @@ func TestDevelopmentChildServesAgentWhilePreviewIsUnhealthy(t *testing.T) {
 	}))
 	defer control.Close()
 	assignment := validAssignment()
-	assignment.WorkspaceFolder = t.TempDir()
+	assignment = effectiveChildAssignment(assignment, devcontainerResult{RemoteWorkspaceFolder: workspace, checkoutFolder: checkout})
 	assignment.ControlURL = "ws" + strings.TrimPrefix(control.URL, "http")
 	assignment.Channels = []Channel{
 		{Name: "app", Kind: "app", Target: preview.URL, HealthPath: "/"},

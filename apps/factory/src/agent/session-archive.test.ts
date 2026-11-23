@@ -55,7 +55,14 @@ function client(native = payload(), version = upstream.openCode.version) {
     return Response.json(
       path === "/api/info"
         ? { version }
-        : { data: request.method === "POST" ? native.info : native },
+        : path === "/api/location"
+          ? {
+              directory: "/workspaces/replacement",
+              project: { directory: "/workspaces/replacement" },
+            }
+          : {
+              data: request.method === "POST" ? native.info : native,
+            },
     );
   });
   return { api, calls };
@@ -132,13 +139,14 @@ test("native import does not restore grants or dispatch a prompt", async () => {
   await importNativeSessionArchive(owned.api, payload());
   expect(owned.calls.map((call) => [call.method, call.path])).toEqual([
     ["GET", "/api/info"],
+    ["GET", "/api/location"],
     ["POST", "/api/experimental/session/import"],
   ]);
-  expect(owned.calls[1]?.body).toMatchObject({
-    info: { id: sessionID, location: { directory: "/workspace/project" } },
+  expect(owned.calls[2]?.body).toMatchObject({
+    info: { id: sessionID, location: { directory: "/workspaces/replacement" } },
   });
-  expect(JSON.stringify(owned.calls[1]?.body)).not.toContain("privateGrant");
-  expect(JSON.stringify(owned.calls[1]?.body)).not.toContain("permissions");
+  expect(JSON.stringify(owned.calls[2]?.body)).not.toContain("privateGrant");
+  expect(JSON.stringify(owned.calls[2]?.body)).not.toContain("permissions");
 });
 
 test("authenticated Coding projection retains save status but excludes private archive pointers", () => {

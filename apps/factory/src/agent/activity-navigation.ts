@@ -4,6 +4,7 @@ export function activityNavigation(
   name: string,
   input: unknown,
   metadata: unknown,
+  checkoutDirectory?: string,
 ): ActivityNavigation | undefined {
   if (
     !["read", "write", "edit", "apply_patch"].includes(name) ||
@@ -14,9 +15,10 @@ export function activityNavigation(
   const fields = input as { path?: unknown; file?: unknown; filePath?: unknown };
   const supplied = fields.path ?? fields.file ?? fields.filePath;
   if (typeof supplied !== "string") return;
-  const path = supplied.startsWith("/workspace/project/")
-    ? supplied.slice("/workspace/project/".length)
-    : supplied;
+  const path =
+    checkoutDirectory && supplied.startsWith(`${checkoutDirectory}/`)
+      ? supplied.slice(checkoutDirectory.length + 1)
+      : supplied;
   if (
     !path ||
     path.length > 1000 ||

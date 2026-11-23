@@ -49,6 +49,7 @@ export async function pinnedOpenCode(
     settings: Record<string, unknown>;
     model?: Record<string, unknown>;
   },
+  directory = "/workspace/project",
 ) {
   artifactImage ??=
     process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
@@ -97,6 +98,7 @@ export async function pinnedOpenCode(
         container,
         artifactImage,
         scratch,
+        directory,
         ownerProcessID: process.pid,
         attempted: created,
         network,
@@ -187,6 +189,10 @@ export async function pinnedOpenCode(
       label,
       "--network",
       network,
+      "--workdir",
+      directory,
+      "--env",
+      `FACTORY_PROCESS_DIRECTORY=${directory}`,
       "--env",
       `FACTORY_PROCESS_MODEL_ID=${nativeProvider?.modelID ?? buildModelID}`,
       ...(nativeProvider
@@ -235,7 +241,7 @@ export async function pinnedOpenCode(
           ]
         : []),
       "--mount",
-      `type=bind,src=${project},dst=/workspace/project`,
+      `type=bind,src=${project},dst=${directory}`,
       "--mount",
       `type=bind,src=${resolve("test/fixtures")},dst=/owned-fixture,readonly`,
       ...(packaged ? ["--entrypoint", "node"] : []),
@@ -302,10 +308,7 @@ export async function pinnedOpenCode(
     await observe(
       () =>
         client.model
-          .list(
-            { location: { directory: "/workspace/project" } },
-            { signal: AbortSignal.timeout(10_000) },
-          )
+          .list({ location: { directory } }, { signal: AbortSignal.timeout(10_000) })
           .then(() => true)
           .catch(() => false),
       (ready) => ready,

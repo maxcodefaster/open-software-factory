@@ -12,7 +12,10 @@ import {
   workspaceSharedDocument,
 } from "../../../../packages/db/src/schema";
 import { setupInspectionOutput } from "../../../../packages/project-domain/src/setup";
-import { parseSystemContract } from "../../../../packages/system-contract/src/system-contract";
+import {
+  parseSystemContract,
+  type SystemContract,
+} from "../../../../packages/system-contract/src/system-contract";
 import { CommandError } from "../command-error";
 import type { InitialSourceSeed } from "./source-initialization";
 
@@ -58,7 +61,11 @@ function fileBytes(value: unknown) {
  * can predate setup confirmation. Add only its exact approved missing files;
  * keep the original Git basis, saved application edits and seed provenance.
  */
-export async function sourceStartupContract(sql: SQL, lease: StartupSource, forward: Forward) {
+export async function sourceStartupContract(
+  sql: SQL,
+  lease: StartupSource,
+  forward: Forward,
+): Promise<SystemContract | null> {
   if (lease.owner !== "service" || !lease.writable)
     throw new CommandError("unavailable", "Independent Source is not ready for Workspace Start");
   const db = drizzleTransaction(sql);
@@ -154,10 +161,5 @@ export async function sourceStartupContract(sql: SQL, lease: StartupSource, forw
     }
   }
   const content = await readFile(forward, ".factory/system.json");
-  if (!content)
-    throw new CommandError(
-      "conflict",
-      "Saved Source has no confirmed Factory configuration. Confirm Project setup before Start.",
-    );
-  return parseSystemContract(content.toString("utf8"));
+  return content === undefined ? null : parseSystemContract(content.toString("utf8"));
 }

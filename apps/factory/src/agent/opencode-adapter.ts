@@ -1,7 +1,33 @@
+import { posix } from "node:path";
 import { ClientError, OpenCode } from "@opencode/client";
 import { z } from "zod";
 
 type AgentTransport = (request: Request, path: string) => Promise<Response>;
+
+const nativeDirectory = z
+  .string()
+  .refine(
+    (value) =>
+      posix.isAbsolute(value) &&
+      posix.normalize(value) === value &&
+      value !== "/" &&
+      !value.endsWith("/") &&
+      !/[\0\r\n]/.test(value),
+    "OpenCode workspace directory is invalid",
+  );
+
+// The trusted server starts in the actual CLI-selected container directory.
+// Read native context rather than inventing a second Factory workspace path.
+export async function readOpenCodeWorkspace(client: ReturnType<typeof createOpenCodeClient>) {
+  const context = await client.location.get(undefined, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  const directory = nativeDirectory.parse(context.directory);
+  const checkoutDirectory = nativeDirectory.parse(context.project.directory);
+  if (directory !== checkoutDirectory && !directory.startsWith(`${checkoutDirectory}/`))
+    throw new Error("OpenCode workspace is outside its native checkout");
+  return { location: { directory }, checkoutDirectory };
+}
 
 export function isOpenCodeObservationTransportError(error: unknown) {
   return (
@@ -195,10 +221,7 @@ export async function ensureOpenCodeMessageBoundary(
   const deadline = Date.now() + 30_000;
   for (;;) {
     try {
-      await client.model.list(
-        { location: { directory: "/workspace/project" } },
-        { signal: AbortSignal.timeout(10_000) },
-      );
+      await client.model.list(undefined, { signal: AbortSignal.timeout(10_000) });
       break;
     } catch (error) {
       // Native activation has its own five-second bound. Only a readiness 503
@@ -260,9 +283,11 @@ const missingSession = z.object({
 export async function listOpenCodeSessionTree(
   client: ReturnType<typeof createOpenCodeClient>,
   root: string,
+  rootDirectory?: string,
 ) {
   const result = [root];
   const seen = new Set(result);
+  let directory = rootDirectory;
   for (let index = 0; index < result.length; index++) {
     let cursor: string | undefined;
     const cursors = new Set<string>();
@@ -272,7 +297,16 @@ export async function listOpenCodeSessionTree(
         { signal: AbortSignal.timeout(5_000) },
       );
       for (const child of page.data) {
-        if (child.parentID !== result[index] || child.location.directory !== "/workspace/project")
+        if (!directory) {
+          const session = await client.session.get(
+            { sessionID: root },
+            { signal: AbortSignal.timeout(5_000) },
+          );
+          if (session.id !== root)
+            throw new Error("OpenCode root Session has inconsistent ancestry");
+          directory = nativeDirectory.parse(session.location.directory);
+        }
+        if (child.parentID !== result[index] || child.location.directory !== directory)
           throw new Error("OpenCode child Session has inconsistent ancestry");
         if (!seen.has(child.id)) {
           seen.add(child.id);
@@ -292,7 +326,13 @@ export async function observeOpenCodeWork(
   client: ReturnType<typeof createOpenCodeClient>,
   root: string,
 ) {
-  const sessionIDs = new Set(await listOpenCodeSessionTree(client, root));
+  const session = await client.session.get(
+    { sessionID: root },
+    { signal: AbortSignal.timeout(5_000) },
+  );
+  if (session.id !== root) throw new Error("OpenCode root Session has inconsistent ancestry");
+  const location = { directory: nativeDirectory.parse(session.location.directory) };
+  const sessionIDs = new Set(await listOpenCodeSessionTree(client, root, location.directory));
   const shells = z
     .array(
       z.object({
@@ -301,14 +341,7 @@ export async function observeOpenCodeWork(
         metadata: z.object({ sessionID: z.string().optional() }),
       }),
     )
-    .parse(
-      (
-        await client.shell.list(
-          { location: { directory: "/workspace/project" } },
-          { signal: AbortSignal.timeout(5_000) },
-        )
-      ).data,
-    );
+    .parse((await client.shell.list({ location }, { signal: AbortSignal.timeout(5_000) })).data);
   const active = z
     .record(z.string(), z.object({ type: z.literal("running") }))
     .parse(await client.session.active({ signal: AbortSignal.timeout(5_000) }));
@@ -318,6 +351,7 @@ export async function observeOpenCodeWork(
   const unknownShell = shells.some((shell) => !shell.metadata.sessionID);
   const sessionsRunning = [...sessionIDs].some((id) => Object.hasOwn(active, id));
   return {
+    location,
     sessionIDs: [...sessionIDs],
     shells: ownedShells,
     running: unknownShell || ownedShells.length > 0 || sessionsRunning,
@@ -433,7 +467,7 @@ export async function interruptOpenCodeSession(
     }
     for (const shell of work.shells)
       await client.shell.remove(
-        { id: shell.id, location: { directory: "/workspace/project" } },
+        { id: shell.id, location: work.location },
         { signal: AbortSignal.timeout(5_000) },
       );
     // Shell/child completion can notify and wake the parent. Fence that loop too.

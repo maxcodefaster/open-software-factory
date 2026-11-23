@@ -5,7 +5,7 @@ import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
+import type { createDatabase, DatabaseTransaction } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
@@ -236,6 +236,15 @@ export async function fixture(
         { headers: { "content-type": "text/event-stream" } },
       );
     if (path === "/api/info") return Response.json({ version: upstream.openCode.version });
+    if (path === "/api/location")
+      return Response.json({
+        directory: "/workspace/project",
+        project: {
+          id: "owned-controlled-project",
+          directory: "/workspace/project",
+          canonical: "/workspace/project",
+        },
+      });
     if (path === "/api/skill")
       return Response.json({
         data: installedSkills.map((id) => ({

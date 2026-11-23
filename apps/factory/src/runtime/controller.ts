@@ -44,6 +44,7 @@ import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src
 import type { SubstrateCall } from "../../../../packages/runtime-kubernetes/src/substrate-control";
 import {
   parseSystemContract,
+  type SystemContract,
   SystemContractError,
 } from "../../../../packages/system-contract/src/system-contract";
 import { personalWorkspaceIdentity } from "../../../../packages/workspace-domain/src/workspace";
@@ -61,7 +62,7 @@ import {
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
-import { type SubstrateSourceHandoff } from "../workspace/source-api";
+import type { SubstrateSourceHandoff } from "../workspace/source-api";
 import { readRepositoryFileAtRevision } from "./git-http";
 import type { RuntimeHub } from "./hub";
 import type { createSubstrateCapacity } from "./substrate-capacity";
@@ -147,15 +148,36 @@ export function createRuntimeController(
       isolated: ReturnType<typeof createSubstrateIsolated>;
     }
   >();
-  async function readContract(repositoryURL: string, revision: string) {
-    let content: string;
+  async function readWorkspaceContract(
+    repositoryURL: string,
+    revision: string,
+  ): Promise<SystemContract | null> {
+    let content: string | null;
     try {
       if (repositoryURL.startsWith("file://")) {
-        content = await readRepositoryFileAtRevision(
-          repositoryURL,
-          revision,
-          ".factory/system.json",
+        if (!/^[0-9a-f]{40,64}$/.test(revision)) throw new Error("Project revision is invalid");
+        const tree = Bun.spawn(
+          [
+            "git",
+            "-C",
+            decodeURIComponent(new URL(repositoryURL).pathname),
+            "ls-tree",
+            "-z",
+            revision,
+            "--",
+            ".factory/system.json",
+          ],
+          { stdout: "pipe", stderr: "pipe" },
         );
+        const [entries, error, exitCode] = await Promise.all([
+          new Response(tree.stdout).text(),
+          new Response(tree.stderr).text(),
+          tree.exited,
+        ]);
+        if (exitCode !== 0) throw new Error(error.trim() || "Project revision is unavailable");
+        content = entries
+          ? await readRepositoryFileAtRevision(repositoryURL, revision, ".factory/system.json")
+          : null;
       } else {
         const repository = forgeRepositoryFromURL(
           repositoryURL,
@@ -163,14 +185,29 @@ export function createRuntimeController(
         );
         if (repository.owner !== FACTORY_FORGEJO_OWNER)
           throw new Error("Project Forge owner is not allowed");
-        content = await forge.getFile(repository, ".factory/system.json", revision);
+        content = await forge.getOptionalFile(repository, ".factory/system.json", revision);
+        // A contents 404 can also mean an inaccessible repository or revision.
+        // Confirm absence in its exact tree instead of admitting an unknown read.
+        if (
+          content === null &&
+          (await forge.listFiles(repository, revision)).some(
+            (file) => file.path === ".factory/system.json",
+          )
+        )
+          throw new Error("Declared .factory/system.json is unavailable");
       }
     } catch (cause) {
       throw new SystemContractError(
         `Cannot read .factory/system.json at ${revision.slice(0, 12)}: ${cause instanceof Error ? cause.message : "unknown error"}`,
       );
     }
-    return parseSystemContract(content);
+    return content === null ? null : parseSystemContract(content);
+  }
+  async function readContract(repositoryURL: string, revision: string) {
+    const contract = await readWorkspaceContract(repositoryURL, revision);
+    if (contract === null)
+      throw new SystemContractError(".factory/system.json is required for Staging");
+    return contract;
   }
   function project(projectID: string) {
     const existing = projects.get(projectID);
@@ -184,7 +221,7 @@ export function createRuntimeController(
         configuration,
         options.call,
         options.provisionerCall,
-        readContract,
+        readWorkspaceContract,
         options.sources,
         options.capacity,
         shutdownCoding,
@@ -490,7 +527,6 @@ export function createRuntimeController(
       recordStart?: (sql: DatabaseTransaction, workspaceID: string) => Promise<void>,
     ) {
       await createAccessController(database).requireDevelopment(userID, projectID);
-      await requireSetupReady(database.client, projectID);
       if (selectedWorkspaceID) {
         const selected = await database.client.begin((sql) =>
           workspaceWriteAuthorityIn(sql, selectedWorkspaceID, userID),
@@ -520,7 +556,6 @@ export function createRuntimeController(
         .from(changeModel)
         .where(eq(changeModel.id, changeID));
       if (!change) throw new CommandError("not-found", "Change not found");
-      await requireSetupReady(database.client, change.projectID);
       return this.get(await project(change.projectID).workspaces.start(userID, changeID));
     },
     async ensureStaging(projectID: string, userID: string) {

@@ -376,6 +376,9 @@ The Actor tool bundle includes `input-stop.mjs`, a fixed metadata executor rathe
 than a runtime controller. It opens only the private native Session database,
 uses the pinned SDK/server at an empty Session location, receives no Factory or
 provider configuration, and confirms engine exit before returning a result.
+The private filesystem recreates the Session's recorded container directory empty, including
+standard and custom Dev Container folders. It never mounts that directory's Project checkout.
+Fixed tool and retained-metadata paths cannot be selected as the empty Session directory.
 It refuses a changed model/version, linked database sidecars and any unrelated
 root Inbox work. Networkless, read-only-container checks cover queued descendants,
 a previously running input, retained Source and the negative cases.

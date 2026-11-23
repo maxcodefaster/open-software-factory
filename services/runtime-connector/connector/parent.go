@@ -30,6 +30,8 @@ type devcontainerResult struct {
 	ComposeProjectName    string `json:"composeProjectName"`
 	RemoteUser            string `json:"remoteUser"`
 	RemoteWorkspaceFolder string `json:"remoteWorkspaceFolder"`
+	// Derived only from primary inspection, never decoded from CLI output.
+	checkoutFolder string
 }
 
 type parentState struct {
@@ -330,10 +332,22 @@ func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token
 			return cleanup, err
 		}
 	}
+	needsNativeDependencies := assignment.nativeActorUID != "" && assignment.EffectiveConfiguration == ""
+	secure := func() error {
+		path, remove, err := prepareNativeSecurity(ctx, *assignment)
+		cleanups = append(cleanups, remove)
+		if err == nil && path != "" {
+			assignment.EffectiveConfiguration = path
+		}
+		return err
+	}
+	if err := secure(); err != nil {
+		return cleanup, err
+	}
 	if err := prepareDevcontainerProject(ctx, *assignment); err != nil {
 		return cleanup, err
 	}
-	if assignment.nativeActorUID != "" && assignment.EffectiveConfiguration == "" {
+	if needsNativeDependencies {
 		path, image, remove, err := prepareNativeDependencies(ctx, assignment)
 		cleanups = append(cleanups, remove)
 		if err != nil {
@@ -342,6 +356,9 @@ func prepareFreshDevcontainer(ctx context.Context, assignment *Assignment, token
 		if path != "" {
 			assignment.EffectiveConfiguration = path
 			assignment.preparedRootFSImage = image
+			if err := secure(); err != nil {
+				return cleanup, err
+			}
 			// Validate the generated overlay with the same boundary checks. Source
 			// still declares the original image, Features, hooks and Compose data.
 			return cleanup, prepareDevcontainerProject(ctx, *assignment)
@@ -957,6 +974,8 @@ func validateCompose(
 			Devices     []json.RawMessage          `json:"devices"`
 			VolumesFrom []string                   `json:"volumes_from"`
 			CapDrop     []string                   `json:"cap_drop"`
+			CapAdd      []string                   `json:"cap_add"`
+			SecurityOpt []string                   `json:"security_opt"`
 			Volumes     []struct {
 				Type   string `json:"type"`
 				Source string `json:"source"`
@@ -997,6 +1016,14 @@ func validateCompose(
 		}
 	}
 	for name, service := range compose.Services {
+		if len(service.CapAdd) != 0 {
+			return nil, fmt.Errorf("Compose service %q adds forbidden capabilities", name)
+		}
+		for _, option := range service.SecurityOpt {
+			if forbiddenSecurityOption(option) {
+				return nil, fmt.Errorf("Compose service %q disables confinement", name)
+			}
+		}
 		if service.Privileged || service.Pid == "host" || service.NetworkMode == "host" {
 			return nil, fmt.Errorf("Compose service %q requests a forbidden host boundary", name)
 		}
@@ -1319,12 +1346,15 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 	if result.ComposeProjectName != "" && result.ComposeProjectName != assignment.ComposeProjectName {
 		return devcontainerResult{}, errors.New("Dev Containers CLI returned an unexpected Compose project identity")
 	}
-	if result.RemoteWorkspaceFolder != assignment.RemoteWorkspaceFolder {
+	if assignment.nativeActorUID == "" && result.RemoteWorkspaceFolder != assignment.RemoteWorkspaceFolder {
 		return devcontainerResult{}, errors.New("Dev Containers CLI returned an unexpected remote workspace")
 	}
 	container, err := inspectContainer(ctx, result.ContainerID)
 	if err != nil {
 		return devcontainerResult{}, err
+	}
+	if container.ID != result.ContainerID {
+		return devcontainerResult{}, errors.New("primary container identity does not match the CLI result")
 	}
 	if !container.State.Running {
 		return devcontainerResult{}, errors.New("primary Dev Container exited during startup")
@@ -1339,6 +1369,10 @@ func startDevcontainerWithConfiguration(ctx context.Context, assignment Assignme
 		return devcontainerResult{}, err
 	}
 	if assignment.nativeActorUID != "" {
+		result.checkoutFolder, err = validateNativeWorkspaceFolder(container, assignment, result.RemoteWorkspaceFolder)
+		if err != nil {
+			return devcontainerResult{}, err
+		}
 		if err := runNativeLifecycle(ctx, assignment, result); err != nil {
 			return devcontainerResult{}, err
 		}
@@ -1363,8 +1397,7 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	}
 	connectorPath := fmt.Sprintf("/tmp/factory-runtime-connector-%d", assignment.Generation)
 	assignmentPath := fmt.Sprintf("/tmp/factory-runtime-assignment-%d.json", assignment.Generation)
-	childAssignment := assignment
-	childAssignment.WorkspaceFolder = result.RemoteWorkspaceFolder
+	childAssignment := effectiveChildAssignment(assignment, result)
 	encoded, err := json.Marshal(childAssignment)
 	if err != nil {
 		finishStaging()

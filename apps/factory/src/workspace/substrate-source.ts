@@ -607,7 +607,10 @@ export function createSubstrateSources(
   }
   return {
     lease,
-    async startupContract(workspaceID: string, sql: SQL): Promise<SystemContract | undefined> {
+    async startupContract(
+      workspaceID: string,
+      sql: SQL,
+    ): Promise<SystemContract | null | undefined> {
       let row = await lease(workspaceID, sql);
       if (!row) return;
       if (row.owner !== "service" || !row.writable)

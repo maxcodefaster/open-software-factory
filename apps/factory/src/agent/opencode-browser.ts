@@ -19,12 +19,10 @@ async function registerOpenCodeFacade(
   endpoint: string,
   bearer: string,
 ) {
-  const location = { directory: "/workspace/project" };
   const facade = facades[server];
   await client.experimental.mcp.add(
     {
       server,
-      location,
       config: {
         type: "remote",
         url: endpoint,
@@ -40,7 +38,7 @@ async function registerOpenCodeFacade(
   // OpenCode 2.3.2's SessionContext.select calls McpTool.flush before taking its
   // tool snapshot, including on warm sessions. The public API exposes connection
   // status, not registry readiness; a fixed wait cannot establish the latter.
-  const servers = await client.mcp.list({ location }, { signal: AbortSignal.timeout(5_000) });
+  const servers = await client.mcp.list(undefined, { signal: AbortSignal.timeout(5_000) });
   if (!servers.data.some((entry) => entry.name === server && entry.status.status === "connected"))
     throw new Error(facade.failure);
 }

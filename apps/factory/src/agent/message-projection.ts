@@ -132,6 +132,7 @@ function isFactoryBootstrapMessage(message: { text: string; metadata?: Record<st
 export function projectMessages(
   messages: unknown,
   admittedInputs?: ReadonlyMap<string, string | null>,
+  checkoutDirectory?: string,
 ) {
   if (!messages || typeof messages !== "object" || !("data" in messages)) return [];
   if (!Array.isArray(messages.data)) return [];
@@ -192,7 +193,7 @@ export function projectMessages(
             const summary = toolSummary(browserAction ?? content.name, input);
             const navigation =
               status === "completed"
-                ? activityNavigation(content.name, input, content.state.metadata)
+                ? activityNavigation(content.name, input, content.state.metadata, checkoutDirectory)
                 : undefined;
             return [
               {

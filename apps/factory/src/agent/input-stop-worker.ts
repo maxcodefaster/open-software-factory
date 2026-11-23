@@ -1,4 +1,5 @@
 import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { posix } from "node:path";
 import { z } from "zod";
 import upstream from "../../../../upstream.json";
 import {
@@ -11,7 +12,9 @@ import {
 // Fixed native-Actor paths. This process has no Project checkout at the
 // Session's recorded location, no Factory capability and no provider config.
 const database = "/home/rootless/persist/project/.git/factory-opencode.db";
-const location = "/workspace/project";
+// Empty control cwd in the private Stop-only filesystem, not the Project's
+// workspace. Native Session IDs and their recorded directories own observation.
+const controlDirectory = "/workspace/project";
 const input = z.strictObject({
   stopID: z.uuid(),
   attemptID: z.uuid(),
@@ -21,6 +24,45 @@ const input = z.strictObject({
   version: z.literal(upstream.openCode.version),
   mode: z.enum(["interrupt", "observe"]),
 });
+
+// Only called inside the Stop-only private filesystem. Recreate an empty
+// native location, never mount the checkout or follow metadata/tool symlinks.
+async function prepareSessionDirectory(path: string) {
+  if (
+    !posix.isAbsolute(path) ||
+    posix.normalize(path) !== path ||
+    path === "/" ||
+    path.endsWith("/") ||
+    /[\0\r\n]/.test(path) ||
+    [
+      "/home/rootless/persist",
+      "/opt/factory",
+      "/usr/lib",
+      "/usr/bin",
+      "/lib",
+      "/bin",
+      "/proc",
+      "/dev",
+    ].some((root) => path === root || path.startsWith(`${root}/`))
+  )
+    throw new Error("Input Stop Session directory is invalid");
+  let directory = "";
+  for (const component of path.slice(1).split("/")) {
+    directory += `/${component}`;
+    let entry = await lstat(directory).catch((cause: unknown) => {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw cause;
+    });
+    if (!entry) {
+      await mkdir(directory, { mode: 0o700 });
+      entry = await lstat(directory);
+    }
+    if (!entry.isDirectory())
+      throw new Error("Input Stop Session directory is not a private directory");
+  }
+  if ((await readdir(path)).length)
+    throw new Error("Input Stop Session directory must contain no Project files or tools");
+}
 
 async function main() {
   const reader = Bun.stdin.stream().getReader();
@@ -58,14 +100,14 @@ async function main() {
   ).json();
   if (packaged.version !== target.version)
     throw new Error("Input Stop requires the exact admitted OpenCode version");
-  await mkdir(location, { recursive: true, mode: 0o700 });
-  const directory = await lstat(location);
-  if (!directory.isDirectory() || (await readdir(location)).length)
+  await mkdir(controlDirectory, { recursive: true, mode: 0o700 });
+  const directory = await lstat(controlDirectory);
+  if (!directory.isDirectory() || (await readdir(controlDirectory)).length)
     throw new Error("Input Stop requires an empty, private Session location");
   const home = await mkdtemp("/tmp/factory-input-stop-");
   const password = crypto.randomUUID();
   const child = Bun.spawn([process.execPath, "/opt/factory/opencode/server/server.mjs"], {
-    cwd: location,
+    cwd: controlDirectory,
     env: {
       PATH: "/usr/local/bin:/usr/bin:/bin",
       HOME: home,
@@ -114,11 +156,11 @@ async function main() {
       const session = await client.session.get({ sessionID: target.sessionID });
       if (
         session.id !== target.sessionID ||
-        session.location.directory !== location ||
         session.model?.providerID !== "factory" ||
         session.model.id !== target.modelID
       )
         throw new Error("Input Stop Session differs from its admitted identity");
+      await prepareSessionDirectory(session.location.directory);
     } catch (cause) {
       const missing = z
         .object({ _tag: z.literal("SessionNotFoundError"), sessionID: z.literal(target.sessionID) })

@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runtimeAgentProcess } from "./agent-process";
 
 test.each([undefined, "medium", "high"] as const)(
@@ -19,7 +22,9 @@ test.each([undefined, "medium", "high"] as const)(
     expect(process.command.slice(0, 2)).toEqual(["sh", "-c"]);
     const command = process.command[2];
     expect(command).toContain("/opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs");
-    expect(command).toContain("OPENCODE_DB=/workspace/project/.git/factory-opencode.db");
+    expect(command).toContain("git_dir=$(git rev-parse --absolute-git-dir)");
+    expect(command).toContain('OPENCODE_DB="$git_dir/factory-opencode.db"');
+    expect(command).not.toContain("/workspace/project");
     expect(command).not.toMatch(/opencode web|\.config\/opencode/);
     expect(process.env.OPENCODE_PASSWORD).toBe(agent.modelToken);
     expect(process.env.FACTORY_BUILD_BROWSER_COMMAND).toBe("/tmp/factory-runtime-connector-2");
@@ -54,5 +59,48 @@ test.each([undefined, "medium", "high"] as const)(
     expect(JSON.stringify(process)).not.toMatch(
       /FACTORY_AUTH_SECRET|FACTORY_MODEL_API_KEY|FACTORY_FORGEJO_TOKEN/,
     );
+  },
+);
+
+test.each(["", "services/python", "folder with spaces/backend"])(
+  "OpenCode retains its database in the checkout Git directory from workspace %s",
+  async (folder) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "factory-agent-cwd-")));
+    try {
+      const cwd = join(root, folder);
+      await mkdir(cwd, { recursive: true });
+      const initialized = Bun.spawn(["git", "init", "--quiet", root], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await initialized.exited).toBe(0);
+      const process = runtimeAgentProcess(
+        {
+          modelBaseURL: "https://factory.test/model",
+          modelToken: "owned",
+          modelID: "owned",
+          modelIDs: ["owned"],
+          browserToolsImage: `registry.test/browser@sha256:${"a".repeat(64)}`,
+          browserURL: "https://factory.test/browser",
+          browserToken: "owned",
+        },
+        1,
+      );
+      const startup = process.command[2]?.split("; exec ")[0];
+      if (!startup) throw new Error("Missing packaged OpenCode startup command");
+      const command = Bun.spawn(["sh", "-c", `${startup}; printf %s "$OPENCODE_DB"`], {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exit, output] = await Promise.all([
+        command.exited,
+        new Response(command.stdout).text(),
+      ]);
+      expect(exit).toBe(0);
+      expect(output).toBe(join(root, ".git/factory-opencode.db"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   },
 );

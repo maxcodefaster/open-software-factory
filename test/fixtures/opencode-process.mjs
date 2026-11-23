@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { join } from "node:path";
 
 // Isolated upstream process fixture. Only explicit live tests supply a native provider.
+const directory = process.env.FACTORY_PROCESS_DIRECTORY ?? "/workspace/project";
 const modelID = process.env.FACTORY_PROCESS_MODEL_ID ?? "owned-process-model";
 const nativeProvider = process.env.FACTORY_PROCESS_NATIVE_PROVIDER
   ? JSON.parse(process.env.FACTORY_PROCESS_NATIVE_PROVIDER)
@@ -17,7 +19,7 @@ if (process.env.FACTORY_PROCESS_SKILL_MANIFEST) {
     throw new Error(`Owned skill installation failed: ${installed.stderr}`);
 }
 await mkdir("/root/.config/opencode", { recursive: true });
-await mkdir("/workspace/project/.git", { recursive: true });
+await mkdir(join(directory, ".git"), { recursive: true });
 await writeFile(
   "/root/.config/opencode/opencode.json",
   JSON.stringify({
@@ -203,11 +205,11 @@ function start() {
         ? ["/owned-server/server.mjs"]
         : ["serve", "--hostname", "0.0.0.0", "--port", "4096"],
     {
-      cwd: "/workspace/project",
+      cwd: directory,
       env: {
         ...process.env,
         OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-        OPENCODE_DB: "/workspace/project/.git/factory-opencode.db",
+        OPENCODE_DB: join(directory, ".git", "factory-opencode.db"),
         OPENCODE_PASSWORD: "owned-opencode-server-password",
         FACTORY_OPENCODE_TOKEN: nativeProvider?.settings?.apiKey ?? "owned-not-a-secret",
         OPENCODE_DISABLE_MODELS_FETCH: "1",

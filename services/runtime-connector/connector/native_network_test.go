@@ -32,7 +32,11 @@ printf '%s\n' "$*" >> "$NATIVE_NETWORK_FIXTURE/cli.log"
 case "$1" in
   up)
     case " $* " in *' --skip-post-create '*) ;; *) exit 8 ;; esac
-    printf '{"outcome":"success","containerId":"%s","composeProjectName":"owned","remoteUser":"node","remoteWorkspaceFolder":"/workspace/project"}\n' "$NATIVE_NETWORK_PRIMARY" ;;
+    if [ -n "$NATIVE_NETWORK_UP_RESULT" ]; then
+      printf '%s\n' "$NATIVE_NETWORK_UP_RESULT"
+    else
+      printf '{"outcome":"success","containerId":"%s","composeProjectName":"owned","remoteUser":"node","remoteWorkspaceFolder":"%s"}\n' "$NATIVE_NETWORK_PRIMARY" "${NATIVE_NETWORK_REMOTE_WORKSPACE:-/workspace/project}"
+    fi ;;
   run-user-commands)
     case "$NATIVE_NETWORK_SCENARIO" in
       lost-reply) exit 1 ;;
@@ -44,6 +48,18 @@ case "$1" in
 esac
 `,
 	}
+	var primary []map[string]any
+	if err := json.Unmarshal([]byte(files["primary"]), &primary); err != nil {
+		t.Fatal(err)
+	}
+	primary[0]["Mounts"] = []map[string]any{{
+		"Type": "bind", "Source": directory, "Destination": "/workspace/project", "RW": true,
+	}}
+	content, err := json.Marshal(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files["primary"] = string(content)
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(data), 0700); err != nil {
 			t.Fatal(err)

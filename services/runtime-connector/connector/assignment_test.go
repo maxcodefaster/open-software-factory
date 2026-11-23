@@ -62,6 +62,10 @@ func TestAssignmentValidation(t *testing.T) {
 	if err := assignment.Validate(); err != nil {
 		t.Fatalf("valid assignment failed: %v", err)
 	}
+	assignment.CheckoutFolder = "/workspace"
+	if err := assignment.Validate(); err != nil {
+		t.Fatalf("container cwd beneath a known checkout root failed: %v", err)
+	}
 
 	tests := []struct {
 		name   string
@@ -69,6 +73,9 @@ func TestAssignmentValidation(t *testing.T) {
 	}{
 		{"traversing Dev Container path", func(value *Assignment) { value.DevcontainerPath = "../devcontainer.json" }},
 		{"remote target", func(value *Assignment) { value.Channels[0].Target = "http://example.com:4300" }},
+		{"relative checkout root", func(value *Assignment) { value.CheckoutFolder = "workspace" }},
+		{"unclean checkout root", func(value *Assignment) { value.CheckoutFolder = "/workspace/other/.." }},
+		{"checkout root excludes cwd", func(value *Assignment) { value.CheckoutFolder = "/another-checkout" }},
 		{"control URL credentials", func(value *Assignment) { value.ControlURL = "wss://token@factory.example.test/connect" }},
 		{"duplicate channel", func(value *Assignment) { value.Channels = append(value.Channels, value.Channels[0]) }},
 		{"missing generation", func(value *Assignment) { value.Generation = 0 }},

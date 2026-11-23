@@ -22,9 +22,9 @@ for (const admission of admissions) {
     const calls: Array<{ method: string; path: string }> = [];
     const client = createOpenCodeClient(async (request, path) => {
       calls.push({ method: request.method, path });
-      expect(new URL(request.url).searchParams.get("location[directory]")).toBe(
-        "/workspace/project",
-      );
+      // The pinned server runs in the CLI-selected Dev Container workspace.
+      // An absent override uses that native location, including default and custom folders.
+      expect(new URL(request.url).searchParams.has("location[directory]")).toBe(false);
       if (request.method === "PUT") {
         expect(path.split("?")[0]).toBe(`/api/experimental/mcp/${admission.name}`);
         expect(await request.json()).toEqual({
