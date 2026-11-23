@@ -337,6 +337,16 @@ bootstrap route. Source materialization uses the separate coordination connectio
 application query pool. Native controller and Connector tests cover these boundaries;
 the live ARM Workspace and shipped-template coverage is listed above.
 
+An explicit first Start can add the exact confirmed missing setup files to a Source checkout
+opened before configuration approval. This uses the existing Workspace lock and Source writer
+fence, a confirmation for that seed's exact Project and base commit, and create-only file writes.
+Different local bytes or unsaved shared configuration block Start without overwriting them.
+Interrupted copies observe identical confirmed files and add only what remains missing.
+The immutable initialization revision, original seed and Git history do not change. Provisioning
+freezes the System Contract read from current canonical Source, including on a later Start after
+Stop; it does not read an absent contract from that older initialization commit or replay setup
+over a previously running Workspace.
+
 The application no longer has a Factorybox executor, prepared execution reserve or worker-recovery
 path. Idle compute records Pause under the Workspace lock and never applies the removed Factorybox
 pause-count limit or an implicit Stop. Shutdown tracks the actual native Actor operations without

@@ -718,6 +718,86 @@ test("startPersisted provisions a real Ticket identity for a commissioned Contri
   }
 }, 60_000);
 
+test("first Start uses the canonical Source contract when setup was confirmed after Source admission", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-source-before-setup-"));
+  const repository = join(directory, "repository");
+  await Bun.$`git init -b main ${repository}`.quiet();
+  await writeFile(join(repository, "README"), "Saved before setup\n");
+  await Bun.$`git -C ${repository} add .`.quiet();
+  await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m source`.quiet();
+  const revision = (await Bun.$`git -C ${repository} rev-parse HEAD`.text()).trim();
+  const f = await substrateFixture(revision);
+  const sources = createSubstrateSources(f.database, f.hub);
+  const contract = {
+    version: 1 as const,
+    primaryApp: "python",
+    apps: [
+      { id: "python", label: "Python", command: ["python", "app.py"], port: 9000, healthPath: "/" },
+    ],
+  };
+  await mkdir(join(repository, ".factory"));
+  await writeFile(join(repository, ".factory/system.json"), JSON.stringify(contract));
+  await Bun.$`git -C ${repository} add .`.quiet();
+  await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m setup`.quiet();
+  await f.database
+    .client`UPDATE factory.project SET repository_url=${`file://${repository}`} WHERE id=${f.projectID}`;
+  const ca = join(directory, "ca.pem");
+  await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
+  let canonicalReads = 0;
+  Object.assign(sources, {
+    async startupContract(workspaceID: string) {
+      expect(workspaceID).toBe(f.workspaceID);
+      canonicalReads++;
+      return contract;
+    },
+  });
+  const call: SubstrateCall = async (method) => {
+    if (method.startsWith("Get")) throw new SubstrateRPCError("NotFound", "absent");
+    throw new Error("owned-provisioning-boundary");
+  };
+  const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
+    configuration: {
+      deployment: "fresh-workspaces",
+      database: f.config.database,
+      connection: f.config.connection,
+      provisioner: { ...f.config.connection, tokenFile: "/owner-token" },
+      editorPrincipal: "user:system:serviceaccount:owned:factory-control",
+      connectorURL: f.config.connectorURL,
+      factoryCAFile: ca,
+      workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
+      profile: f.config.profile,
+      runtime: f.config.runtime,
+      workerSelector: {
+        "factory.runtime/profile": f.config.profile,
+        "factory.dev/deployment": "owned",
+      },
+      egressHosts: [],
+    },
+    sources,
+    call,
+    provisionerCall: call,
+  });
+  try {
+    // The old initialization commit intentionally has no System Contract. A
+    // saved Source may already contain the later confirmed configuration.
+    await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.toThrow(
+      "owned-provisioning-boundary",
+    );
+    expect(canonicalReads).toBe(1);
+    const [provision] = await f.database.client<
+      { intent: { systemContract: unknown; revision: string } }[]
+    >`
+      SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+    expect(provision?.intent.systemContract).toEqual(contract);
+    expect(provision?.intent.revision).toBe(revision);
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
+  } finally {
+    await sources.close();
+    await f.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("first Source access admits a personal Source owner without creating native compute", async () => {
   const f = await substrateFixture();
   const directory = await mkdtemp(join(tmpdir(), "factory-first-source-"));

@@ -42,7 +42,7 @@ import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/aut
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { CommandError } from "../command-error";
-import { type SubstrateSourceHandoff } from "../workspace/source-api";
+import type { SubstrateSourceHandoff } from "../workspace/source-api";
 import { agentConfiguration } from "./agent-configuration";
 import { runtimeAppOrigins } from "./app-origins";
 import {
@@ -56,6 +56,10 @@ import {
   type SubstrateConfiguration,
   substrateTemplateSHA256,
 } from "./substrate";
+import {
+  boundNativeProvisioningChecks,
+  provisionBoundNativeResources,
+} from "./substrate-bound-provisioning";
 import type { SubstrateCapacity } from "./substrate-capacity-contract";
 import {
   substrateBootstrapContinuationBlocked,
@@ -66,10 +70,6 @@ import {
 } from "./substrate-grant";
 import { substrateResourceReservation, substrateResources } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
-import {
-  boundNativeProvisioningChecks,
-  provisionBoundNativeResources,
-} from "./substrate-bound-provisioning";
 
 const installationConfiguration = z.strictObject({
   deployment: z.enum(["owned-test", "fresh-workspaces"]),
@@ -549,7 +549,16 @@ export function createSubstrateWorkspaces(
         const branch = workspace?.branch ?? ticket?.branch ?? project.branch;
         if (!readContract)
           throw new Error("Native Workspace requires the normal Project System Contract reader");
-        const systemContract = await readContract(project.repository, revision);
+        const sourceContract =
+          workspace && sources?.startupContract
+            ? await sql.begin(async (tx) => {
+                // Keep current execution authority locked through any exact
+                // confirmed setup writes, just like ordinary Source saves.
+                await substrateWorkspaceGrantIn(database, tx, workspaceID, userID, true);
+                return sources.startupContract?.(workspaceID, tx);
+              })
+            : undefined;
+        const systemContract = sourceContract ?? (await readContract(project.repository, revision));
         const [currentEnvironment] = await db
           .select({
             version: projectEnvironment.version,

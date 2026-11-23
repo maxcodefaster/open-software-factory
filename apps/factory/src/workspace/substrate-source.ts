@@ -20,6 +20,7 @@ import {
   ticket,
 } from "../../../../packages/db/src/schema";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
+import type { SystemContract } from "../../../../packages/system-contract/src/system-contract";
 import { CommandError } from "../command-error";
 import {
   nativeInputStopIn,
@@ -35,6 +36,7 @@ import {
   initialSourceSeed,
   materializeInitialSource,
 } from "./source-initialization";
+import { sourceStartupContract } from "./source-startup";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | DatabaseTransaction;
@@ -79,7 +81,8 @@ export type SubstrateSourceLease = {
 export type SubstrateSourceHandoff = Pick<
   ReturnType<typeof createSubstrateSources>,
   "attach" | "freezeActor" | "makeIndependent" | "resume" | "requireIndependent"
->;
+> &
+  Partial<Pick<ReturnType<typeof createSubstrateSources>, "startupContract">>;
 
 function objectKey(saved: Checkpoint, suffix: string) {
   return `workspace-source/v1/${saved.workspaceID}/${saved.id}/${suffix}`;
@@ -604,6 +607,37 @@ export function createSubstrateSources(
   }
   return {
     lease,
+    async startupContract(workspaceID: string, sql: SQL): Promise<SystemContract | undefined> {
+      let row = await lease(workspaceID, sql);
+      if (!row) return;
+      if (row.owner !== "service" || !row.writable)
+        throw new CommandError(
+          "unavailable",
+          "Independent Source is not ready for Workspace Start",
+        );
+      await service(row, sql);
+      row = await lease(workspaceID, sql);
+      if (!row)
+        throw new CommandError("unavailable", "Source owner changed before Workspace Start");
+      const role = await writer(row, sql);
+      return sourceStartupContract(sql, row, (operation, body) =>
+        this.forward(
+          workspaceID,
+          null,
+          operation,
+          new Request("http://source.internal/", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "X-Factory-Writer-Epoch": String(role.epoch),
+            },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(15_000),
+          }),
+          sql,
+        ),
+      );
+    },
     onTransfer(callback: (workspaceID: string) => void) {
       revoke = callback;
     },
