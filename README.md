@@ -117,6 +117,8 @@ replace Source, start compute or reload the editor's unsaved buffer. Workspace S
 compute separately and retains independent Source before deleting its original Actor. Pause saves
 the environment for cold continuation. Final Stop saves the checkout, not a new snapshot of the
 Docker environment it is about to delete; its recorded intent blocks execution until cleanup finishes.
+An open IDE observes a lost connection rather than replaying its opening request. Once the editor
+is stopped, only a new opening or explicit editor retry can prepare another editor instance.
 
 For binary or larger files, `beginFileTransfer` binds an upload or download to one user, Workspace
 and Runtime Attempt. Transfers support files up to 128 MiB and expire after 30 minutes. Use its

@@ -58,6 +58,7 @@ export function DeveloperIDEWorkspace(props: {
   );
   const [reconnecting, setReconnecting] = createSignal(false);
   const [editorRetry, setEditorRetry] = createSignal(0);
+  let admittedEditorRetry: number | undefined;
   const [sourceRetry, setSourceRetry] = createSignal(0);
   let sourceRecovery: AbortController | undefined;
   let sourceObservation: AbortController | undefined;
@@ -252,14 +253,23 @@ export function DeveloperIDEWorkspace(props: {
   );
   createEffect(
     () => [props.projectID, props.allowed, editorRetry()] as const,
-    ([projectID, allowed]) => {
+    ([projectID, allowed, retry]) => {
       if (!projectID || !allowed) return;
       const cancel = new AbortController();
       setEditorError("");
+      // Mount and explicit Retry admit once. Project/access changes and lost
+      // acknowledgements only observe; they cannot reuse demand after Stop.
+      let admit = admittedEditorRetry !== retry;
+      admittedEditorRetry = retry;
       void (async () => {
-        let current = await tolerant(cancel.signal, () =>
-          serverCall(ensureDeveloperIDE({ ...{ signal: cancel.signal }, data: [projectID] })),
-        );
+        let current = await tolerant(cancel.signal, () => {
+          if (!admit)
+            return serverCall(getDeveloperIDE({ ...{ signal: cancel.signal }, data: [] }));
+          admit = false;
+          return serverCall(
+            ensureDeveloperIDE({ ...{ signal: cancel.signal }, data: [projectID] }),
+          );
+        });
         while (!cancel.signal.aborted) {
           setEditorState(current.state);
           if (current.state === "ready") {

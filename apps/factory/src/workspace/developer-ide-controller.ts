@@ -307,12 +307,13 @@ export function createDeveloperIDEController(
       // An upgrade can ship a new editor image. A running editor keeps its recorded image, so
       // opening the IDE stops the older one and lets the stopped branch below start the new epoch.
       const outdated = await row(userID);
+      let restartEpoch = outdated?.state === "stopped" ? outdated.epoch : undefined;
       if (
         outdated &&
         outdated.image !== image &&
         (outdated.state === "ready" || outdated.state === "preparing")
       ) {
-        await database.db
+        const stopping = await database.db
           .update(developerIde)
           .set({
             state: "stop-intended",
@@ -325,7 +326,9 @@ export function createDeveloperIDEController(
               eq(developerIde.serviceEpoch, expression`${outdated.epoch}::bigint`),
               inArray(developerIde.state, ["ready", "preparing"]),
             ),
-          );
+          )
+          .returning({ userID: developerIde.userId });
+        if (stopping.length) restartEpoch = outdated.epoch;
         schedule(userID);
         const deadline = now() + 60_000;
         while (now() < deadline && (await row(userID))?.state === "stop-intended")
@@ -338,7 +341,9 @@ export function createDeveloperIDEController(
         const current = await row(userID, sql);
         if (!current)
           await db.insert(developerIde).values({ userId: userID, state: "create-intended", image });
-        else if (current.state === "stopped")
+        else if (current.state === "stopped" && current.epoch === restartEpoch)
+          // A request already opening/observing this epoch cannot turn a later
+          // owner Stop into permission for another epoch.
           await db
             .update(developerIde)
             .set({

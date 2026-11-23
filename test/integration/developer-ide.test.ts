@@ -843,6 +843,85 @@ test("Stop during editor create fences its outcome; failed teardown needs an exp
   }
 }, 30_000);
 
+test("an editor ensure waiting at admission cannot recreate the epoch stopped in the meantime", async () => {
+  const owned = await fixture();
+  const { database, developerID, projectID } = owned;
+  const lock = database.coordination();
+  const key = `developer-ide-intent:${developerID}`;
+  const prepared: number[] = [];
+  const stopped: number[] = [];
+  const observed: DeveloperIDEObservation = {
+    namespaceUID: "retained-namespace",
+    podUID: "retained-pod",
+    ready: true,
+    failed: false,
+  };
+  const editor = createDeveloperIDEController(database, {
+    async prepare(input) {
+      prepared.push(input.identity.epoch);
+      return observed;
+    },
+    async observe() {
+      return observed;
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop(input) {
+      stopped.push(input.identity.epoch);
+    },
+    close() {},
+  });
+  let late: ReturnType<typeof editor.ensure> | undefined;
+  try {
+    const first = await editor.ensure(projectID, developerID);
+    await eventually(
+      () => editor.get(developerID),
+      (view) => view.state === "ready",
+      "The original editor never became ready",
+    );
+    await lock`SELECT pg_advisory_lock(hashtext(${key}))`;
+    late = editor.ensure(projectID, developerID);
+    await eventually(
+      () => database.client<{ waiting: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM pg_locks
+          WHERE locktype='advisory' AND NOT granted
+          AND objid=(hashtext(${key})::bigint & 4294967295)::oid
+          AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`,
+      (rows) => rows[0]?.waiting === true,
+      "The retained ensure never reached the admission gate",
+    );
+    await editor.stop(developerID);
+    await eventually(
+      () => editor.get(developerID),
+      (view) => view.state === "stopped",
+      "The owner Stop never completed",
+    );
+    await lock`SELECT pg_advisory_unlock(hashtext(${key}))`;
+    expect(await late).toMatchObject({ epoch: first.epoch, state: "stopped" });
+    expect(await editor.get(developerID)).toMatchObject({
+      epoch: first.epoch,
+      state: "stopped",
+    });
+    expect(prepared).toEqual([first.epoch]);
+    expect(stopped).toEqual([first.epoch]);
+    // A new, intentional Open IDE after confirmed Stop still admits the next epoch.
+    expect((await editor.ensure(projectID, developerID)).epoch).toBe(first.epoch + 1);
+    await eventually(
+      () => editor.get(developerID),
+      (view) => view.state === "ready",
+      "An explicit Open IDE after Stop did not prepare the next epoch",
+    );
+    expect(prepared).toEqual([first.epoch, first.epoch + 1]);
+  } finally {
+    await lock`SELECT pg_advisory_unlock_all()`;
+    await late?.catch(() => undefined);
+    await lock.end({ timeout: 1 });
+    await editor.close();
+    await owned.dispose();
+  }
+}, 20_000);
+
 test("opening the IDE after an upgrade replaces a running editor that has an older image", async () => {
   const owned = await fixture();
   const stopped: string[] = [];
