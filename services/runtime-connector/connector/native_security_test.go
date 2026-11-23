@@ -6,9 +6,80 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// Keep this Go-only so the same fixture runs in the pinned Linux Go image.
+func TestNativeSecurityCommandProcess(t *testing.T) {
+	if os.Getenv("FACTORY_NATIVE_SECURITY_TEST_PROCESS") != "1" {
+		return
+	}
+	index := slices.Index(os.Args, "--")
+	if index == -1 || index+1 == len(os.Args) {
+		os.Exit(9)
+	}
+	args := os.Args[index+1:]
+	read := func(path string) map[string]any {
+		content, err := os.ReadFile(path)
+		var value map[string]any
+		if err != nil || json.Unmarshal(content, &value) != nil {
+			os.Exit(9)
+		}
+		return value
+	}
+	var result any
+	switch args[0] {
+	case "read-configuration":
+		flag := "--config"
+		if slices.Contains(args, "--override-config") {
+			flag = "--override-config"
+		}
+		position := slices.Index(args, flag)
+		if position == -1 || position+1 == len(args) {
+			os.Exit(9)
+		}
+		config := read(args[position+1])
+		result = map[string]any{"configuration": config, "mergedConfiguration": config}
+	case "compose":
+		services := map[string]any{}
+		for i := 1; i < len(args); i++ {
+			if args[i] != "--file" && args[i] != "-f" {
+				continue
+			}
+			i++
+			for name, value := range read(args[i])["services"].(map[string]any) {
+				service := value.(map[string]any)
+				prior, ok := services[name].(map[string]any)
+				if !ok {
+					prior = map[string]any{}
+				}
+				for key, field := range service {
+					if key == "cap_drop" {
+						drops, _ := prior[key].([]any)
+						for _, drop := range field.([]any) {
+							if !slices.Contains(drops, drop) {
+								drops = append(drops, drop)
+							}
+						}
+						prior[key] = drops
+					} else {
+						prior[key] = field
+					}
+				}
+				services[name] = prior
+			}
+		}
+		result = map[string]any{"services": services}
+	default:
+		os.Exit(9)
+	}
+	if json.NewEncoder(os.Stdout).Encode(result) != nil {
+		os.Exit(9)
+	}
+	os.Exit(0)
+}
 
 func nativeSecurityFixture(t *testing.T) Assignment {
 	t.Helper()
@@ -21,28 +92,14 @@ func nativeSecurityFixture(t *testing.T) Assignment {
 		t.Fatal(err)
 	}
 	tools := t.TempDir()
-	script := `#!/usr/bin/env node
-const fs = require("node:fs"), args = process.argv.slice(2);
-const read = file => JSON.parse(fs.readFileSync(file, "utf8"));
-if (args[0] === "read-configuration") {
-  const flag = args.includes("--override-config") ? "--override-config" : "--config";
-  const file = args[args.indexOf(flag) + 1];
-  const configuration = read(file);
-  console.log(JSON.stringify({configuration, mergedConfiguration: configuration}));
-} else if (args[0] === "compose") {
-  const model = {services:{}};
-  for (let i=1; i<args.length; i++) {
-    if (args[i] !== "--file" && args[i] !== "-f") continue;
-    for (const [name, service] of Object.entries(read(args[++i]).services)) {
-      const prior = model.services[name] || {};
-      model.services[name] = {...prior, ...service};
-      if (prior.cap_drop || service.cap_drop)
-        model.services[name].cap_drop = [...new Set([...(prior.cap_drop || []), ...(service.cap_drop || [])])];
-    }
-  }
-  console.log(JSON.stringify(model));
-} else process.exit(9);
+	script := `#!/bin/sh
+# This synchronous command fixture has no background work to drain at exit.
+GORACE="${GORACE:+$GORACE }atexit_sleep_ms=0"
+export GORACE
+exec "$FACTORY_NATIVE_SECURITY_TEST_EXECUTABLE" -test.run='^TestNativeSecurityCommandProcess$' -- "$@"
 `
+	t.Setenv("FACTORY_NATIVE_SECURITY_TEST_PROCESS", "1")
+	t.Setenv("FACTORY_NATIVE_SECURITY_TEST_EXECUTABLE", os.Args[0])
 	for _, name := range []string{"devcontainer", "docker"} {
 		if err := os.WriteFile(filepath.Join(tools, name), []byte(script), 0700); err != nil {
 			t.Fatal(err)
