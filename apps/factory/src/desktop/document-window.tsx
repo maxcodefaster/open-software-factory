@@ -325,7 +325,7 @@ export interface DocumentWindowModel {
 export function DocumentWindow(props: { model: DocumentWindowModel }) {
   // The model identity is stable; its accessors retain live state.
   const model = untrack(() => props.model);
-  // The editor's multi-megabyte bundle loads only once a developer has left the page idle,
+  // The editor's multi-megabyte bundle loads after a developer's first idle turn,
   // and never on a narrow or touch viewport until the IDE is opened.
   const [idleWarm, setIdleWarm] = createSignal(false);
   createEffect(

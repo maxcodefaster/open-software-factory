@@ -155,19 +155,15 @@ test("the Trash entry has its own icon rather than the Inbox icon", async ({ pag
 });
 
 test.describe("editor warm-up on a wide pointer window", () => {
-  test("waits for the first interaction after idle, not for page load", async ({ page }) => {
+  test("prepares on the first idle turn without another interaction or timer", async ({ page }) => {
     await arriveAtBoard(page);
-    await page.waitForTimeout(1000);
-    expect(editorStarts).toBe(0);
-    await page.keyboard.press("Shift");
     await expect.poll(() => editorStarts, { timeout: 3000 }).toBeGreaterThan(0);
-  });
-
-  test("starts on its own after four idle seconds", async ({ page }) => {
-    await arriveAtBoard(page);
-    await page.waitForTimeout(1000);
-    expect(editorStarts).toBe(0);
-    await expect.poll(() => editorStarts, { timeout: 12_000 }).toBeGreaterThan(0);
+    const prepared = editorStarts;
+    await page.keyboard.press("Shift");
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    expect(editorStarts).toBe(prepared);
   });
 });
 
@@ -177,7 +173,8 @@ test.describe("editor warm-up on a touch window", () => {
   test("never starts until the IDE is opened", async ({ page }) => {
     await arriveAtBoard(page);
     await page.touchscreen.tap(200, 500);
-    await page.waitForTimeout(7000);
+    await page.waitForLoadState("networkidle");
+    await page.evaluate(() => new Promise<void>((resolve) => requestIdleCallback(() => resolve())));
     expect(editorStarts).toBe(0);
     await page
       .getByRole("navigation", { name: "Workspace dock" })

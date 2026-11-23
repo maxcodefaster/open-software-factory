@@ -1,36 +1,25 @@
 import { expect, test } from "bun:test";
-import {
-  scheduleWarmup,
-  type WarmupEnvironment,
-  warmupDelayMilliseconds,
-} from "./workspace-warmup";
+import { scheduleWarmup, type WarmupEnvironment } from "./workspace-warmup";
 
 function fakeEnvironment(constrained = false) {
   const waiting = new Map<string, () => void>();
-  const events: string[] = [];
   const hook = (name: string) => (run: () => void) => {
     waiting.set(name, run);
     return () => {
       if (waiting.get(name) === run) waiting.delete(name);
-      events.push(`cancel ${name}`);
     };
   };
   const environment: WarmupEnvironment = {
     constrained: () => constrained,
     afterLoad: hook("load"),
     whenIdle: hook("idle"),
-    firstInteraction: hook("interaction"),
-    delay: (milliseconds, run) => {
-      expect(milliseconds).toBe(warmupDelayMilliseconds);
-      return hook("delay")(run);
-    },
   };
   const fire = (name: string) => {
     const run = waiting.get(name);
     waiting.delete(name);
     run?.();
   };
-  return { environment, fire, waiting, events };
+  return { environment, fire, waiting };
 }
 
 function schedule(environment: WarmupEnvironment) {
@@ -43,34 +32,17 @@ function schedule(environment: WarmupEnvironment) {
   return { calls, stop };
 }
 
-test("nothing starts before the page has loaded and gone idle", () => {
+test("an eligible desktop prepares the editor at the first idle turn without another delay", () => {
   const fake = fakeEnvironment();
   const { calls } = schedule(fake.environment);
   expect(calls).toEqual([]);
   fake.fire("load");
   expect(calls).toEqual([]);
   fake.fire("idle");
-  expect(calls).toEqual(["prefetch"]);
-});
-
-test("the editor warms on the first interaction and cancels the timer", () => {
-  const fake = fakeEnvironment();
-  const { calls } = schedule(fake.environment);
-  fake.fire("load");
-  fake.fire("idle");
-  fake.fire("interaction");
   expect(calls).toEqual(["prefetch", "warm"]);
-  expect(fake.waiting.has("delay")).toBe(false);
-});
-
-test("the editor warms after four seconds without interaction, once", () => {
-  const fake = fakeEnvironment();
-  const { calls } = schedule(fake.environment);
-  fake.fire("load");
   fake.fire("idle");
-  fake.fire("delay");
-  fake.fire("interaction");
   expect(calls).toEqual(["prefetch", "warm"]);
+  expect(fake.waiting.size).toBe(0);
 });
 
 test("a constrained viewport prefetches chunks but never warms the editor", () => {
@@ -88,9 +60,8 @@ test("a viewport that becomes constrained while waiting does not warm", () => {
   const environment = { ...fake.environment, constrained: () => constrained };
   const { calls } = schedule(environment);
   fake.fire("load");
-  fake.fire("idle");
   constrained = true;
-  fake.fire("delay");
+  fake.fire("idle");
   expect(calls).toEqual(["prefetch"]);
 });
 
@@ -100,8 +71,6 @@ test("stopping cancels every pending step", () => {
   fake.fire("load");
   stop();
   fake.fire("idle");
-  fake.fire("delay");
-  fake.fire("interaction");
   expect(calls).toEqual([]);
   expect(fake.waiting.size).toBe(0);
 });

@@ -1,17 +1,12 @@
-export const warmupDelayMilliseconds = 4_000;
-
 export interface WarmupEnvironment {
   // Narrow windows and touch devices keep the editor cold until it is opened.
   constrained(): boolean;
   afterLoad(run: () => void): () => void;
   whenIdle(run: () => void): () => void;
-  firstInteraction(run: () => void): () => void;
-  delay(milliseconds: number, run: () => void): () => void;
 }
 
-// The developer chunks are fetched once the page has loaded and gone idle. The editor itself
-// (a multi-megabyte bundle) waits for the first interaction or four seconds more, and never
-// starts on a constrained viewport.
+// Prepare the existing editor after the page's first idle turn, not after another
+// interaction or timer. Constrained viewports still fetch only the small chunks.
 export function scheduleWarmup(options: {
   prefetch(): void;
   warm(): void;
@@ -31,17 +26,7 @@ export function scheduleWarmup(options: {
         environment.whenIdle(() => {
           if (stopped) return;
           options.prefetch();
-          if (environment.constrained()) return;
-          let started = false;
-          const start = () => {
-            if (started || stopped) return;
-            started = true;
-            for (const cancel of cancels) cancel();
-            cancels.clear();
-            if (!environment.constrained()) options.warm();
-          };
-          track(environment.firstInteraction(start));
-          track(environment.delay(warmupDelayMilliseconds, start));
+          if (!environment.constrained()) options.warm();
         }),
       );
     }),
@@ -70,18 +55,6 @@ export function browserWarmupEnvironment(): WarmupEnvironment {
         return () => cancelIdleCallback(handle);
       }
       const timer = setTimeout(run, 200);
-      return () => clearTimeout(timer);
-    },
-    firstInteraction(run) {
-      const events = ["pointerdown", "keydown", "touchstart", "wheel"] as const;
-      const listen = { once: true, passive: true, capture: true } as const;
-      for (const name of events) window.addEventListener(name, run, listen);
-      return () => {
-        for (const name of events) window.removeEventListener(name, run, listen);
-      };
-    },
-    delay(milliseconds, run) {
-      const timer = setTimeout(run, milliseconds);
       return () => clearTimeout(timer);
     },
   };
