@@ -836,6 +836,7 @@ test("Stop during editor create fences its outcome; failed teardown needs an exp
       (value) => value.state === "stopped",
       "Explicit Stop retry failed",
     );
+    expect(await editors.get(developerID)).toMatchObject({ state: "stopped", failure: null });
   } finally {
     finishCreate.resolve();
     await editors.close();

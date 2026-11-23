@@ -158,7 +158,12 @@ export function createDeveloperIDEController(
         await client.stop(input);
         await drizzleTransaction(sql)
           .update(developerIde)
-          .set({ state: "stopped", stoppedAt: expression`now()`, updatedAt: expression`now()` })
+          .set({
+            state: "stopped",
+            failure: null,
+            stoppedAt: expression`now()`,
+            updatedAt: expression`now()`,
+          })
           .where(
             and(
               eq(developerIde.userId, userID),
