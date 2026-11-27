@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   readReleaseNativeBinding,
   readReleaseNativeTemplate,
   releaseInstallation,
 } from "../fixtures/release-installation";
 import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { z } from "zod";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(

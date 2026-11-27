@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -69,9 +69,9 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
         ticketID = fixtureValue(tickets[index], "tickets[index]"),
         questionID = fixtureValue(questions[index], "questions[index]");
       const conversationID = crypto.randomUUID();
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectID},${`inbox-${projectID}`},${`Inbox proof ${index + 1}`},
-          'https://example.invalid/owned-inbox.git','main','.devcontainer/devcontainer.json',${administrator.id})`;
+          'https://example.invalid/owned-inbox.git','main','.factory/actor-template.json',${administrator.id})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${administrator.id},'developer',${administrator.id})`;
       await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
@@ -136,15 +136,18 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
     await expect
       .poll(async () => {
         const [row] = await fixtureValue(database, "database").client<{ id: string | null }[]>`
-        SELECT user_id AS id FROM factory.ticket_responsibility WHERE ticket_id=${fixtureValue(tickets[1], "tickets[1]")}`;
+        SELECT (payload->>'userId')::uuid AS id FROM factory.operation
+        WHERE kind='tickets.responsibility'
+          AND idempotency_key=${`tickets.responsibility:${fixtureValue(tickets[1], "tickets[1]")}`}`;
         return row?.id;
       })
       .toBe(administrator.id);
     await expect
       .poll(async () => {
         const [row] = await fixtureValue(database, "database").client<{ id: string | null }[]>`
-        SELECT seen_event_id AS id FROM factory.inbox_receipt
-        WHERE user_id=${administrator.id} AND item_id=${`question:${questions[1]}`}`;
+        SELECT payload->>'seenEventId' AS id FROM factory.operation
+        WHERE kind='inbox.receipt'
+          AND idempotency_key=${`inbox.receipt:${administrator.id}:question:${questions[1]}`}`;
         return row?.id;
       })
       .toBe(questions[1]);
@@ -233,8 +236,10 @@ test("the real Factory dock aggregates Projects and opens the exact shared quest
         await fixtureValue(database, "database").client<
           { archived: boolean; seen: string | null }[]
         >`
-      SELECT archived,seen_event_id AS seen FROM factory.inbox_receipt
-      WHERE user_id=${administrator.id} AND item_id=${`conversation:${conversation.id}:original`}`
+      SELECT coalesce((payload->>'archived')::boolean, false) AS archived, payload->>'seenEventId' AS seen
+      FROM factory.operation
+      WHERE kind='inbox.receipt'
+        AND idempotency_key=${`inbox.receipt:${administrator.id}:conversation:${conversation.id}:original`}`
       )[0];
     await expect.poll(receipt).toEqual({ archived: false, seen: update });
     const archive = discussion.getByRole("button", { name: "Archive: New Ticket discussion" });

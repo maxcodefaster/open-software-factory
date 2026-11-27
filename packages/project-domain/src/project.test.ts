@@ -9,7 +9,7 @@ describe("Project registration", () => {
         name: "Release proof",
         repositoryUrl: "http://127.0.0.1:63653/factory/runtime-fixture.git",
         defaultBranch: "main",
-        devcontainerPath: ".devcontainer/devcontainer.json",
+        actorTemplatePath: ".factory/actor-template.json",
       }).success,
     ).toBe(true);
   });
@@ -27,7 +27,7 @@ describe("Project registration", () => {
         name: "Release proof",
         repositoryUrl,
         defaultBranch: "main",
-        devcontainerPath: ".devcontainer/devcontainer.json",
+        actorTemplatePath: ".factory/actor-template.json",
       }).success,
     ).toBe(false);
   });
@@ -39,26 +39,89 @@ describe("Project registration", () => {
         name: "Release proof",
         repositoryUrl: "http://127.0.0.1:33030/factory/project.git",
         defaultBranch: "main",
-        devcontainerPath: ".devcontainer/devcontainer.json",
+        actorTemplatePath: ".factory/actor-template.json",
       }).success,
     ).toBe(false);
   });
 
-  test("accepts the maintained fixture", () => {
+  test("accepts the native ActorTemplate repository path", () => {
     expect(
       registerProjectInput.parse({
         slug: "runtime-fixture",
         name: "Runtime fixture",
         repositoryUrl: "file:///workspace/test/fixtures/runtime-project",
         defaultBranch: "main",
+        actorTemplatePath: ".factory/actor-template.json",
+      }).actorTemplatePath,
+    ).toBe(".factory/actor-template.json");
+  });
+
+  test("trims the ActorTemplate repository path", () => {
+    expect(
+      registerProjectInput.parse({
+        slug: "runtime-fixture",
+        name: "Runtime fixture",
+        repositoryUrl: "https://example.com/project.git",
+        defaultBranch: "main",
+        actorTemplatePath: " .factory/actor-template.json ",
+      }).actorTemplatePath,
+    ).toBe(".factory/actor-template.json");
+  });
+
+  test.each([
+    "",
+    " ",
+    "..",
+    "../actor-template.json",
+    ".factory/../actor-template.json",
+    ".factory/../../actor-template.json",
+    ".factory/..",
+    "/.factory/actor-template.json",
+    " /.factory/actor-template.json ",
+    "//example.com/actor-template.json",
+    "a".repeat(501),
+  ])("rejects unsafe or invalid ActorTemplate repository path %s", (actorTemplatePath) => {
+    expect(
+      registerProjectInput.safeParse({
+        slug: "runtime-fixture",
+        name: "Runtime fixture",
+        repositoryUrl: "https://example.com/project.git",
+        defaultBranch: "main",
+        actorTemplatePath,
+      }).success,
+    ).toBe(false);
+  });
+
+  test.each([
+    ["alone", { devcontainerPath: ".devcontainer/devcontainer.json" }],
+    [
+      "alongside actorTemplatePath",
+      {
+        actorTemplatePath: ".factory/actor-template.json",
         devcontainerPath: ".devcontainer/devcontainer.json",
-      }),
-    ).toBeDefined();
+      },
+    ],
+  ])("rejects obsolete devcontainerPath %s as an unknown key", (_, fields) => {
+    for (const input of [
+      registerProjectInput,
+      createRegisterProjectInput("http://127.0.0.1:63653"),
+    ]) {
+      const result = input.safeParse({
+        slug: "runtime-fixture",
+        name: "Runtime fixture",
+        repositoryUrl: "https://example.com/project.git",
+        defaultBranch: "main",
+        ...fields,
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toContainEqual(
+        expect.objectContaining({ code: "unrecognized_keys", keys: ["devcontainerPath"] }),
+      );
+    }
   });
 
   test.each([
     ["embedded credentials", { repositoryUrl: "https://token@example.com/project.git" }],
-    ["repository path traversal", { devcontainerPath: "../devcontainer.json" }],
     ["invalid branch", { defaultBranch: "../main" }],
   ])("rejects %s", (_, replacement) => {
     const result = registerProjectInput.safeParse({
@@ -66,7 +129,7 @@ describe("Project registration", () => {
       name: "Runtime fixture",
       repositoryUrl: "https://example.com/project.git",
       defaultBranch: "main",
-      devcontainerPath: ".devcontainer/devcontainer.json",
+      actorTemplatePath: ".factory/actor-template.json",
       ...replacement,
     });
     expect(result.success).toBe(false);

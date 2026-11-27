@@ -1,23 +1,25 @@
 import { and, asc, eq, isNull, ne, sql as query } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   accountAccess,
   authUser,
   developmentWorkspace,
+  operation,
   projectMembership,
   workspaceShare,
-  workspaceShareDecision,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import {
   type WorkspaceShareInput,
   workspaceShareInput,
   workspaceShareView,
-} from "../../../../packages/workspace-domain/src/sharing";
+} from "#workspace-domain/sharing";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 
 type Database = ReturnType<typeof createDatabase>;
+
+const SHARE_DECISION_KIND = "workspace.share_decision";
 
 export function createWorkspaceSharing(
   database: Database,
@@ -28,14 +30,14 @@ export function createWorkspaceSharing(
       const db = drizzleTransaction(sql);
       const [decision] = await db
         .select({
-          workspaceID: workspaceShareDecision.workspaceId,
-          userID: workspaceShareDecision.userId,
-          permission: workspaceShareDecision.permission,
-          version: query<string>`${workspaceShareDecision.result}->>'version'`,
-          reconciled: query<boolean>`${workspaceShareDecision.accessReconciledAt} IS NOT NULL`,
+          workspaceID: operation.scopeId,
+          userID: query<string>`${operation.payload}->>'userId'`,
+          permission: query<"observe" | "collaborate" | null>`${operation.payload}->>'permission'`,
+          version: query<string>`${operation.result}->>'version'`,
+          reconciled: query<boolean>`${operation.completedAt} IS NOT NULL`,
         })
-        .from(workspaceShareDecision)
-        .where(eq(workspaceShareDecision.id, id));
+        .from(operation)
+        .where(and(eq(operation.id, id), eq(operation.kind, SHARE_DECISION_KIND)));
       if (!decision || decision.reconciled) return;
       // Serialize with sharing decisions and new authorized source access, not with runtime work.
       await db
@@ -56,10 +58,14 @@ export function createWorkspaceSharing(
       if (current?.version === decision.version && decision.permission !== "collaborate")
         await revoke(decision.workspaceID, decision.userID);
       await db
-        .update(workspaceShareDecision)
-        .set({ accessReconciledAt: query`now()` })
+        .update(operation)
+        .set({ state: "reconciled", completedAt: query`now()`, updatedAt: query`now()` })
         .where(
-          and(eq(workspaceShareDecision.id, id), isNull(workspaceShareDecision.accessReconciledAt)),
+          and(
+            eq(operation.id, id),
+            eq(operation.kind, SHARE_DECISION_KIND),
+            isNull(operation.completedAt),
+          ),
         );
     });
   }
@@ -122,17 +128,20 @@ export function createWorkspaceSharing(
         await projectDevelopmentAuthorityIn(sql, actorID, workspace.projectID);
         if (input.userID === actorID)
           throw new CommandError("conflict", "The owner cannot remove their own Workspace access");
+        const idempotencyKey = `${SHARE_DECISION_KIND}:${input.commandID}`;
         const [previous] = await db
           .select({
-            workspaceID: workspaceShareDecision.workspaceId,
-            userID: workspaceShareDecision.userId,
-            actorID: workspaceShareDecision.actorId,
-            permission: workspaceShareDecision.permission,
-            expectedVersion: query<string>`${workspaceShareDecision.expectedVersion}::text`,
-            result: workspaceShareDecision.result,
+            workspaceID: operation.scopeId,
+            userID: query<string>`${operation.payload}->>'userId'`,
+            actorID: operation.createdBy,
+            permission: query<
+              "observe" | "collaborate" | null
+            >`${operation.payload}->>'permission'`,
+            expectedVersion: query<string>`${operation.payload}->>'expectedVersion'`,
+            result: operation.result,
           })
-          .from(workspaceShareDecision)
-          .where(eq(workspaceShareDecision.id, input.commandID));
+          .from(operation)
+          .where(eq(operation.idempotencyKey, idempotencyKey));
         if (previous) {
           if (
             previous.workspaceID !== input.workspaceID ||
@@ -184,13 +193,19 @@ export function createWorkspaceSharing(
             target: [workspaceShare.workspaceId, workspaceShare.userId],
             set: { ...sharing, grantedAt: query`now()` },
           });
-        await db.insert(workspaceShareDecision).values({
+        await db.insert(operation).values({
           id: input.commandID,
-          workspaceId: input.workspaceID,
-          userId: input.userID,
-          actorId: actorID,
-          permission: input.permission,
-          expectedVersion: input.expectedVersion,
+          kind: SHARE_DECISION_KIND,
+          scopeType: "workspace",
+          scopeId: input.workspaceID,
+          idempotencyKey,
+          state: "pending",
+          createdBy: actorID,
+          payload: {
+            userId: input.userID,
+            permission: input.permission,
+            expectedVersion: input.expectedVersion,
+          },
           result: next,
         });
         if (input.permission !== null)
@@ -205,10 +220,10 @@ export function createWorkspaceSharing(
     },
     async recover() {
       const pending = await database.db
-        .select({ id: workspaceShareDecision.id })
-        .from(workspaceShareDecision)
-        .where(isNull(workspaceShareDecision.accessReconciledAt))
-        .orderBy(asc(workspaceShareDecision.createdAt), asc(workspaceShareDecision.id));
+        .select({ id: operation.id })
+        .from(operation)
+        .where(and(eq(operation.kind, SHARE_DECISION_KIND), isNull(operation.completedAt)))
+        .orderBy(asc(operation.createdAt), asc(operation.id));
       for (const row of pending) await reconcile(row.id);
     },
   };

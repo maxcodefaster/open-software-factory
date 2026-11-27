@@ -34,7 +34,6 @@ export async function observe<T>(
 
 export async function pinnedOpenCode(
   artifactImage?: string,
-  browserClient?: { path: string; endpoint: string; token: string; turnID: string },
   serverBinary = process.env["FACTORY_OPENCODE_SERVER_TEST_BINARY"],
   providerBaseURL?: string,
   retainedProject?: string,
@@ -210,20 +209,6 @@ export async function pinnedOpenCode(
           ]
         : []),
       ...(packaged ? ["--env", "FACTORY_PROCESS_PACKAGED_SERVER=1"] : []),
-      ...(browserClient
-        ? [
-            "--env",
-            `FACTORY_BUILD_BROWSER_URL=${browserClient.endpoint}`,
-            "--env",
-            "FACTORY_BUILD_BROWSER_COMMAND=/tmp/factory-runtime-connector-1",
-            "--env",
-            `FACTORY_BUILD_BROWSER_TOKEN=${browserClient.token}`,
-            "--env",
-            `FACTORY_PROCESS_BROWSER_TURN=${browserClient.turnID}`,
-            "--mount",
-            `type=bind,src=${browserClient.path},dst=/tmp/factory-runtime-connector-1,readonly`,
-          ]
-        : []),
       "--publish",
       "127.0.0.1::4096",
       "--publish",
@@ -319,19 +304,6 @@ export async function pinnedOpenCode(
     if (version !== `opencode v${expectedVersion}`)
       throw new Error(`Pinned OpenCode version differs: ${version}`);
     console.log("Owned pinned process", { version, scratch });
-    const installBrowserScreenshot = async (sessionID: string, data: string) => {
-      if (!/^[a-f0-9-]{36}$/.test(sessionID))
-        throw new Error("Owned screenshot Session identity required");
-      await docker(
-        "exec",
-        container,
-        "node",
-        "-e",
-        "const fs=require('fs');const dir='/tmp/factory-build-browser-'+process.argv[1];fs.mkdirSync(dir,{mode:0o700});fs.writeFileSync(dir+'/screenshot.jpg',Buffer.from(process.argv[2],'base64'),{mode:0o600})",
-        sessionID,
-        data,
-      );
-    };
     return {
       client,
       container,
@@ -340,7 +312,6 @@ export async function pinnedOpenCode(
       transport,
       dispose,
       scratch,
-      installBrowserScreenshot,
       diagnostics: async () => ({
         state: await docker("inspect", "--format", "{{json .State}}", container),
         logs: (await docker("logs", container)).slice(-4000),

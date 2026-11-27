@@ -1,4 +1,4 @@
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import type { CodingReasoning } from "#conversation-domain/model-settings";
 
 export const reasoningLabels: Record<CodingReasoning, string> = {
   medium: "Medium",

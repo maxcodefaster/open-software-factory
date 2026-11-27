@@ -1,5 +1,6 @@
-import { createSignal, Show } from "solid-js";
 import { render } from "@solidjs/web";
+import { createSignal, Show } from "solid-js";
+import { DockButton } from "../../apps/factory/src/dock";
 import { ReviewPanel } from "../../apps/factory/src/review/panel";
 import { RuntimeWorkspaceTabs } from "../../apps/factory/src/runtime-workspace";
 import {
@@ -7,10 +8,9 @@ import {
   workspacePanelID,
   workspaceTabElementID,
 } from "../../apps/factory/src/workspace-tabbar";
-import { DockButton } from "../../apps/factory/src/dock";
 import {
-  openWorkspaceTabState,
   closeWorkspaceTabState,
+  openWorkspaceTabState,
   type ProjectWorkspaceState,
 } from "../../apps/factory/src/workspace-tabs";
 import "../../apps/factory/src/tokens.css";

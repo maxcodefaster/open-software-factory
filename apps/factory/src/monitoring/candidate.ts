@@ -1,6 +1,6 @@
-import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
-import { type createForgejoClient } from "../../../../packages/forge/src/forge";
-import { applicationFixPath } from "../../../../packages/requirement-domain/src/autofix";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
+import { applicationFixPath } from "#requirement-domain/autofix";
 import { CommandError } from "../command-error";
 import { monitoringDigest } from "./payload";
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
 import { mcpSourceAlias } from "../mcp/sources";
 import { diagnoseMonitoringIncident } from "./diagnosis";
 

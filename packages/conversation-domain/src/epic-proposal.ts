@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requirementContentInput } from "../../requirement-domain/src/content";
+import { requirementContentInput } from "#requirement-domain/content";
 
 const workText = z
   .object({

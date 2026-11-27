@@ -1,4 +1,4 @@
-export { type createProjectAgentController } from "./controller";
+export type { createProjectAgentController } from "./controller";
 export {
   clarifyProjectInput,
   type InputClarification,

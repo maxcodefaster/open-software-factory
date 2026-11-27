@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { fixtureRuntime } from "../../../../test/fixtures/substrate";
+import { substrateResourceReservation } from "./substrate-resources";
 import {
   retainedSubstrateConfiguration,
   type SubstrateInstallationConfiguration,
@@ -37,10 +38,36 @@ const configuration: SubstrateInstallationConfiguration = {
   egressHosts: [],
 };
 
-test("Substrate installation configuration cannot select a Project or setup draft", () => {
-  expect(substrateInstallationConfiguration(configuration)).toEqual(configuration);
-  for (const extra of [{ projectID: crypto.randomUUID() }, { setupID: crypto.randomUUID() }])
+test("Substrate installation configuration cannot select a Project, setup draft or retired producer", () => {
+  expect(substrateInstallationConfiguration(configuration)).toEqual({
+    ...configuration,
+    resources: { cpuMilli: 1500, memoryMiB: 3072 },
+  });
+  for (const extra of [
+    { projectID: crypto.randomUUID() },
+    { setupID: crypto.randomUUID() },
+    { prebuildRegistry: "registry.test" },
+  ])
     expect(() => substrateInstallationConfiguration({ ...configuration, ...extra })).toThrow();
+});
+
+test("fresh native defaults are explicit without changing retained Actor limits", () => {
+  const projectID = crypto.randomUUID();
+  const retained = substrateWorkspaceConfiguration({ ...configuration, projectID });
+  const desired = substrateWorkspaceConfiguration({
+    ...substrateInstallationConfiguration(configuration),
+    projectID,
+  });
+  expect(desired.resources).toEqual({ cpuMilli: 1500, memoryMiB: 3072 });
+  expect(substrateResourceReservation(desired)).toEqual({ cpuMilli: 1500, memoryMiB: 3072 });
+  expect(retainedSubstrateConfiguration(desired, retained)).toEqual(retained);
+  expect(substrateResourceReservation(retained)).toEqual({ cpuMilli: 1500, memoryMiB: 1024 });
+  expect(
+    substrateInstallationConfiguration({
+      ...configuration,
+      resources: { cpuMilli: 2000, memoryMiB: 4096 },
+    }).resources,
+  ).toEqual({ cpuMilli: 2000, memoryMiB: 4096 });
 });
 
 test("Project bindings freeze their own identity under one installation configuration", () => {

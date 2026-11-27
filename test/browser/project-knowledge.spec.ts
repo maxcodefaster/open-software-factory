@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
@@ -77,13 +77,14 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     };
     const commit = head.commit.id;
     const body = "Human product purpose.\n\n## Escalation\n\nEscalation reduces support calls.\n";
-    await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${project},${name},'Support Wiki',${`${new URL(api).origin}/${owner}/${name}.git`},'main','.devcontainer/devcontainer.json',${adminId})`;
+    await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${project},${name},'Support Wiki',${`${new URL(api).origin}/${owner}/${name}.git`},'main','.factory/actor-template.json',${adminId})`;
     projectCreated = true;
     const citations = JSON.stringify([{ path, commitSha: commit }]);
     await db.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,citations,created_by) VALUES(${pageId},${project},'support','Support guide',${body},${body},${commit},${citations}::jsonb,${adminId})`;
     await db.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,created_by) VALUES(${revision},${pageId},1,'generated','Support guide',${body},${body},${commit},${citations}::jsonb,${adminId})`;
     await db.client`UPDATE factory.knowledge_page SET current_revision_id=${revision} WHERE id=${pageId}`;
-    await db.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at) VALUES(${crypto.randomUUID()},${project},${commit},'succeeded',${adminId},now())`;
+    const generationId = crypto.randomUUID();
+    await db.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload) VALUES(${generationId},'knowledge.generation','project',${project},${`knowledge.generation:${generationId}`},NULL,'succeeded',${adminId},now(),${JSON.stringify({ id: generationId, projectId: project, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: adminId, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     const created = await serverCall(
       browserFunction(page, "createAccount", [{ name: "Wiki Contributor", email, password }]),
     );

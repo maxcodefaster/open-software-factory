@@ -1,12 +1,9 @@
-import { type PullRow } from "@rocicorp/zero";
+import type { PullRow } from "@rocicorp/zero";
 import { z } from "zod";
-import { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
-import {
-  type RequirementContent,
-  requirementContentInput,
-} from "../../../../packages/requirement-domain/src/content";
-import { technicalDesignContentInput } from "../../../../packages/requirement-domain/src/technical-design";
-import { type FactoryZeroSchema } from "../../../../packages/zero-schema/src";
+import { sourceCitationInput } from "#conversation-domain/conversation";
+import { type RequirementContent, requirementContentInput } from "#requirement-domain/content";
+import { technicalDesignContentInput } from "#requirement-domain/technical-design";
+import type { FactoryZeroSchema } from "#zero-schema";
 import { optionalString } from "../optional-values";
 
 export const requirementProposalSchema = z.object({

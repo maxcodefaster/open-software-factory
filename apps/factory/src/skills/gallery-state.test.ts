@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import type {
-  LibraryChoice,
-  SkillLibraryEntry,
-} from "../../../../packages/conversation-domain/src/skill-library";
+import type { LibraryChoice, SkillLibraryEntry } from "#conversation-domain/skill-library";
 import { matchesSkill, type SkillFilters, skillAvailability } from "./gallery-state";
 
 const revision = (id: string, number: number, roles: Array<"planning" | "build">) => ({

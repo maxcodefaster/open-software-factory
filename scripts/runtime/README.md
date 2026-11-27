@@ -1,6 +1,7 @@
 # Substrate runtime checks
 
-Factory uses the pinned official Substrate API and gVisor ROOTFS profile. Factory owns product
+Factory uses the pinned official Substrate API and gVisor profile with native direct containers,
+MEMORY preference and ROOTFS cold fallback. Factory owns product
 authority and execution intent. Substrate owns Actor lifecycle and snapshots. The previous
 Factorybox build, lifecycle, reserve and warm-memory benchmark commands have been removed.
 Existing private evidence is retained; no old worker or storage cleanup is run by this checkout.
@@ -14,8 +15,9 @@ worker/gVisor pins, serving trust, separate Owner and Editor credentials, TLS eg
 and installation-wide configuration. Execution uses the explicit Linux amd64 or arm64 runtime
 identity, never the control-plane host's architecture as a fallback.
 The [qualification scope](../../deploy/substrate/README.md#qualification-scope) owns the current
-ARM infrastructure and product evidence, including worker/runsc checksums, private Docker,
-TLS egress, ROOTFS restart and Actor deletion. The commands here distinguish live product,
+ARM infrastructure and product evidence, including worker/runsc checksums,
+TLS egress, ROOTFS restart and Actor deletion. Historical private-Docker receipts do not
+qualify their direct-native replacements. The commands here distinguish live product,
 controlled controller and packaged-component checks. Each receipt retains its tested source,
 installation and scope; component or controller checks do not qualify the full product journey.
 
@@ -43,16 +45,61 @@ Do not point these at a retained user installation.
 mise exec -- bun run runtime:conformance
 ```
 
-This runs the official gRPC/Connector lifecycle and authenticated Factory Workspace proofs.
+This selects the official gRPC/Connector lifecycle and authenticated Factory Workspace tests.
+Declarations and passing static checks do not qualify their live behavior; retain each executed
+lane's source, image, native identities and evidence scope.
 Missing fixture configuration fails the command. The operator remains responsible for the exact
 native fixture inventory it retains. There is no general Namespace cleanup or finalizer-removal command.
 
+The adapter fixture requires an absolute `repositoryDirectory` containing the prepared Git
+repository and the exact `sourceRevision`. Its committed `.factory/actor-template.json` supplies
+the existing immutable native Work/service images; `workloadImage` supplies the Factory tools.
+The fixture uses the production renderer and native `native-parent`/`native-project` entrypoints,
+not an image-bundled initializer or rootless wrapper. Source clone and Project environment reads
+use the existing authenticated internal routes. The adapter's already-granted Source ownership
+is controlled fixture state; independent Source handoff and a complete Factory journey are not
+claimed. This lane explicitly requests ROOTFS to require cold Parent/Child reconnect; it does not
+qualify MEMORY continuity or change production's MEMORY preference. Converting its declaration
+and passing unit/compile checks do not constitute a new live native receipt.
+
 The Workspace fixture requires Linux UID/GID 1000, its explicit `kubeconfig`, `context` and `cli`,
 and the normal `fresh-workspaces` deployment. The default `qualification: "lifecycle-and-git"`
-keeps the native Parent Git regression. Select `qualification: "lifecycle"` only for a targeted
-lifecycle receipt; it still checks paused/running Stop, new Docker generations, failed Source
-handoff, concurrent Start and lost-Delete cleanup recovery. It does not count the omitted Git
-checks as passes. Optional `directIngress` and `ingressListenPort` select an owned callback listener;
+includes the Parent Git regression; `qualification: "lifecycle"` omits those additional Git checks,
+not the lifecycle assertions. Omitted checks are not passes.
+The Workspace fixture constructs `.factory/actor-template.json` from the existing runtime Project
+fixture and requires `FACTORY_STARTER_IMAGES` with published immutable images for its selected
+native worker architecture. It retains a durable `/home/node` preparation marker and explicitly
+requests ROOTFS cold continuation; that fixture construction alone is not live acceptance.
+Factory's normal capacity admission remains enabled: commission a dedicated, fully reserved base
+WorkerPool whose CPU/memory requests equal its limits, cover the configured Actor CPU and leave
+memory for the worker itself. The generic profile's small bootstrap/smoke pool is not that
+reservation. Use a short, private, writable `TMPDIR` for Unix sockets; a deeply nested evidence
+directory can exceed the platform's socket-path limit. A Linux runner using host Docker helpers
+also needs that temporary directory mounted at the same host and runner path.
+Keep the fixture's checkout and Factory Source/state on a native Linux filesystem, not a macOS
+shared-directory mount. Unsupported host xattr namespaces must remain a failed admission, not
+be stripped or ignored to make checkpointing pass.
+The cold proof also waits for actual node-local snapshot detachment, not merely worker release.
+Commission and record accelerated native `--snapshot-upload-delay` / `--snapshot-detach-delay`
+values on that separate test atelet if the proof must finish within its observation bound.
+A suspended Actor may normally retain its node-local snapshot cache after releasing its worker;
+do not reinterpret that cache as running compute or change production policy just for this test.
+The Workspace lane now targets initial saved Source before compute, Source access before Project
+preparation, and authenticated MCP lifecycle commands. Pause retains the same Actor, Runtime
+Attempt, canonical Source and writer epoch. Passive metadata/watch observation must not wake it;
+deliberate current-file access may resume it without inference. Actual process/RAM discontinuity,
+image-backed rootfs and durable-directory state qualify the explicit cold path when the lane runs.
+The Work rootfs witness uses `/var/tmp` and checks its actual root mount; `/tmp` is native tmpfs
+and cannot prove image-backed ROOTFS retention.
+It also tests personal Workspace isolation, concurrent Starts without a replacement generation,
+and recovery of a lost caller connection through the original persisted Pause command rather than
+redispatching Suspend. The old public destructive Workspace Stop alias must be refused.
+Optional Git checks still use the real native Parent. The lane finishes with retained Pause;
+UID/version-bound deletion of its fresh, disposable Actors and original native scopes is separate
+fixture disposal, not ordinary Workspace Stop. Unconfirmed creates or cleanup retain fixture data.
+These maintained assertions are not a fresh live receipt and do not establish MEMORY continuity,
+the complete Starter/approval/Delivery journey or final platform/release acceptance.
+Optional `directIngress` and `ingressListenPort` select an owned callback listener;
 the native TLS origin remains on port 443. Cleanup confirms original template and Atespace UIDs
 and native absence before deleting the fixture database or S3 data. Unconfirmed cleanup retains them.
 
@@ -76,24 +123,41 @@ For the Environment proof, also set:
 - `FACTORY_FORGEJO_API_URL`, `FACTORY_FORGEJO_PUBLIC_URL` and `FACTORY_FORGEJO_OWNER`.
 - `FACTORY_NATIVE_RUNTIME_FORGE_TOKEN_FILE`, a private file with repository-creation authority
   for that owned Forgejo account.
-- `FACTORY_NATIVE_REGISTRY_FIXTURE`, a private JSON file with `owner`, `deployment`, `host`,
-  `username`, `password`, `certificate`, `developmentImage` and `feature`.
-  `owner` is the fixture UUID. `deployment` matches the native WorkerPool selector. `host`
-  matches both `prebuildRegistry` and an admitted egress host, without a port or IP address.
-  The certificate contains only public PEM certificates. Both image references must be immutable
-  digests below `HOST/open-factory/native-fixtures/OWNER_UUID/`.
 
-The private development image must provide Node.js and the `node` user. The private Feature's
-`install.sh` writes `prepared` to `/opt/owned-remote-feature`; its `postCreateCommand` writes
-`ran` to `remote-feature-hook.txt` in the Workspace. Those markers distinguish authenticated
-Feature installation from a plain successful base-image pull. The registry must reject an
-unauthenticated request for the development image's exact manifest with HTTP 401 and permit
-the commissioned credentials to pull the fixture artifacts and publish Factory prebuilds.
+The approved ActorTemplate must use an already published immutable native Work image providing
+Node.js, Git and development UID/GID `1000:1000`. Project OCI workflows build and publish images
+outside Factory. Environment settings contain only
+`{variables:[{name,value?,runtime,verification}]}`: Runtime supports application settings and
+private-package tokens, while Verification requires separate opt-in. There is no build-time flag
+or per-Project registry bundle. Saving Environment settings alone must admit neither compute
+nor an image publication.
+
+Private native images remain supported through operator commissioning of pull authority and TLS
+trust in Substrate's pinned upstream node image-credential provider before Work starts.
+Factory installs no custom provider and copies no registry credentials into ActorTemplate JSON.
+Missing authority or trust must surface as a fail-closed native pull/start error, not an anonymous
+fallback or an anonymously pullable replacement image.
+Environment-variable checks and per-Project registry-credential fixtures do not prove native
+private-image access. That proof needs the exact private image's admitted Actor/ActorTemplate,
+an observed successful native pull with commissioned authority and refusal without that authority.
+Historical registry fixtures are not a prerequisite or substitute for this native qualification.
 
 The external MCP proof starts its own Forgejo and requires
 `FACTORY_FORGEJO_PUBLIC_URL` to route to that owned server. It exercises OAuth, local OpenCode,
-browser collaboration, commands and file transfers against the same native Dev Container.
-Its browser and native service dependencies must be available before selecting the lane.
+browser collaboration, commands and file transfers against the same direct native Work container.
+It checks UID 1000, actual Node/Git execution, the Workspace/checkout context and the Work container's
+Substrate Actor UID against its original immutable binding, with the same Runtime Attempt and saved
+Actor UID after client reconnect. After `pauseWorkspace`, a command resumes compute and checks that
+the shared file exists and the Runtime Attempt/Actor UID are unchanged. These assertions do not
+establish MEMORY process continuity or absence of Source handoff. No Project Docker daemon or
+Dev Container is required.
+Supply `FACTORY_STARTER_IMAGES` with published Starter images for the selected native worker
+architecture; the fixture Work image must provide UID 1000, Node.js and Git.
+An installed local OpenCode V2 service with its configured `github-copilot/gpt-6.1-sol` model,
+normal browser OAuth consent and Chromium must be available before selecting this paid live lane.
+The installed executable is resolved from `PATH`; `FACTORY_LOCAL_OPENCODE_BINARY` can select
+that installation's executable explicitly.
+Static checks or test discovery qualify lane maintenance only, not this live acceptance.
 
 The publication proof uses the same explicit native configuration and Forgejo HTTPS origin
 on a Linux UID-1000 control plane. It starts an owned Forgejo and executes an admitted release
@@ -122,8 +186,14 @@ Select `workspace-startup.live.spec.ts` in `test:browser:native`. The proof reco
 bindings alongside visible Source, IDE, PTY and Preview outcomes. Saved binding evidence alone
 does not prove current liveness. No worker exec, cache inspection or warm-memory claim is involved.
 
-Stop retains independent Source and product history. It is not permission to drop the fixture
-database: native Atespaces, templates or editor inventory may still exist. These proofs pause their
+The external MCP lane's successful-fixture shutdown stops its editor clients and requests
+authenticated `pauseWorkspace` with a caller ID saved before dispatch. It checks the original
+Attempt and Actor in `paused` / `ACTOR_STATE_SUSPENDED` and compares retained Source, Workspace and
+writer ownership without reading files that could wake compute. It does not delete the Actor.
+Failed or unknown work stays retained without implicit Coding cancellation; an unconfirmed Pause
+fails the lane rather than authorizing disposal. Controlled cleanup checks are not live acceptance.
+Shutdown is not permission to drop the fixture database: native Atespaces, templates or editor
+inventory may still exist. These proofs pause their
 own control plane and record retained inventory under `.factory/test-results/`. Generic live-fixture
 disposal refuses database removal while that inventory remains or cannot be confirmed absent.
 The commissioned registry and unrelated installation resources stay unchanged.
@@ -140,49 +210,18 @@ FACTORY_BROWSER_TOOLS_IMAGE='your-registry/browser-tools@sha256:YOUR_CACHED_DIGE
 
 It owns one networkless Docker container and removes it after the check.
 
-The rootless proxy regression requires an explicitly selected, already cached Actor or qualified
-bootstrap image with Python 3 and Tinyproxy 1.11.2. Supply its immutable digest reference:
+`substrate-image-proof.sh` checks the native tools and Actor packages on their matching Linux
+architecture without starting an Actor. Emulated host/image mismatches are refused. It checks the
+mounted tools, both supported Node/Bun ABIs and permissions, rejects the retired `parent` CLI,
+and verifies that Docker/DinD, Compose, Dev Containers and the old image-producer CLI are absent.
+The release workflow runs this proof before publishing those artifacts.
 
-```sh
-FACTORY_SUBSTRATE_PROXY_TEST_IMAGE='your-registry/actor@sha256:YOUR_CACHED_DIGEST' \
-  mise exec -- bun run test:native substrate-rootless-proxy.native
-```
-
-Missing input or image cache fails the test. It never pulls or builds images, starts Factory or
-acquires PostgreSQL. An exactly owned Docker container uses `--network=none`, a read-only root,
-no capabilities, no privilege escalation, one CPU and 256 MiB memory. The unchanged repository
-proxy configuration must carry a real verified-TLS HTTP 200 response after 35 silent seconds.
-Wrong CA and hostname checks must fail certificate validation. Cleanup checks the owner UUID and
-original container ID, removes that container and deletes both fixture private keys.
-Receipts default to `.factory/test-results/substrate-rootless-proxy/OWNER_UUID/`; set
-`FACTORY_SUBSTRATE_PROXY_TEST_RESULTS` to choose another evidence directory under
-`.factory/test-results/`.
-
-`substrate-image-proof.sh` checks the Actor package on its matching native Linux architecture
-without starting an Actor. Emulated host/image mismatches are refused.
-`compose-inputs-proof.sh` and `project-compose-prebuild-proof.sh` exercise the shipped Compose,
-Buildx and Dev Containers components in separate, exactly owned ordinary Docker containers.
-The latter proofs deliberately use no network, host Docker socket, Project source or credentials.
-Their receipts state `nativeSubstrateProof: false`. They gate publication of the packaged components.
-Its `cold-prebuild` recipe stops the original prepared-image primary, removes its temporary
-override, edits application Source and reopens that same container with the pinned CLI.
-The image/input and public configuration must still match.
-`credential-free` checks committed prebuild matching and CLI startup without Runtime
-environment or registry credentials. The reserve/template-fork, captured-process activation
-and private prepared-primary image paths have been removed, including their component recipes.
-Normal startup still validates prebuild input identity, native dependency images and required hooks.
-
-The lifecycle component check uses the unmodified pinned CLI and a digest-pinned Node image
-with its standard `node` user. It holds an optional hook across the default, post-create and
-post-start `waitFor` boundaries, then checks that every hook ran exactly once and the
-`devcontainer.json` stayed unchanged. It owns bounded containers and a labelled private network;
-it is not Substrate product acceptance:
-
-```sh
-FACTORY_DEVCONTAINER_CLI=/absolute/path/to/pinned/devcontainer \
-FACTORY_LIFECYCLE_COMPONENT_IMAGE='your-registry/node@sha256:YOUR_CACHED_DIGEST' \
-  mise exec -- go test -C services/runtime-connector ./connector -run '^TestNativeLifecyclePinnedCLI' -count=1
-```
+The private-Compose build, container-injection, deferred-hook and cold-primary component recipes
+are removed. Their historical results do not qualify native Project preparation. Current templates
+consume already prepared immutable OCI images and their explicit native Work preparation command;
+actual native image admission and Work preparation still need their separate qualification.
+There is no remaining Factory Project-image producer to qualify. No successful package check
+supplies native acceptance.
 
 Pinned OpenCode process checks exercise actual default/custom Workspace directories, native
 tool execution, retained history and metadata-only Stop without paid model keys:
@@ -202,7 +241,7 @@ alongside `FACTORY_INPUT_STOP_CONNECTOR_TEST_BINARY`; its checksum is recorded s
 Omit both source overrides when qualifying the packaged Connector and SDK together.
 
 Controlled controller tests use real PostgreSQL and Factory owners with explicit RPC responses.
-Cold restart is the accepted model, without preserved process IDs or warm memory.
+They prove neither ROOTFS cold restart nor actual MEMORY continuity; each needs its native proof.
 
 The independent editor's Kubernetes admission and UID-bound cleanup have a separate real-API proof:
 

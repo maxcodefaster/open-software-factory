@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { project, runtimeAttempt } from "../../../../../packages/db/src/schema";
+import { project, runtimeAttempt } from "#db/schema";
 import { factoryRequestURL } from "../../request-origin";
 import {
   runtimeSourcePath,
@@ -8,7 +8,6 @@ import {
 } from "../../runtime/git-http";
 import { substrateWorkspaceSourceIn } from "../../runtime/substrate-grant";
 import { substrateIsolatedSourceIn } from "../../runtime/substrate-isolated-grant";
-import { substratePrebuildSourceIn } from "../../runtime/substrate-prebuild-grant";
 import { substrateVerificationSourceIn } from "../../runtime/substrate-verification-grant";
 import { personalGitRepository } from "../../workspace/personal-git";
 import type { FactoryApplication } from "../application";
@@ -20,7 +19,6 @@ type InternalServices = Pick<
   | "buildBrowserEndpoint"
   | "database"
   | "mcpSourceEndpoint"
-  | "projectPreparation"
   | "relayModel"
   | "releaseController"
   | "runtimeEnvironmentEndpoint"
@@ -32,7 +30,6 @@ export function createInternalProtocol(services: InternalServices) {
     buildBrowserEndpoint,
     database,
     mcpSourceEndpoint,
-    projectPreparation,
     relayModel,
     releaseController,
     runtimeEnvironmentEndpoint,
@@ -59,8 +56,6 @@ export function createInternalProtocol(services: InternalServices) {
       );
       if (runtimeEnvironment?.[1])
         return await runtimeEnvironmentEndpoint(request, runtimeEnvironment[1]);
-      const projectImage = url.pathname.match(/^\/internal\/project-image\/([0-9a-f-]{36})$/);
-      if (projectImage?.[1]) return await projectPreparation.endpoint(request, projectImage[1]);
       const _sourceEvent = url.pathname.match(/^\/api\/wiki\/source-events\/([0-9a-f-]{36})$/);
       const modelRelay = url.pathname.match(
         /^\/internal\/model\/([0-9a-f-]+)\/v1\/(chat\/completions|responses|messages)$/,
@@ -125,8 +120,6 @@ export function createInternalProtocol(services: InternalServices) {
           .begin(async (sql) => {
             if (repository.isolatedKind === "staging" || repository.isolatedKind === "publication")
               return (await substrateIsolatedSourceIn(sql, attemptID)) === repository.repositoryUrl;
-            if (repository.isolatedKind === "prebuild")
-              return (await substratePrebuildSourceIn(sql, attemptID)) === repository.repositoryUrl;
             if (repository.verificationID)
               return (
                 (await substrateVerificationSourceIn(sql, attemptID)) === repository.repositoryUrl

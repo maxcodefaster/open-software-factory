@@ -202,7 +202,9 @@ test("shared editing requires a decision, fences the old writer, and never trans
     ).toBe(true);
     expect(owned.requests()).toBe(0);
     const decisions = await owned.database.client<{ kind: string }[]>`
-      SELECT kind FROM factory.change_editing_decision WHERE change_id=${owned.changeID} ORDER BY created_at`;
+      SELECT payload->>'kind' AS kind FROM factory.audit_event
+      WHERE kind='access.change_editing_decision' AND scope_type='change' AND scope_id=${owned.changeID}
+      ORDER BY created_at`;
     expect(decisions.map((row) => row.kind)).toEqual([
       "approve",
       "idle-takeover",

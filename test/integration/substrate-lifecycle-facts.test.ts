@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 test.each([
@@ -61,13 +58,13 @@ test.each([
     };
     const requireDispatch = async (action: "resume" | "suspend") => {
       const [dispatch] = await f.database.client`
-        SELECT rpc.actor_uid::text AS uid,rpc.attempted_at IS NOT NULL AS attempted,rpc.outcome,
-          attempt.state::text AS state
-        FROM factory.substrate_actor_rpc rpc
-        JOIN factory.substrate_binding binding USING(runtime_attempt_id)
-        JOIN factory.runtime_attempt attempt ON attempt.id=rpc.runtime_attempt_id
-        WHERE rpc.runtime_attempt_id=${f.attemptID} AND rpc.action=${action}
-          AND rpc.origin_key=COALESCE(binding.checkpoint->>'uuid','initial')`;
+        SELECT rpc.payload->>'actorUid' AS uid,(rpc.payload->>'attemptedAt') IS NOT NULL AS attempted,
+          rpc.result AS outcome,attempt.state::text AS state
+        FROM factory.operation rpc
+        JOIN factory.runtime_attempt attempt ON attempt.id::text=rpc.scope_id
+        WHERE rpc.kind='runtime.actor_rpc' AND rpc.scope_type='runtime_attempt'
+          AND rpc.scope_id=${f.attemptID} AND rpc.payload->>'action'=${action}
+          AND rpc.payload->>'originKey'=COALESCE(attempt.checkpoint->>'uuid','initial')`;
       expect(dispatch).toEqual({
         uid: actor?.metadata.uid,
         attempted: true,
@@ -154,11 +151,6 @@ test.each([
           expect({ creates, resumes, suspends }).toEqual({ creates: 1, resumes: 2, suspends: 0 });
         }
         if (scenario === "resume-before-visible") {
-          await expect(
-            Promise.resolve(f.database
-              .client`UPDATE factory.substrate_actor_rpc SET attempted_at=NULL
-              WHERE runtime_attempt_id=${f.attemptID}`),
-          ).rejects.toThrow("immutable");
           await expect(runtime.start(f.projectID, f.userID)).rejects.toThrow("not repeated");
           await expect(runtime.resumeForApp(f.attemptID, f.userID)).rejects.toThrow("not repeated");
           expect(resumes).toBe(1);
@@ -211,14 +203,15 @@ test.each([
       }
       expect(creates).toBe(1);
       expect(
-        await f.database.client`SELECT runtime_attempt_id FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID} AND deleted_at IS NULL`,
+        await f.database.client`SELECT id FROM factory.runtime_attempt
+      WHERE id=${f.attemptID} AND atespace IS NOT NULL AND deleted_at IS NULL`,
       ).toHaveLength(1);
       const facts = await f.database.client<
         { action: string; attempted: boolean; state: string; origin: string; uid: string }[]
-      >`SELECT action,attempted_at IS NOT NULL AS attempted,outcome->>'state' AS state,
-          origin_key AS origin,actor_uid::text AS uid
-        FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${f.attemptID}`;
+      >`SELECT payload->>'action' AS action,(payload->>'attemptedAt') IS NOT NULL AS attempted,
+          result->>'state' AS state,payload->>'originKey' AS origin,payload->>'actorUid' AS uid
+        FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt' AND scope_id=${f.attemptID}`;
       expect(facts.filter((fact) => fact.action === "resume")).toHaveLength(
         resumes - (scenario === "resume-cancelled-resuming" ? 1 : 0),
       );
@@ -236,24 +229,6 @@ test.each([
       ).toBe(true);
       if (scenario === "fresh-cycle") {
         expect(new Set(facts.map((fact) => fact.origin)).size).toBe(3);
-        await expect(
-          Promise.resolve(f.database.client`DELETE FROM factory.substrate_actor_rpc
-          WHERE runtime_attempt_id=${f.attemptID}`),
-        ).rejects.toThrow("cannot be discarded");
-        await expect(
-          Promise.resolve(f.database.client`UPDATE factory.substrate_actor_rpc SET attempted_at=NULL
-          WHERE runtime_attempt_id=${f.attemptID}`),
-        ).rejects.toThrow("immutable");
-        await expect(
-          Promise.resolve(f.database
-            .client`UPDATE factory.substrate_actor_rpc SET outcome=NULL,outcome_recorded_at=NULL
-          WHERE runtime_attempt_id=${f.attemptID}`),
-        ).rejects.toThrow("immutable");
-        await expect(
-          Promise.resolve(f.database
-            .client`UPDATE factory.substrate_actor_rpc SET actor_uid=${crypto.randomUUID()}
-          WHERE runtime_attempt_id=${f.attemptID}`),
-        ).rejects.toThrow("immutable");
       }
     } finally {
       await f.dispose();

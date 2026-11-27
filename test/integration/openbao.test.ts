@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { localOpenBao } from "../../scripts/factory/openbao";
-import { createOpenBaoEnvironmentSecrets } from "../../apps/factory/src/environments/openbao";
-import { createOpenBaoKV } from "../../apps/factory/src/secrets/openbao";
-import { createMCPSecrets } from "../../apps/factory/src/mcp/secrets";
 import { z } from "zod";
-import { createHmac } from "node:crypto";
+import { createOpenBaoEnvironmentSecrets } from "../../apps/factory/src/environments/openbao";
 import { canonicalMCPJSON } from "../../apps/factory/src/mcp/controller";
+import { createMCPSecrets } from "../../apps/factory/src/mcp/secrets";
+import { createOpenBaoKV } from "../../apps/factory/src/secrets/openbao";
+import { localOpenBao } from "../../scripts/factory/openbao";
 
 test("pinned OpenBao encrypts persistent values, limits Factory credentials and survives a sealed restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-owned-openbao-"));
@@ -24,11 +24,9 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
           name: "API_KEY",
           value: "owned-encrypted-secret-sentinel",
           runtime: true,
-          build: false,
           verification: false,
         },
       ],
-      registries: [],
     },
   };
   async function docker(...args: string[]) {

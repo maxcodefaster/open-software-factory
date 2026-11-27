@@ -15,6 +15,7 @@ export * from "./schema/mcp";
 export * from "./schema/models";
 export * from "./schema/monitoring";
 export * from "./schema/namespaces";
+export * from "./schema/operations";
 export * from "./schema/projections";
 export * from "./schema/projects";
 export * from "./schema/releases";

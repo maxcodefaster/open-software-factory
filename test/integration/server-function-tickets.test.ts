@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import type { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { createConversationService } from "../../apps/factory/src/project-agent/service";
-import type { createDatabase } from "../../packages/db/src/client";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import {
   compiledFactoryEndpoint,
@@ -103,7 +103,7 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     slug: "owned-project",
     repositoryUrl: "https://forge.test/factory/owned.git",
     defaultBranch: "release",
-    devcontainerPath: ".devcontainer/devcontainer.json",
+    actorTemplatePath: ".factory/actor-template.json",
   };
   const endpoint = await compiledFactoryEndpoint({
     origin,

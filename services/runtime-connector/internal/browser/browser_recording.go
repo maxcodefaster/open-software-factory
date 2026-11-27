@@ -1,0 +1,249 @@
+package browser
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const browserRecordingPath = "/tmp/factory-review.webm"
+const browserRecordingLimit = 96 << 20
+const browserRecordingChunk = 48 << 10
+
+type browserRecordingFinalization struct {
+	done chan struct{}
+	data string
+	err  error
+}
+
+// Recording tools operate on fixed paths inside the isolated Browser. This
+// function is process I/O, not an Actor lifecycle or runtime provider.
+type browserRecordingCommand func(context.Context, string, ...string) ([]byte, error)
+
+// Upstream queues copies of its last frame for an unchanged interval at Stop.
+// Keep draining while the actual encoder advances, but retain the short
+// no-progress bound and the same revocable runtime context.
+func stopBrowserRecording(runtime *browserRuntime, stallLimit time.Duration, command browserRecordingCommand) (json.RawMessage, error) {
+	ctx, cancel := context.WithCancel(runtime.ctx)
+	defer cancel()
+	type reply struct {
+		data json.RawMessage
+		err  error
+	}
+	done := make(chan reply, 1)
+	go func() {
+		data, err := runtime.rpc(ctx, "tools/call", map[string]any{
+			"name": "screencast_stop", "arguments": map[string]any{"pageId": runtime.pageID},
+		})
+		done <- reply{data, err}
+	}()
+	lastProgress := time.Now()
+	lastPosition := int64(-1)
+	ticker := time.NewTicker(min(time.Second, stallLimit/3))
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-done:
+			return result.data, result.err
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return nil, errors.New("recording browser authority ended")
+		case <-ticker.C:
+			probe, end := context.WithDeadline(ctx, lastProgress.Add(stallLimit))
+			position := readBrowserRecordingPosition(probe, command, true)
+			end()
+			if position != nil && *position > lastPosition {
+				lastPosition = *position
+				lastProgress = time.Now()
+			}
+			if time.Since(lastProgress) >= stallLimit {
+				cancel()
+				<-done
+				return nil, errors.New("recording encoder stopped making progress")
+			}
+		}
+	}
+}
+
+// Presentation positions exclude idle frames and encoder delay; output progress
+// is only a liveness signal while draining, never a scenario/feedback position.
+func readBrowserRecordingPosition(ctx context.Context, command browserRecordingCommand, encoder bool) *int64 {
+	script := `const fs=require('fs');try{const f=fs.openSync('/tmp/factory-recording-position.txt','r');const b=Buffer.alloc(32);const n=fs.readSync(f,b,0,b.length,0);fs.closeSync(f);process.stdout.write(b.subarray(0,n))}catch{}`
+	if encoder {
+		script = `const fs=require('fs');try{const f=fs.openSync('/tmp/factory-recording-progress.txt','r');const n=fs.fstatSync(f).size;const b=Buffer.alloc(Math.min(n,4096));fs.readSync(f,b,0,b.length,Math.max(0,n-b.length));fs.closeSync(f);const m=[...b.toString().matchAll(/(?:^|\n)out_time_us=(\d+)/g)].at(-1);if(m)process.stdout.write(String(Math.floor(Number(m[1])/1000)))}catch{}`
+	}
+	output, err := command(ctx, "/usr/local/bin/node", "-e", script)
+	if err != nil {
+		return nil
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil || value < 0 {
+		return nil
+	}
+	return &value
+}
+
+// Recording is internal to Factory, never an agent-selected file/tool. Calls
+// retain the browser's exact owner, lease, serialization and Stop boundary.
+func recordBrowser(runtime *browserRuntime, scope browserRuntimeRequest, action string, command browserRecordingCommand) (string, error) {
+	if !sameBrowserScope(runtime.scope, scope) {
+		return "", errors.New("recording browser is unavailable")
+	}
+	// Recording requests are calls, not newer heartbeat authority.
+	if err := runtime.renewAuthority(scope, false); err != nil {
+		return "", err
+	}
+	if action == "browser-recording-finish" {
+		// Upstream encodes the final unchanged interval only when stopped.
+		// Start that one RPC once; short status requests must not replay it or
+		// prevent ordinary authority renewal while the encoder drains.
+		runtime.recordingMu.Lock()
+		finish := runtime.recordingFinish
+		if finish == nil {
+			finish = &browserRecordingFinalization{done: make(chan struct{})}
+			runtime.recordingFinish = finish
+			go func() {
+				finish.data, finish.err = runBrowserRecordingOperation(runtime, scope, action, command)
+				close(finish.done)
+			}()
+		}
+		runtime.recordingMu.Unlock()
+		select {
+		case <-finish.done:
+			return finish.data, finish.err
+		default:
+			return `{"state":"pending"}`, nil
+		}
+	}
+	return runBrowserRecordingOperation(runtime, scope, action, command)
+}
+
+func runBrowserRecordingOperation(runtime *browserRuntime, scope browserRuntimeRequest, action string, command browserRecordingCommand) (string, error) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.closed || runtime.ctx.Err() != nil || runtime.command == nil || runtime.pageID == 0 {
+		return "", errors.New("recording browser authority ended")
+	}
+	bounded, cancel := context.WithTimeout(runtime.ctx, 15*time.Second)
+	defer cancel()
+	tool := func(name string, args map[string]any) error {
+		args["pageId"] = runtime.pageID
+		var raw json.RawMessage
+		var err error
+		if name == "screencast_stop" {
+			raw, err = stopBrowserRecording(runtime, 15*time.Second, command)
+		} else {
+			raw, err = runtime.rpc(bounded, "tools/call", map[string]any{"name": name, "arguments": args})
+		}
+		if err != nil {
+			// A lost RPC invalidates protocol synchronization, not just video.
+			runtime.cancel()
+			return err
+		}
+		var result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(raw, &result) != nil || result.IsError {
+			return errors.New("recording encoder outcome unavailable")
+		}
+		for _, part := range result.Content {
+			if strings.Contains(part.Text, "Error:") {
+				return errors.New("recording encoder did not confirm capture")
+			}
+		}
+		return nil
+	}
+	switch action {
+	case "browser-recording-start":
+		if runtime.recordingStarted.IsZero() {
+			if err := tool("screencast_start", map[string]any{"filePath": browserRecordingPath}); err != nil {
+				return "", err
+			}
+			runtime.recordingStarted = time.Now()
+		}
+		data, _ := json.Marshal(map[string]any{"startedAt": runtime.recordingStarted})
+		return string(data), nil
+	case "browser-recording-finish":
+		if runtime.recordingStarted.IsZero() {
+			return "", errors.New("recording was not started")
+		}
+		if runtime.recordingEnded.IsZero() {
+			if err := tool("screencast_stop", map[string]any{}); err != nil {
+				return "", err
+			}
+			runtime.recordingEnded = time.Now()
+		}
+		// Indexing and file probes keep their original short I/O deadline.
+		indexContext, endIndex := context.WithTimeout(runtime.ctx, 15*time.Second)
+		defer endIndex()
+		bounded = indexContext
+		rawSize, rawErr := command(bounded, "/usr/bin/stat", "-c", "%s", browserRecordingPath)
+		rawBytes, rawParsed := strconv.ParseInt(strings.TrimSpace(string(rawSize)), 10, 64)
+		if rawErr != nil || rawParsed != nil || rawBytes <= 0 || rawBytes > browserRecordingLimit {
+			return "", errors.New("recording file exceeds its bound or is unavailable")
+		}
+		// Upstream streams WebM through a pipe. Finalize a seekable index by
+		// remuxing, without re-encoding or repeating any browser action.
+		if !runtime.recordingIndexed {
+			if _, err := command(bounded, "/usr/bin/ffmpeg",
+				"-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", browserRecordingPath,
+				"-map", "0:v:0", "-c:v", "copy", "-an", "/tmp/factory-review-indexed.webm"); err != nil {
+				return "", errors.New("recording index publication unavailable")
+			}
+			if _, err := command(bounded, "/bin/mv", "-f",
+				"/tmp/factory-review-indexed.webm", browserRecordingPath); err != nil {
+				return "", errors.New("recording index publication unavailable")
+			}
+			runtime.recordingIndexed = true
+		}
+		output, err := command(bounded, "/usr/bin/stat", "-c", "%s", browserRecordingPath)
+		size, parsed := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+		if err != nil || parsed != nil || size <= 0 || size > browserRecordingLimit {
+			return "", errors.New("recording file exceeds its bound or is unavailable")
+		}
+		runtime.recordingBytes = size
+		duration, probeErr := command(bounded, "/usr/bin/ffprobe", "-v", "error",
+			"-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", browserRecordingPath)
+		seconds, parsedDuration := strconv.ParseFloat(strings.TrimSpace(string(duration)), 64)
+		if probeErr != nil || parsedDuration != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 ||
+			seconds > runtime.recordingEnded.Sub(runtime.recordingStarted).Seconds()*2+2 {
+			return "", errors.New("recording duration/index unavailable")
+		}
+		position := readBrowserRecordingPosition(bounded, command, false)
+		if position == nil || math.Abs(seconds*1000-float64(*position)) > 100 {
+			return "", errors.New("recording presentation timeline unavailable")
+		}
+		data, _ := json.Marshal(map[string]any{
+			"bytes": size, "durationMs": int64(seconds * 1000), "note": "Unchanged frames shortened.",
+		})
+		return string(data), nil
+	case "browser-recording-chunk":
+		var args struct {
+			Offset int64 `json:"offset"`
+		}
+		if json.Unmarshal(scope.Call.Arguments, &args) != nil || args.Offset < 0 ||
+			args.Offset%browserRecordingChunk != 0 || args.Offset >= runtime.recordingBytes ||
+			runtime.recordingEnded.IsZero() || runtime.recordingBytes == 0 {
+			return "", errors.New("invalid recording chunk")
+		}
+		// Fixed executable, fixed owned path, bounded integer. No shell or
+		// generic runtime-file export is exposed.
+		output, err := command(bounded, "/usr/local/bin/node", "-e",
+			`const fs=require('fs');const b=Buffer.alloc(49152);const f=fs.openSync('/tmp/factory-review.webm','r');const n=fs.readSync(f,b,0,b.length,Number(process.argv[1]));fs.closeSync(f);process.stdout.write(b.subarray(0,n).toString('base64'))`,
+			strconv.FormatInt(args.Offset, 10))
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(map[string]any{"offset": args.Offset, "data": string(output)})
+		return string(data), nil
+	}
+	return "", errors.New("unsupported recording operation")
+}

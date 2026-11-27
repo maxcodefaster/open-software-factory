@@ -1,9 +1,9 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
+import { workspaceShareInput } from "#workspace-domain/sharing";
+import { workspaceSubmissionInput } from "../workspace/submission";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
-import { workspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
-import { workspaceSubmissionInput } from "../workspace/submission";
 
 export const inspectWorkspaceSubmission = createServerFn({ method: "POST" })
   .validator((args: [workspaceID: string]) => args)

@@ -4,10 +4,7 @@ import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";
-import {
-  type skillLibrarySaveInput,
-  skillLibraryView,
-} from "../../packages/conversation-domain/src/skill-library";
+import { type skillLibrarySaveInput, skillLibraryView } from "#conversation-domain/skill-library";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";

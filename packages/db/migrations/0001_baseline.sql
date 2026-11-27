@@ -6,21 +6,16 @@ CREATE SCHEMA "factory";
 
 SET LOCAL search_path = factory, public;
 CREATE TYPE "factory"."agent_turn_state" AS ENUM('pending', 'dispatching', 'running', 'completed', 'failed', 'stopped', 'uncertain');
-CREATE TYPE "factory"."branch_operation_state" AS ENUM('pending', 'executing', 'ambiguous', 'succeeded', 'failed', 'cancelled');
 CREATE TYPE "factory"."change_agent_state" AS ENUM('starting', 'working', 'waiting', 'stopped', 'failed', 'committed');
-CREATE TYPE "factory"."change_commit_source" AS ENUM('agent', 'integration', 'repository-document', 'workspace');
+CREATE TYPE "factory"."change_commit_source" AS ENUM('agent', 'integration', 'workspace');
 CREATE TYPE "factory"."change_commit_state" AS ENUM('commit-intended', 'committed', 'push-intended', 'succeeded', 'failed');
 CREATE TYPE "factory"."change_state" AS ENUM('branch-pending', 'starting', 'active', 'cancelling', 'cancelled', 'failed', 'delivering', 'delivered');
 CREATE TYPE "factory"."conversation_actor" AS ENUM('user', 'project-agent', 'change-agent', 'system');
 CREATE TYPE "factory"."conversation_entry_kind" AS ENUM('user-message', 'agent-message', 'question', 'answer', 'requirement', 'mode-change');
 CREATE TYPE "factory"."conversation_mode" AS ENUM('investigate', 'plan', 'build');
-CREATE TYPE "factory"."isolated_runtime_kind" AS ENUM('staging', 'verification', 'prebuild', 'publication');
-CREATE TYPE "factory"."knowledge_generation_state" AS ENUM('pending', 'running', 'succeeded', 'failed');
+CREATE TYPE "factory"."isolated_runtime_kind" AS ENUM('staging', 'verification', 'publication');
 CREATE TYPE "factory"."knowledge_page_state" AS ENUM('active', 'archived');
 CREATE TYPE "factory"."knowledge_revision_kind" AS ENUM('generated', 'human', 'proposed');
-CREATE TYPE "factory"."merge_operation_state" AS ENUM('pending', 'executing', 'ambiguous', 'succeeded', 'failed');
-CREATE TYPE "factory"."promotion_operation_state" AS ENUM('pending', 'starting', 'switching', 'succeeded', 'failed');
-CREATE TYPE "factory"."pull_request_operation_state" AS ENUM('pending', 'executing', 'ambiguous', 'succeeded', 'failed');
 CREATE TYPE "factory"."runtime_attempt_state" AS ENUM('create-intended', 'starting', 'ready', 'stop-intended', 'stopping', 'stopped', 'cleanup-failed', 'failed', 'pausing', 'paused', 'resuming');
 CREATE TYPE "factory"."ticket_state" AS ENUM('inbox', 'backlog', 'ready', 'in-progress', 'cancelled', 'done');
 CREATE TYPE "factory"."verification_state" AS ENUM('pending', 'runner-starting', 'running', 'succeeded', 'failed', 'cancelled');
@@ -43,6 +38,224 @@ SET check_function_bodies = false;
 -- Native 10-common-functions.sql.
 -- Common routines. Run before Drizzle tables, with check_function_bodies disabled.
 
+CREATE FUNCTION factory.deterministic_uuid(seed text) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT encode(
+    set_byte(
+      set_byte(raw, 6, (get_byte(raw, 6) & 15) | 80),
+      8,
+      (get_byte(raw, 8) & 63) | 128
+    ),
+    'hex'
+  )::uuid
+  FROM (SELECT substring(factory.digest(seed, 'sha256') FROM 1 FOR 16) AS raw) d;
+$$;
+
+CREATE FUNCTION factory.guard_immutable_columns() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  mutable_cols text[] := CASE WHEN TG_NARGS > 2 THEN TG_ARGV[2 : TG_NARGS - 1] ELSE ARRAY[]::text[] END;
+  locked boolean;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF TG_ARGV[1] = 'no-delete' THEN
+      RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME USING ERRCODE = '23514';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_ARGV[1] LIKE 'lock-on:%' THEN
+    EXECUTE format('SELECT ($1).%I IS NOT NULL', substr(TG_ARGV[1], 9)) INTO locked USING OLD;
+    IF locked THEN
+      RAISE EXCEPTION '%', TG_ARGV[0] USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF (to_jsonb(NEW) - mutable_cols) IS DISTINCT FROM (to_jsonb(OLD) - mutable_cols) THEN
+    RAISE EXCEPTION '%', TG_ARGV[0] USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION factory.guard_operation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  op_kind text := CASE WHEN TG_OP = 'INSERT' THEN NEW.kind ELSE OLD.kind END;
+  paused boolean;
+  review factory.candidate_review;
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.kind IN ('project.setup_inspection', 'knowledge.generation') THEN
+    SELECT (state = 'enabled') INTO paused FROM factory.operation
+      WHERE kind = 'installation.maintenance' AND idempotency_key = 'installation.maintenance:singleton'
+      FOR SHARE;
+    IF paused THEN
+      RAISE EXCEPTION 'Factory is in maintenance; new work was not admitted'
+        USING ERRCODE = '55000';
+    END IF;
+  END IF;
+
+  CASE op_kind
+    WHEN 'attachment.storage', 'attachment.turn_context', 'coding.turn_mcp', 'runtime.environment_intent' THEN
+      IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        RAISE EXCEPTION '% is immutable', TG_TABLE_NAME;
+      END IF;
+
+    WHEN 'learning.source_artifact' THEN
+      IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION '% is immutable', TG_TABLE_NAME;
+      END IF;
+
+    WHEN 'project.setup_inspection' THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF (NEW.id,NEW.scope_id,NEW.created_by,NEW.created_at,
+            NEW.payload-'output'-'failure')
+          IS DISTINCT FROM (OLD.id,OLD.scope_id,OLD.created_by,OLD.created_at,
+            OLD.payload-'output'-'failure')
+          OR (OLD.payload->'output' IS NOT NULL AND OLD.payload->'output' <> 'null'::jsonb
+            AND NEW.payload->'output' IS DISTINCT FROM OLD.payload->'output')
+          OR (OLD.state IN ('confirmed','complete') AND NEW.state<>OLD.state)
+        THEN RAISE EXCEPTION 'Setup inspection intent and published proposal are immutable'; END IF;
+      END IF;
+
+    WHEN 'tickets.implementation_order' THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF ROW(NEW.id,NEW.scope_type,NEW.scope_id,NEW.created_by,NEW.created_at,
+            NEW.payload->>'commandId',NEW.payload->>'projectId',NEW.payload->>'ticketId',
+            NEW.payload->>'createdBy',NEW.payload->>'requirementRevisionId',
+            NEW.payload->>'technicalDesignRevisionId',NEW.payload->>'codingReasoning',
+            NEW.payload->>'sourceSha')
+          IS DISTINCT FROM ROW(OLD.id,OLD.scope_type,OLD.scope_id,OLD.created_by,OLD.created_at,
+            OLD.payload->>'commandId',OLD.payload->>'projectId',OLD.payload->>'ticketId',
+            OLD.payload->>'createdBy',OLD.payload->>'requirementRevisionId',
+            OLD.payload->>'technicalDesignRevisionId',OLD.payload->>'codingReasoning',
+            OLD.payload->>'sourceSha')
+          OR (OLD.state<>'waiting' AND NEW IS DISTINCT FROM OLD) THEN
+          RAISE EXCEPTION 'Commissioned implementation scope is immutable';
+        END IF;
+      END IF;
+
+    WHEN 'learning.trial' THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF (to_jsonb(NEW)-ARRAY['state','result','error','lease_expires_at','updated_at','completed_at','payload'])
+          IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['state','result','error','lease_expires_at','updated_at','completed_at','payload'])
+          OR ((NEW.payload)-ARRAY['result','reason','steps'])
+          IS DISTINCT FROM ((OLD.payload)-ARRAY['result','reason','steps'])
+          OR (OLD.state<>'running' AND NEW IS DISTINCT FROM OLD)
+        THEN RAISE EXCEPTION 'Learning admission and settled evidence are immutable'; END IF;
+      END IF;
+
+    WHEN 'workspace.submission' THEN
+      IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS(
+          SELECT 1 FROM factory.change_commit_operation operation
+          JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+          JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
+          JOIN factory.change_writer writer ON writer.change_id=operation.change_id
+          WHERE operation.id=NEW.id AND operation.source='workspace' AND operation.state='commit-intended'
+            AND operation.created_by=(NEW.payload->>'actorId')::uuid AND workspace.id=(NEW.scope_id)::uuid
+            AND workspace.kind='ticket' AND workspace.change_id=operation.change_id
+            AND writer.state='unassigned' AND writer.epoch=(NEW.payload->>'writerEpoch')::bigint
+            AND attempt.state='ready' AND attempt.stop_intended_at IS NULL
+            AND attempt.atespace IS NOT NULL AND attempt.delete_intended_at IS NULL AND attempt.deleted_at IS NULL)
+          THEN RAISE EXCEPTION 'Workspace submission requires its matching ready native commit intent'; END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF ROW(NEW.id,NEW.scope_id,NEW.payload->>'actorId',NEW.payload->>'writerEpoch',
+            NEW.payload->>'remoteHead',NEW.payload->>'repositoryUrl',NEW.created_at)
+          IS DISTINCT FROM ROW(OLD.id,OLD.scope_id,OLD.payload->>'actorId',OLD.payload->>'writerEpoch',
+            OLD.payload->>'remoteHead',OLD.payload->>'repositoryUrl',OLD.created_at)
+          OR (OLD.payload->>'prepareAttemptedAt' IS NOT NULL
+            AND NEW.payload->>'prepareAttemptedAt' IS DISTINCT FROM OLD.payload->>'prepareAttemptedAt')
+          THEN RAISE EXCEPTION 'Workspace submission identity and dispatch facts are immutable'; END IF;
+      END IF;
+
+    WHEN 'coding.session_archive' THEN
+      IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS (
+          SELECT 1 FROM factory.agent_turn turn
+          JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
+          JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
+            AND attempt.change_id=turn.change_id AND attempt.project_id=turn.project_id
+          WHERE turn.id=(NEW.scope_id)::uuid AND turn.state='completed'
+            AND intent.runtime_attempt_id=(NEW.payload->>'runtimeAttemptId')::uuid
+            AND intent.session_id=NEW.payload->>'sessionId'
+            AND intent.prompt_id=NEW.payload->>'promptId'
+        ) THEN RAISE EXCEPTION 'Transcript archive requires its exact completed native turn'; END IF;
+      ELSIF TG_OP = 'DELETE' OR OLD.state='saved'
+        OR (NEW.scope_id,NEW.payload->>'runtimeAttemptId',NEW.payload->>'sessionId',
+            NEW.payload->>'promptId',NEW.payload->'sourceRefs',NEW.created_at)
+          IS DISTINCT FROM (OLD.scope_id,OLD.payload->>'runtimeAttemptId',OLD.payload->>'sessionId',
+            OLD.payload->>'promptId',OLD.payload->'sourceRefs',OLD.created_at)
+      THEN RAISE EXCEPTION 'Native transcript checkpoint identity is immutable'; END IF;
+
+    WHEN 'coding.turn_skill' THEN
+      IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM factory.agent_turn WHERE id = (OLD.scope_id)::uuid) THEN
+        RETURN OLD;
+      END IF;
+      IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Loaded Skill identities are immutable';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM factory.agent_turn WHERE id = (NEW.scope_id)::uuid
+        AND state IN ('dispatching', 'running') AND authority->'skillRevisionIds' ? (NEW.payload->>'revisionId')) THEN
+        RAISE EXCEPTION 'Loaded Skill revision was not admitted';
+      END IF;
+
+    WHEN 'workspace.developer_ide' THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF NEW.scope_id IS DISTINCT FROM OLD.scope_id
+          OR (NEW.payload->>'resourceId') IS DISTINCT FROM (OLD.payload->>'resourceId')
+          OR (NEW.payload->>'serviceEpoch')::bigint < (OLD.payload->>'serviceEpoch')::bigint THEN
+          RAISE EXCEPTION 'Developer IDE identity is immutable' USING ERRCODE = '23514';
+        END IF;
+        IF (NEW.payload->>'serviceEpoch')::bigint = (OLD.payload->>'serviceEpoch')::bigint AND (
+          (NEW.payload->>'image') IS DISTINCT FROM (OLD.payload->>'image') OR
+          ((OLD.payload->>'namespaceUid') IS NOT NULL AND (NEW.payload->>'namespaceUid') IS DISTINCT FROM (OLD.payload->>'namespaceUid')) OR
+          ((OLD.payload->>'podUid') IS NOT NULL AND (NEW.payload->>'podUid') IS DISTINCT FROM (OLD.payload->>'podUid'))
+        ) THEN RAISE EXCEPTION 'Developer IDE intent outcome is immutable' USING ERRCODE = '23514'; END IF;
+        IF (NEW.payload->>'serviceEpoch')::bigint <> (OLD.payload->>'serviceEpoch')::bigint AND (
+          (NEW.payload->>'serviceEpoch')::bigint <> (OLD.payload->>'serviceEpoch')::bigint + 1
+          OR OLD.state <> 'stopped' OR NEW.state <> 'create-intended' OR
+          (NEW.payload->>'podUid') IS NOT NULL OR (NEW.payload->>'namespaceUid') IS DISTINCT FROM (OLD.payload->>'namespaceUid')
+        ) THEN RAISE EXCEPTION 'Stop the Developer IDE before issuing a new epoch' USING ERRCODE = '23514'; END IF;
+      END IF;
+
+    WHEN 'releases.attempt' THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF (NEW.id,NEW.scope_id,NEW.payload->>'commandId',NEW.payload->>'ordinal',NEW.created_at)
+          IS DISTINCT FROM (OLD.id,OLD.scope_id,OLD.payload->>'commandId',OLD.payload->>'ordinal',OLD.created_at)
+          OR (OLD.payload->>'dispatchIntendedAt' IS NOT NULL AND NEW.payload->>'dispatchIntendedAt' IS DISTINCT FROM OLD.payload->>'dispatchIntendedAt')
+          OR (OLD.payload->>'runId' IS NOT NULL AND NEW.payload->>'runId' IS DISTINCT FROM OLD.payload->>'runId')
+          OR (OLD.payload->>'jobHandle' IS NOT NULL AND NEW.payload->>'jobHandle' IS DISTINCT FROM OLD.payload->>'jobHandle')
+          OR (OLD.payload->>'runtimeAttemptId' IS NOT NULL AND NEW.payload->>'runtimeAttemptId' IS DISTINCT FROM OLD.payload->>'runtimeAttemptId')
+          OR (OLD.payload->>'runnerId' IS NOT NULL AND (NEW.payload->>'runnerId',NEW.payload->>'runnerUuid') IS DISTINCT FROM (OLD.payload->>'runnerId',OLD.payload->>'runnerUuid')) THEN
+          RAISE EXCEPTION 'Publication attempt identity is immutable' USING ERRCODE='23514';
+        END IF;
+      END IF;
+
+    WHEN 'review.scenario' THEN
+      IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        SELECT * INTO review FROM factory.candidate_review WHERE id=(NEW.scope_id)::uuid FOR UPDATE;
+        IF review.result IS NOT NULL OR review.state NOT IN ('pending','running')
+          OR (TG_OP='UPDATE' AND (
+            OLD.payload->>'endedAt' IS NOT NULL OR
+            ROW(NEW.scope_id,NEW.payload->>'id',NEW.payload->>'title',NEW.payload->>'category',
+                NEW.payload->>'criterion',NEW.payload->>'expected',NEW.payload->>'startedAt',
+                NEW.payload->>'observationKind')
+            IS DISTINCT FROM ROW(OLD.scope_id,OLD.payload->>'id',OLD.payload->>'title',OLD.payload->>'category',
+                OLD.payload->>'criterion',OLD.payload->>'expected',OLD.payload->>'startedAt',
+                OLD.payload->>'observationKind')))
+        THEN RAISE EXCEPTION 'Review scenario intent and completed outcome are immutable'; END IF;
+      END IF;
+
+    ELSE
+      NULL;
+  END CASE;
+
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
 CREATE FUNCTION factory.reject_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -56,8 +269,9 @@ CREATE FUNCTION factory.require_installation_admission() RETURNS trigger
     AS $$
 DECLARE paused boolean;
 BEGIN
-  SELECT enabled INTO paused FROM factory.installation_maintenance
-    WHERE singleton FOR SHARE;
+  SELECT (state = 'enabled') INTO paused FROM factory.operation
+    WHERE kind = 'installation.maintenance' AND idempotency_key = 'installation.maintenance:singleton'
+    FOR SHARE;
   IF paused THEN
     RAISE EXCEPTION 'Factory is in maintenance; new work was not admitted'
       USING ERRCODE = '55000';
@@ -100,39 +314,45 @@ END $$;
 CREATE FUNCTION factory.enqueue_access_revocation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE target uuid;
+DECLARE targets uuid[]; notify_id uuid;
 BEGIN
-  IF TG_TABLE_NAME = 'account_access' THEN
+  IF TG_TABLE_NAME = 'project' THEN
+    SELECT ARRAY(
+      SELECT user_id FROM factory.administrator
+      UNION SELECT user_id FROM factory.project_membership WHERE project_id=NEW.id
+    ) INTO targets;
+    notify_id := NEW.id;
+  ELSIF TG_TABLE_NAME = 'account_access' THEN
     IF NEW.disabled_at IS NOT DISTINCT FROM OLD.disabled_at AND
        NEW.directory_disabled_at IS NOT DISTINCT FROM OLD.directory_disabled_at THEN
       RETURN NEW;
     END IF;
-    target := NEW.user_id;
+    notify_id := NEW.user_id;
+    targets := ARRAY[notify_id];
     IF NEW.disabled_at IS NOT NULL OR NEW.directory_disabled_at IS NOT NULL THEN
-      DELETE FROM auth.session WHERE user_id=target;
+      DELETE FROM auth.session WHERE user_id=notify_id;
     END IF;
   ELSE
     IF TG_OP = 'UPDATE' AND NEW.role = OLD.role AND NEW.manage_project = OLD.manage_project THEN
       RETURN NEW;
     END IF;
-    target := COALESCE(NEW.user_id, OLD.user_id);
+    notify_id := COALESCE(NEW.user_id, OLD.user_id);
+    targets := ARRAY[notify_id];
   END IF;
-  INSERT INTO factory.access_revocation(user_id) VALUES(target)
-    ON CONFLICT(user_id) DO UPDATE SET version=access_revocation.version+1,updated_at=now();
-  PERFORM pg_notify('factory_access_revoked', target::text);
+  INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,updated_at)
+  SELECT gen_random_uuid(),'access.revocation','user',user_id::text,
+    'access.revocation:'||user_id::text,NULL,'pending',
+    jsonb_build_object('userId',user_id::text,'version',1,'processedVersion',0),now()
+  FROM unnest(targets) AS user_id
+  ON CONFLICT(idempotency_key) DO UPDATE SET
+    state='pending',
+    payload=jsonb_set(factory.operation.payload,'{version}',
+      to_jsonb(((factory.operation.payload->>'version')::bigint+1))),
+    completed_at=NULL,
+    updated_at=now();
+  PERFORM pg_notify('factory_access_revoked', notify_id::text);
   RETURN COALESCE(NEW, OLD);
-END $$;
-
-CREATE FUNCTION factory.enqueue_project_access() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  INSERT INTO factory.access_revocation(user_id)
-    SELECT user_id FROM factory.administrator
-    UNION SELECT user_id FROM factory.project_membership WHERE project_id=NEW.id
-    ON CONFLICT(user_id) DO UPDATE SET version=access_revocation.version+1,updated_at=now();
-  PERFORM pg_notify('factory_access_revoked', NEW.id::text);
-  RETURN NEW;
 END $$;
 
 CREATE FUNCTION factory.initialize_account_access() RETURNS trigger
@@ -193,12 +413,14 @@ BEGIN
     reference_kind := 'conversation'; target := NEW.conversation_id; content := NEW.body;
   ELSE
     SELECT c.project_id INTO project FROM factory.review_feedback f
-      JOIN factory.change c ON c.id=f.change_id WHERE f.id=NEW.feedback_id;
-    actor := NEW.author_id; reference_kind := 'feedback'; target := NEW.id; content := NEW.body;
+      JOIN factory.change c ON c.id=f.change_id WHERE f.id=(NEW.scope_id)::uuid;
+    actor := NEW.actor_id; reference_kind := 'feedback'; target := NEW.id; content := NEW.payload->>'body';
   END IF;
   PERFORM factory.bind_attachment_references(project,actor,reference_kind,target,content,shared);
   IF TG_TABLE_NAME='ticket' THEN
-    DELETE FROM factory.attachment_draft WHERE id=NEW.id AND owner_id=NEW.created_by AND project_id=NEW.project_id;
+    DELETE FROM factory.operation WHERE kind='attachments.draft' AND scope_type='attachment'
+      AND idempotency_key='attachments.draft:' || NEW.id::text || ':' || NEW.created_by::text
+      AND payload->>'projectId'=NEW.project_id::text;
   END IF;
   RETURN NEW;
 END $$;
@@ -219,78 +441,44 @@ END $$;
 -- Native 13-planning-functions.sql.
 -- Planning routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_epic_hierarchy() RETURNS trigger
+CREATE FUNCTION factory.guard_tree_hierarchy() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+DECLARE
+  has_cycle boolean;
 BEGIN
   IF TG_OP = 'UPDATE' AND (NEW.id <> OLD.id OR NEW.project_id <> OLD.project_id) THEN
-    RAISE EXCEPTION 'Epic identity and Project are immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION '% identity and Project are immutable', TG_ARGV[0] USING ERRCODE = '23514';
   END IF;
   PERFORM id FROM factory.project WHERE id = NEW.project_id FOR UPDATE;
-  IF EXISTS (
-    WITH RECURSIVE ancestors AS (
-      SELECT id, parent_id FROM factory.epic WHERE id = NEW.parent_id AND project_id = NEW.project_id
-      UNION
-      SELECT parent.id, parent.parent_id FROM factory.epic parent
-      JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
-    )
-    -- During a multi-row INSERT the closing Epic might not exist yet.
-    SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
-  ) THEN
-    RAISE EXCEPTION 'Epic hierarchy cannot contain a cycle' USING ERRCODE = '23514';
+  IF TG_TABLE_NAME = 'epic' THEN
+    SELECT EXISTS (
+      WITH RECURSIVE ancestors AS (
+        SELECT id, parent_id FROM factory.epic WHERE id = NEW.parent_id AND project_id = NEW.project_id
+        UNION
+        SELECT parent.id, parent.parent_id FROM factory.epic parent
+        JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
+      )
+      -- During a multi-row INSERT the closing Epic might not exist yet.
+      SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
+    ) INTO has_cycle;
+  ELSE
+    SELECT EXISTS (
+      WITH RECURSIVE ancestors AS (
+        SELECT id, parent_id FROM factory.knowledge_page WHERE id = NEW.parent_id AND project_id = NEW.project_id
+        UNION
+        SELECT parent.id, parent.parent_id FROM factory.knowledge_page parent
+        JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
+      )
+      SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
+    ) INTO has_cycle;
+  END IF;
+  IF has_cycle THEN
+    RAISE EXCEPTION '% cannot contain a cycle', TG_ARGV[1] USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
 $$;
-
-CREATE FUNCTION factory.guard_knowledge_hierarchy() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP='UPDATE' AND (NEW.id<>OLD.id OR NEW.project_id<>OLD.project_id) THEN
-    RAISE EXCEPTION 'Wiki page identity and Project are immutable' USING ERRCODE='23514';
-  END IF;
-  PERFORM id FROM factory.project WHERE id=NEW.project_id FOR UPDATE;
-  IF EXISTS (
-    WITH RECURSIVE ancestors AS (
-      SELECT id,parent_id FROM factory.knowledge_page WHERE id=NEW.parent_id AND project_id=NEW.project_id
-      UNION
-      SELECT parent.id,parent.parent_id FROM factory.knowledge_page parent
-      JOIN ancestors child ON parent.id=child.parent_id WHERE parent.project_id=NEW.project_id
-    ) SELECT 1 FROM ancestors WHERE id=NEW.id OR parent_id=NEW.id
-  ) THEN
-    RAISE EXCEPTION 'Wiki pages cannot contain a cycle' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.guard_project_repository_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.command_id,NEW.setup_id,NEW.user_id,NEW.project_id,NEW.name,NEW.slug,NEW.kind,
-      NEW.source_url,NEW.credential_key,NEW.fingerprint,NEW.created_at)
-    IS DISTINCT FROM (OLD.command_id,OLD.setup_id,OLD.user_id,OLD.project_id,OLD.name,OLD.slug,OLD.kind,
-      OLD.source_url,OLD.credential_key,OLD.fingerprint,OLD.created_at)
-    OR (OLD.state='committed' AND (NEW.state,NEW.default_branch,NEW.completed_at)
-      IS DISTINCT FROM (OLD.state,OLD.default_branch,OLD.completed_at))
-    OR (OLD.credential_removed_at IS NOT NULL AND NEW.credential_removed_at IS DISTINCT FROM OLD.credential_removed_at)
-  THEN RAISE EXCEPTION 'Project repository intent is immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.guard_setup_inspection() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.id,NEW.project_id,NEW.source_commit,NEW.model_id,NEW.connection_id,NEW.connection_version,NEW.created_by,NEW.created_at,NEW.parent_id,NEW.answers)
-    IS DISTINCT FROM (OLD.id,OLD.project_id,OLD.source_commit,OLD.model_id,OLD.connection_id,OLD.connection_version,OLD.created_by,OLD.created_at,OLD.parent_id,OLD.answers)
-    OR (OLD.output IS NOT NULL AND NEW.output IS DISTINCT FROM OLD.output)
-    OR (OLD.state IN ('confirmed','complete') AND NEW.state<>OLD.state)
-  THEN RAISE EXCEPTION 'Setup inspection intent and published proposal are immutable'; END IF;
-  RETURN NEW;
-END $$;
 
 CREATE FUNCTION factory.guard_ticket_dependency() RETURNS trigger
     LANGUAGE plpgsql
@@ -335,15 +523,19 @@ CREATE FUNCTION factory.ticket_prerequisites(project uuid, dependent uuid) RETUR
   SELECT prerequisite.id, prerequisite.title, prerequisite.state,
     prerequisite.state = 'done' AND EXISTS (
       SELECT 1 FROM factory.change change
-      JOIN factory.merge_operation merge ON merge.change_id = change.id
-        AND merge.state = 'succeeded' AND merge.observed_default_sha = merge.commit_sha
-      JOIN factory.delivery_approval approval ON approval.id = merge.delivery_approval_id
-        AND approval.change_id = change.id AND approval.commit_sha = merge.commit_sha
+      JOIN factory.operation merge ON merge.kind = 'delivery.merge'
+        AND merge.scope_type = 'change' AND merge.scope_id = change.id::text
+        AND merge.state = 'succeeded'
+        AND merge.result->>'mergeSha' = merge.payload->>'commitSha'
+      JOIN factory.delivery_approval approval ON approval.id::text = merge.payload->>'approvalId'
+        AND approval.change_id = change.id AND approval.commit_sha = merge.payload->>'commitSha'
       JOIN factory.verification verification ON verification.id = approval.verification_id
-        AND verification.change_id = change.id AND verification.commit_sha = merge.commit_sha
+        AND verification.change_id = change.id AND verification.commit_sha = merge.payload->>'commitSha'
         AND verification.state = 'succeeded'
-      JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
-        AND promotion.project_id = edge.project_id AND promotion.commit_sha = merge.commit_sha
+      JOIN factory.operation promotion ON promotion.kind = 'delivery.promotion'
+        AND promotion.scope_type = 'change' AND promotion.scope_id = change.id::text
+        AND promotion.payload->>'projectId' = edge.project_id::text
+        AND promotion.payload->>'commitSha' = merge.payload->>'commitSha'
         AND promotion.state = 'succeeded'
       WHERE change.ticket_id = prerequisite.id AND change.project_id = edge.project_id
         AND change.state = 'delivered'
@@ -357,33 +549,6 @@ $$;
 -- Native 14-conversation-functions.sql.
 -- Conversation routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_active_coding_context() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.active_coding_context_id IS NOT NULL AND NOT EXISTS(
-    SELECT 1 FROM factory.conversation_context context JOIN factory.change change ON change.id=context.change_id
-    WHERE context.id=NEW.active_coding_context_id AND context.conversation_id=NEW.id
-      AND context.kind='coding' AND NOT context.original AND change.ticket_id=NEW.ticket_id
-      AND change.project_id=NEW.project_id
-  ) THEN RAISE EXCEPTION 'Active Coding context must belong to this Ticket conversation'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.guard_conversation_context() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.id,NEW.conversation_id,NEW.command_id,NEW.kind,NEW.mode,NEW.ordinal,NEW.title,
-    NEW.created_by,NEW.created_at,NEW.change_id,NEW.native_session_id,NEW.previous_context_id,NEW.original)
-    IS DISTINCT FROM (OLD.id,OLD.conversation_id,OLD.command_id,OLD.kind,OLD.mode,OLD.ordinal,OLD.title,
-    OLD.created_by,OLD.created_at,OLD.change_id,OLD.native_session_id,OLD.previous_context_id,OLD.original)
-    OR OLD.archived_session IS NOT NULL THEN
-    RAISE EXCEPTION 'Conversation identity and archived history are immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.prevent_conversation_entry_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -394,20 +559,6 @@ BEGIN
     RETURN OLD;
   END IF;
   RAISE EXCEPTION 'Conversation Entries are immutable';
-END;
-$$;
-
-CREATE FUNCTION factory.validate_ticket_conversation_project() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.ticket_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM factory.ticket
-    WHERE id = NEW.ticket_id AND project_id = NEW.project_id
-  ) THEN
-    RAISE EXCEPTION 'Ticket Conversation project mismatch';
-  END IF;
-  RETURN NEW;
 END;
 $$;
 
@@ -464,7 +615,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION factory.guard_build_browser_ordinal() RETURNS trigger
+CREATE FUNCTION factory.guard_build_browser_session() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -477,30 +628,6 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'Build browser recovery admission is immutable';
     END IF;
-  ELSIF NEW.reopen_allowed THEN
-    RAISE EXCEPTION 'Browser recovery requires a confirmed Connector failure';
-  ELSIF NEW.ordinal > 1 AND NOT EXISTS (
-    SELECT 1 FROM factory.build_browser_session previous
-    WHERE previous.turn_id = NEW.turn_id AND previous.owner_id = NEW.owner_id
-      AND previous.ordinal = NEW.ordinal - 1 AND previous.state = 'closed'
-      AND previous.reopen_allowed
-      AND previous.cleanup_confirmed_at IS NOT NULL
-      AND previous.change_id = NEW.change_id
-      AND previous.runtime_attempt_id = NEW.runtime_attempt_id
-      AND previous.generation = NEW.generation
-      AND previous.agent_session_id = NEW.agent_session_id
-  ) THEN
-    RAISE EXCEPTION 'Confirm previous browser cleanup before a new inspection';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.guard_build_browser_session() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP = 'UPDATE' THEN
     IF ROW(NEW.id, NEW.turn_id, NEW.change_id, NEW.runtime_attempt_id, NEW.generation,
       NEW.agent_session_id, NEW.owner_id, NEW.create_intended_at)
       IS DISTINCT FROM ROW(OLD.id, OLD.turn_id, OLD.change_id, OLD.runtime_attempt_id, OLD.generation,
@@ -521,7 +648,29 @@ BEGIN
       OR (OLD.cleanup_intended_at IS NOT NULL AND NEW.cleanup_intended_at IS DISTINCT FROM OLD.cleanup_intended_at) THEN
       RAISE EXCEPTION 'Build browser external outcome is immutable';
     END IF;
+    IF NEW.state = 'closed' AND EXISTS (
+      SELECT 1 FROM factory.operation native WHERE native.id=NEW.id AND native.kind='runtime.browser'
+        AND ((native.payload->>'actorDeletedAt') IS NULL OR (native.payload->>'templateDeletedAt') IS NULL)
+    ) THEN
+      RAISE EXCEPTION 'Native Browser cleanup remains unconfirmed';
+    END IF;
   ELSE
+    IF NEW.reopen_allowed THEN
+      RAISE EXCEPTION 'Browser recovery requires a confirmed Connector failure';
+    END IF;
+    IF NEW.ordinal > 1 AND NOT EXISTS (
+      SELECT 1 FROM factory.build_browser_session previous
+      WHERE previous.turn_id = NEW.turn_id AND previous.owner_id = NEW.owner_id
+        AND previous.ordinal = NEW.ordinal - 1 AND previous.state = 'closed'
+        AND previous.reopen_allowed
+        AND previous.cleanup_confirmed_at IS NOT NULL
+        AND previous.change_id = NEW.change_id
+        AND previous.runtime_attempt_id = NEW.runtime_attempt_id
+        AND previous.generation = NEW.generation
+        AND previous.agent_session_id = NEW.agent_session_id
+    ) THEN
+      RAISE EXCEPTION 'Confirm previous browser cleanup before a new inspection';
+    END IF;
     IF NEW.state <> 'intended' OR NEW.create_confirmed_at IS NOT NULL OR NOT EXISTS (
       SELECT 1 FROM factory.agent_turn turn
       JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
@@ -559,9 +708,11 @@ BEGIN
     END IF;
   ELSE
     IF ROW(NEW.turn_id, NEW.change_id, NEW.session_id, NEW.prompt_id, NEW.prompt_text,
-      NEW.bootstrap, NEW.session_title, NEW.created_at) IS DISTINCT FROM
+      NEW.bootstrap, NEW.session_title, NEW.created_at,
+      NEW.skill_manifest, NEW.skill_attachments) IS DISTINCT FROM
       ROW(OLD.turn_id, OLD.change_id, OLD.session_id, OLD.prompt_id, OLD.prompt_text,
-      OLD.bootstrap, OLD.session_title, OLD.created_at)
+      OLD.bootstrap, OLD.session_title, OLD.created_at,
+      OLD.skill_manifest, OLD.skill_attachments)
       OR (OLD.runtime_attempt_id IS NOT NULL AND NEW.runtime_attempt_id IS DISTINCT FROM OLD.runtime_attempt_id) THEN
       RAISE EXCEPTION 'Change Agent dispatch intent is immutable';
     END IF;
@@ -622,134 +773,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION factory.protect_branch_operation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.change_id <> OLD.change_id
-    OR NEW.repository_owner <> OLD.repository_owner
-    OR NEW.repository_name <> OLD.repository_name
-    OR NEW.branch_name <> OLD.branch_name
-    OR NEW.start_sha <> OLD.start_sha
-    OR NEW.idempotency_key <> OLD.idempotency_key
-    OR (OLD.state IN ('succeeded', 'failed', 'cancelled') AND NEW IS DISTINCT FROM OLD)
-  THEN
-    RAISE EXCEPTION 'Branch create intent or terminal result is immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_change_identity() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.project_id <> OLD.project_id
-    OR NEW.ticket_id <> OLD.ticket_id
-    OR NEW.requirement_approval_id <> OLD.requirement_approval_id
-    OR NEW.branch_name <> OLD.branch_name
-    OR NEW.base_sha <> OLD.base_sha
-    OR NEW.created_by <> OLD.created_by
-    OR NEW.created_at <> OLD.created_at
-  THEN
-    RAISE EXCEPTION 'Change identity and source intent are immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_implementation_order() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF ROW(NEW.command_id,NEW.project_id,NEW.ticket_id,NEW.created_by,NEW.requirement_revision_id,
-      NEW.technical_design_revision_id,NEW.coding_reasoning,NEW.source_sha,NEW.created_at)
-    IS DISTINCT FROM ROW(OLD.command_id,OLD.project_id,OLD.ticket_id,OLD.created_by,OLD.requirement_revision_id,
-      OLD.technical_design_revision_id,OLD.coding_reasoning,OLD.source_sha,OLD.created_at)
-    OR (OLD.state<>'waiting' AND NEW IS DISTINCT FROM OLD) THEN
-    RAISE EXCEPTION 'Commissioned implementation scope is immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_integration_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF ROW(NEW.change_id,NEW.runtime_attempt_id,NEW.sequence,NEW.source,NEW.expected_parent_sha,
-      NEW.integration_base_sha,NEW.merge_parent_sha,NEW.branch_name,NEW.commit_message,NEW.created_by,NEW.idempotency_key)
-    IS DISTINCT FROM ROW(OLD.change_id,OLD.runtime_attempt_id,OLD.sequence,OLD.source,OLD.expected_parent_sha,
-      OLD.integration_base_sha,OLD.merge_parent_sha,OLD.branch_name,OLD.commit_message,OLD.created_by,OLD.idempotency_key) THEN
-    RAISE EXCEPTION 'Commit intent and integrated source are immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_personal_git_operation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF TG_OP = 'DELETE' OR
-      ROW(NEW.id,NEW.workspace_id,NEW.runtime_attempt_id,NEW.user_id,NEW.action,NEW.expected_head,NEW.branch,NEW.message,NEW.created_at)
-      IS DISTINCT FROM ROW(OLD.id,OLD.workspace_id,OLD.runtime_attempt_id,OLD.user_id,OLD.action,OLD.expected_head,OLD.branch,OLD.message,OLD.created_at)
-      OR OLD.state IN ('succeeded','failed')
-      OR (OLD.attempted_at IS NOT NULL AND NEW.attempted_at IS DISTINCT FROM OLD.attempted_at)
-      OR (OLD.state <> 'intended' AND NEW.state = 'intended') THEN
-        RAISE EXCEPTION 'Personal Git intent and completed outcomes are immutable';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_session_archive() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP='INSERT' THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM factory.agent_turn turn
-      JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-      JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
-        AND attempt.change_id=turn.change_id AND attempt.project_id=turn.project_id
-      WHERE turn.id=NEW.turn_id AND turn.state='completed'
-        AND intent.runtime_attempt_id=NEW.runtime_attempt_id
-        AND intent.session_id=NEW.session_id AND intent.prompt_id=NEW.prompt_id
-    ) THEN RAISE EXCEPTION 'Transcript archive requires its exact completed native turn'; END IF;
-    RETURN NEW;
-  END IF;
-  IF TG_OP='DELETE' OR OLD.state='saved'
-    OR (NEW.turn_id,NEW.runtime_attempt_id,NEW.session_id,NEW.prompt_id,NEW.source_refs,NEW.created_at)
-      IS DISTINCT FROM (OLD.turn_id,OLD.runtime_attempt_id,OLD.session_id,OLD.prompt_id,OLD.source_refs,OLD.created_at)
-  THEN RAISE EXCEPTION 'Native transcript checkpoint identity is immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_workspace_submission() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP='INSERT' THEN
-    IF NOT EXISTS(
-      SELECT 1 FROM factory.change_commit_operation operation
-      JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
-      JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
-      JOIN factory.change_writer writer ON writer.change_id=operation.change_id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      WHERE operation.id=NEW.id AND operation.source='workspace' AND operation.state='commit-intended'
-        AND operation.created_by=NEW.actor_id AND workspace.id=NEW.workspace_id
-        AND workspace.kind='ticket' AND workspace.change_id=operation.change_id
-        AND writer.state='unassigned' AND writer.epoch=NEW.writer_epoch
-        AND attempt.state='ready' AND attempt.stop_intended_at IS NULL
-        AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL)
-      THEN RAISE EXCEPTION 'Workspace submission requires its matching ready native commit intent'; END IF;
-  ELSIF ROW(NEW.id,NEW.workspace_id,NEW.actor_id,NEW.writer_epoch,NEW.remote_head,NEW.repository_url,NEW.created_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.workspace_id,OLD.actor_id,OLD.writer_epoch,OLD.remote_head,OLD.repository_url,OLD.created_at)
-    OR (OLD.prepare_attempted_at IS NOT NULL AND NEW.prepare_attempted_at IS DISTINCT FROM OLD.prepare_attempted_at)
-    THEN RAISE EXCEPTION 'Workspace submission identity and dispatch facts are immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.require_ticket_execution_revision() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -773,33 +796,13 @@ END $$;
 -- Native 16-inputs-functions.sql.
 -- Inputs routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_loaded_skill() RETURNS trigger
+CREATE FUNCTION factory.cascade_deleted_agent_turn_skills() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM factory.agent_turn WHERE id = OLD.turn_id) THEN
-    RETURN OLD;
-  END IF;
-  IF TG_OP <> 'INSERT' THEN
-    RAISE EXCEPTION 'Loaded Skill identities are immutable';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM factory.agent_turn WHERE id = NEW.turn_id
-    AND state IN ('dispatching', 'running') AND authority->'skillRevisionIds' ? NEW.revision_id::text) THEN
-    RAISE EXCEPTION 'Loaded Skill revision was not admitted';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.guard_native_skill_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP = 'UPDATE' AND ROW(NEW.skill_loading, NEW.skill_manifest, NEW.skill_attachments) IS DISTINCT FROM ROW(OLD.skill_loading, OLD.skill_manifest, OLD.skill_attachments) THEN
-    RAISE EXCEPTION 'Admitted skill package is immutable';
-  END IF;
-  IF (NEW.skill_loading = 'native') != (NEW.skill_manifest IS NOT NULL) THEN RAISE EXCEPTION 'Native skill package is required'; END IF;
-  RETURN NEW;
+  DELETE FROM factory.operation
+  WHERE kind = 'coding.turn_skill' AND scope_type = 'agent_turn' AND scope_id = OLD.id::text;
+  RETURN OLD;
 END;
 $$;
 
@@ -808,36 +811,13 @@ CREATE FUNCTION factory.protect_model_connection_version() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP <> 'INSERT' THEN RAISE EXCEPTION 'Model connection versions are immutable' USING ERRCODE='23514'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM factory.model_connection_write WHERE connection_id=NEW.connection_id
-    AND base_version=NEW.version-1 AND provider=NEW.provider AND endpoint=NEW.endpoint
-    AND secret_key=NEW.secret_key AND created_by=NEW.created_by AND state='write-intended') THEN
+  IF NOT EXISTS (SELECT 1 FROM factory.operation WHERE kind='models.connection_write'
+    AND scope_type='connection' AND scope_id=NEW.connection_id::text
+    AND (payload->>'baseVersion')::bigint=NEW.version-1
+    AND payload->>'provider'=NEW.provider AND payload->>'endpoint'=NEW.endpoint
+    AND payload->>'secretKey'=NEW.secret_key AND created_by=NEW.created_by
+    AND state='write-intended') THEN
     RAISE EXCEPTION 'Model connection requires its exact write intent' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_model_connection_write() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP <> 'UPDATE' OR OLD.state <> 'write-intended' OR NEW.state <> 'committed'
-    OR (to_jsonb(NEW) - 'state' - 'committed_at') IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'committed_at')
-    OR NEW.committed_at IS NULL THEN
-    RAISE EXCEPTION 'Model connection write identity and outcome are immutable' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_model_role_probe() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP <> 'UPDATE' OR OLD.state <> 'probing' OR NEW.state NOT IN ('finished','uncertain')
-    OR (to_jsonb(NEW) - 'state' - 'result' - 'finished_at') IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'result' - 'finished_at')
-    OR NEW.finished_at IS NULL THEN
-    RAISE EXCEPTION 'Model probe intent and result are immutable' USING ERRCODE='23514';
   END IF;
   RETURN NEW;
 END;
@@ -850,32 +830,39 @@ CREATE FUNCTION factory.guard_learning_record() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF TG_TABLE_NAME IN ('learning_review','learning_trial') THEN
-    IF (to_jsonb(NEW)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at')
-      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at')
+  IF TG_TABLE_NAME='learning_review' THEN
+    IF (to_jsonb(NEW)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at'-'steps')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at'-'steps')
       OR (OLD.state<>'running' AND NEW IS DISTINCT FROM OLD)
     THEN RAISE EXCEPTION 'Learning admission and settled evidence are immutable'; END IF;
-  ELSIF TG_TABLE_NAME='learning_trial_step' THEN
-    IF (to_jsonb(NEW)-'state'-'result'-'completed_at')
-      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'result'-'completed_at')
-      OR (OLD.state<>'running' AND NEW IS DISTINCT FROM OLD)
-    THEN RAISE EXCEPTION 'Learning comparison calls are immutable'; END IF;
   ELSIF TG_TABLE_NAME='learning_case' THEN
     IF (to_jsonb(NEW)-'batch_id') IS DISTINCT FROM (to_jsonb(OLD)-'batch_id')
       OR (OLD.batch_id IS NOT NULL AND NEW IS DISTINCT FROM OLD)
     THEN RAISE EXCEPTION 'Learning source evidence is immutable'; END IF;
   ELSIF TG_TABLE_NAME='learning_proposal' THEN
-    IF (to_jsonb(NEW)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id')
-      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id')
-      OR (OLD.state<>'proposed' AND NEW IS DISTINCT FROM OLD)
-    THEN RAISE EXCEPTION 'Learning proposals and decisions are immutable'; END IF;
-  ELSIF TG_TABLE_NAME='learning_application' THEN
-    IF (to_jsonb(NEW)-'state'-'reverted_revision_id'-'reverted_version'-'reverted_by'-'reverted_at'-'reverted_comparison_id')
-      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'reverted_revision_id'-'reverted_version'-'reverted_by'-'reverted_at'-'reverted_comparison_id')
-      OR (OLD.state<>'applied' AND NEW IS DISTINCT FROM OLD)
-    THEN RAISE EXCEPTION 'Learning application and rollback evidence are immutable'; END IF;
+    IF (to_jsonb(NEW)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id'-'application')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id'-'application') THEN
+      RAISE EXCEPTION 'Learning proposals and decisions are immutable';
+    END IF;
+    IF OLD.state<>'proposed' THEN
+      IF OLD.state='applied' AND (to_jsonb(NEW)-'application') IS NOT DISTINCT FROM (to_jsonb(OLD)-'application') THEN
+        IF OLD.application IS NULL THEN
+          -- Allow recording initial application JSON right after proposal transitions to applied.
+          NULL;
+        ELSIF OLD.application->>'state'='applied'
+          AND NEW.application IS NOT NULL
+          AND (NEW.application-'state'-'revertedRevisionId'-'revertedVersion'-'revertedBy'-'revertedAt'-'revertedComparisonId')
+            IS NOT DISTINCT FROM (OLD.application-'state'-'revertedRevisionId'-'revertedVersion'-'revertedBy'-'revertedAt'-'revertedComparisonId') THEN
+          NULL;
+        ELSIF NEW IS DISTINCT FROM OLD THEN
+          RAISE EXCEPTION 'Learning application and rollback evidence are immutable';
+        END IF;
+      ELSIF NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'Learning proposals and decisions are immutable';
+      END IF;
+    END IF;
   ELSE
-    RAISE EXCEPTION 'Learning command receipts are immutable';
+    RAISE EXCEPTION '% is immutable', TG_TABLE_NAME;
   END IF;
   RETURN NEW;
 END; $$;
@@ -898,234 +885,82 @@ $$;
 -- Native 19-runtime-functions.sql.
 -- Runtime routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.image_build_is_public(secret_key text) RETURNS boolean
-    LANGUAGE sql STABLE
-    AS $_$
-  SELECT $1 IS NULL OR EXISTS (
-    SELECT 1 FROM factory.environment_write write
-    WHERE write.secret_key=$1 AND write.state='committed'
-      AND write.manifest->'registries'='[]'::jsonb
-      AND jsonb_typeof(write.manifest->'variables')='array'
-      AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(write.manifest->'variables') variable
-        WHERE variable->'build' IS DISTINCT FROM 'false'::jsonb
-      )
-  )
-$_$;
-
-CREATE FUNCTION factory.protect_developer_ide_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.resource_id IS DISTINCT FROM OLD.resource_id
-    OR NEW.service_epoch < OLD.service_epoch THEN
-    RAISE EXCEPTION 'Developer IDE identity is immutable' USING ERRCODE = '23514';
-  END IF;
-  IF NEW.service_epoch = OLD.service_epoch AND (
-    NEW.image IS DISTINCT FROM OLD.image OR
-    (OLD.namespace_uid IS NOT NULL AND NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid) OR
-    (OLD.pod_uid IS NOT NULL AND NEW.pod_uid IS DISTINCT FROM OLD.pod_uid)
-  ) THEN RAISE EXCEPTION 'Developer IDE intent outcome is immutable' USING ERRCODE = '23514'; END IF;
-  IF NEW.service_epoch <> OLD.service_epoch AND (
-    NEW.service_epoch <> OLD.service_epoch + 1 OR OLD.state <> 'stopped' OR NEW.state <> 'create-intended' OR
-    NEW.pod_uid IS NOT NULL OR NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid
-  ) THEN RAISE EXCEPTION 'Stop the Developer IDE before issuing a new epoch' USING ERRCODE = '23514'; END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_development_workspace_identity() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF ROW(NEW.id,NEW.project_id,NEW.kind,NEW.owner_user_id,NEW.ticket_id,NEW.change_id,
-      NEW.source_branch,NEW.source_revision,NEW.created_by,NEW.created_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.kind,OLD.owner_user_id,OLD.ticket_id,OLD.change_id,
-      OLD.source_branch,OLD.source_revision,OLD.created_by,OLD.created_at)
-    THEN RAISE EXCEPTION 'Development Workspace identity and source are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_project_image_preparation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.id<>OLD.id OR NEW.project_id<>OLD.project_id OR NEW.environment<>OLD.environment OR NEW.revision<>OLD.revision OR NEW.environment_version<>OLD.environment_version OR NEW.created_at<>OLD.created_at
-    OR (OLD.runtime_attempt_id IS NOT NULL AND NEW.runtime_attempt_id IS DISTINCT FROM OLD.runtime_attempt_id)
-    OR (OLD.state IN ('succeeded','unsupported','failed') AND (NEW.state<>OLD.state OR NEW.identity IS DISTINCT FROM OLD.identity OR NEW.image IS DISTINCT FROM OLD.image)) THEN
-    RAISE EXCEPTION 'Project image preparation intent and confirmed outcome are immutable' USING ERRCODE='23514';
-  END IF;
-  IF NEW.runtime_attempt_id IS NOT NULL AND OLD.runtime_attempt_id IS NULL AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=NEW.runtime_attempt_id AND project_id=NEW.project_id AND revision=NEW.revision AND isolated_kind='prebuild' AND state='create-intended' AND stop_intended_at IS NULL) THEN
-    RAISE EXCEPTION 'Image preparation must reference matching producer intent' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_repository_mirror_command() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF ROW(NEW.id,NEW.project_id,NEW.created_by,NEW.action,NEW.target_url,NEW.remote_name,
-           NEW.fingerprint,NEW.before_state,NEW.created_at) IS DISTINCT FROM
-       ROW(OLD.id,OLD.project_id,OLD.created_by,OLD.action,OLD.target_url,OLD.remote_name,
-           OLD.fingerprint,OLD.before_state,OLD.created_at)
-       OR (OLD.state IN ('completed','failed','acknowledged') AND NEW IS DISTINCT FROM OLD) THEN
-        RAISE EXCEPTION 'Repository mirror command identity and terminal outcome are immutable';
-    END IF;
-    RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.protect_runtime_attempt_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF ROW(NEW.id,NEW.project_id,NEW.change_id,NEW.workspace_id,NEW.generation,NEW.revision,
-      NEW.isolated_kind,NEW.verification_id,NEW.parent_connector_token_hash,NEW.child_connector_token_hash,
-      NEW.create_intended_at,NEW.created_by,NEW.created_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.change_id,OLD.workspace_id,OLD.generation,OLD.revision,
-      OLD.isolated_kind,OLD.verification_id,OLD.parent_connector_token_hash,OLD.child_connector_token_hash,
-      OLD.create_intended_at,OLD.created_by,OLD.created_at)
-    OR (OLD.declared_apps<>'[]'::jsonb AND NEW.declared_apps IS DISTINCT FROM OLD.declared_apps)
-     THEN RAISE EXCEPTION 'Runtime Attempt identity and create intent are immutable'; END IF;
-  IF (OLD.stop_intended_at IS NOT NULL AND NEW.stop_intended_at IS DISTINCT FROM OLD.stop_intended_at)
-    OR (OLD.stopped_at IS NOT NULL AND NEW.stopped_at IS DISTINCT FROM OLD.stopped_at)
-    OR (NEW.stop_intended_at IS NOT NULL AND NEW.state NOT IN ('stopping','stopped')) THEN
-    RAISE EXCEPTION 'Final Stop intent cannot be cleared or reopen execution';
+  IF TG_OP='DELETE' THEN
+    IF OLD.atespace IS NOT NULL THEN RAISE EXCEPTION 'Native names and bindings cannot be reused'; END IF;
+    RETURN OLD;
   END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_runtime_environment_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE project uuid; expected_environment text; current_version bigint; current_key text; publication boolean;
-BEGIN
-  IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'Runtime environment intent is immutable' USING ERRCODE='23514'; END IF;
-  SELECT project_id,isolated_kind='publication',CASE WHEN isolated_kind='staging' THEN 'main-preview' ELSE 'development' END
-    INTO project,publication,expected_environment FROM factory.runtime_attempt
-    WHERE id=NEW.runtime_attempt_id AND state='create-intended' AND stop_intended_at IS NULL;
-  IF publication THEN
-    IF NEW.environment<>'development' OR NEW.version<>0 OR NEW.secret_key IS NOT NULL THEN
-      RAISE EXCEPTION 'Publication cannot inherit Project environments' USING ERRCODE='23514';
+  IF TG_OP='UPDATE' THEN
+    IF ROW(NEW.id,NEW.project_id,NEW.change_id,NEW.workspace_id,NEW.generation,NEW.revision,
+        NEW.isolated_kind,NEW.verification_id,NEW.parent_connector_token_hash,
+        NEW.create_intended_at,NEW.created_by,NEW.created_at)
+      IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.change_id,OLD.workspace_id,OLD.generation,OLD.revision,
+        OLD.isolated_kind,OLD.verification_id,OLD.parent_connector_token_hash,
+        OLD.create_intended_at,OLD.created_by,OLD.created_at)
+      OR (OLD.declared_apps<>'[]'::jsonb AND NEW.declared_apps IS DISTINCT FROM OLD.declared_apps)
+       THEN RAISE EXCEPTION 'Runtime Attempt identity and create intent are immutable'; END IF;
+    IF (OLD.stop_intended_at IS NOT NULL AND NEW.stop_intended_at IS DISTINCT FROM OLD.stop_intended_at)
+      OR (NEW.stop_intended_at IS NOT NULL AND NEW.state NOT IN ('stopping','stopped')) THEN
+      RAISE EXCEPTION 'Final Stop intent cannot be cleared or reopen execution';
     END IF;
-    RETURN NEW;
   END IF;
-  SELECT COALESCE((SELECT environment FROM factory.project_image_preparation WHERE runtime_attempt_id=NEW.runtime_attempt_id),expected_environment) INTO expected_environment;
-  IF project IS NULL OR expected_environment<>NEW.environment THEN
-    RAISE EXCEPTION 'Runtime environment requires matching active create intent' USING ERRCODE='23514';
-  END IF;
-  SELECT version,secret_key INTO current_version,current_key FROM factory.project_environment
-    WHERE project_id=project AND environment=expected_environment;
-  IF NEW.version<>COALESCE(current_version,0) OR NEW.secret_key IS DISTINCT FROM current_key THEN
-    RAISE EXCEPTION 'Runtime environment must reference current protected values' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END; $$;
-
-CREATE FUNCTION factory.protect_substrate_binding() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native names and bindings cannot be reused'; END IF;
-  IF TG_OP='INSERT' THEN
-    IF NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.id=NEW.runtime_attempt_id
- AND a.state='create-intended' AND a.stop_intended_at IS NULL
-      AND (EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=a.workspace_id)
-        OR EXISTS(SELECT 1 FROM factory.substrate_verification p WHERE p.verification_id=a.verification_id
-          AND p.runtime_attempt_id=a.id AND p.generation=a.generation AND a.isolated_kind='verification'
-          AND a.workspace_id IS NULL AND a.change_id IS NULL AND p.atespace IS NOT NULL
-          AND p.policy IS NOT NULL AND p.template IS NOT NULL
-          AND NEW.intent->>'projectID'=a.project_id::text
-          AND NEW.intent->>'generation'=a.generation::text
-          AND NEW.intent->>'verificationID'=p.verification_id::text
-          AND NEW.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
-          AND NEW.intent->>'templateUID'=p.template#>>'{metadata,uid}'
-          AND NEW.intent->>'templateVersion'=p.template#>>'{metadata,version}'
-          AND NEW.intent->>'templateSHA256'=p.intent->>'templateSHA256')
-        OR EXISTS(SELECT 1 FROM factory.substrate_prebuild p JOIN factory.project_image_preparation preparation ON preparation.id=p.preparation_id
-          WHERE p.runtime_attempt_id=a.id AND p.generation=a.generation AND a.isolated_kind='prebuild'
-            AND a.workspace_id IS NULL AND a.change_id IS NULL AND preparation.runtime_attempt_id=a.id
-            AND preparation.project_id=a.project_id AND preparation.revision=a.revision
-            AND p.atespace IS NOT NULL AND p.policy IS NOT NULL AND p.template IS NOT NULL
-            AND NOT p.atespace_rejected AND NOT p.policy_rejected AND NOT p.template_rejected
-            AND NEW.intent->>'projectID'=a.project_id::text AND NEW.intent->>'generation'=a.generation::text
-            AND NEW.intent->>'preparationID'=p.preparation_id::text
-            AND NEW.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
-            AND NEW.intent->>'templateUID'=p.template#>>'{metadata,uid}'
-            AND NEW.intent->>'templateVersion'=p.template#>>'{metadata,version}'
-            AND NEW.intent->>'templateSHA256'=p.intent->>'templateSHA256'
-            AND NEW.intent->'environment'=p.intent->'environment')
-        OR EXISTS(SELECT 1 FROM factory.substrate_isolated p
-          WHERE p.runtime_attempt_id=a.id AND p.project_id=a.project_id AND p.generation=a.generation
-            AND p.kind=a.isolated_kind::text AND a.workspace_id IS NULL AND a.change_id IS NULL AND a.verification_id IS NULL
-            AND p.intent->>'revision'=a.revision AND p.intent->>'createdBy'=a.created_by::text
-            AND p.atespace IS NOT NULL AND p.policy IS NOT NULL AND p.template IS NOT NULL
-            AND NOT p.atespace_rejected AND NOT p.policy_rejected AND NOT p.template_rejected
-            AND NEW.intent->>'projectID'=a.project_id::text AND NEW.intent->>'generation'=a.generation::text
-            AND NEW.intent->>'isolatedID'=p.owner_id::text AND NEW.intent->>'isolatedKind'=p.kind
-            AND (NEW.intent->>'promotionID') IS NOT DISTINCT FROM p.intent->>'promotionID'
-            AND NEW.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
-            AND NEW.intent->>'templateUID'=p.template#>>'{metadata,uid}'
-            AND NEW.intent->>'templateVersion'=p.template#>>'{metadata,version}'
-            AND NEW.intent->>'templateSHA256'=p.intent->>'templateSHA256'
-            AND NEW.intent->'environment'=p.intent->'environment'))
-      AND NEW.atespace='fa-'||replace(a.id::text,'-','')
-      AND NEW.actor_name='runtime-'||replace(a.id::text,'-',''))
+  IF (TG_OP='INSERT' AND NEW.atespace IS NOT NULL)
+    OR (TG_OP='UPDATE' AND OLD.atespace IS NULL AND NEW.atespace IS NOT NULL) THEN
+    IF NOT (NEW.state='create-intended' AND NEW.stop_intended_at IS NULL
+      AND (EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id)
+        OR EXISTS(SELECT 1 FROM factory.substrate_provision p WHERE p.kind='verification'
+          AND p.owner_id=NEW.verification_id
+          AND p.runtime_attempt_id=NEW.id AND p.generation=NEW.generation AND NEW.isolated_kind='verification'
+          AND NEW.workspace_id IS NULL AND NEW.change_id IS NULL
+          AND jsonb_typeof(p.resources->'atespace'->'value')='object'
+          AND jsonb_typeof(p.resources->'policy'->'value')='object'
+          AND jsonb_typeof(p.resources->'template'->'value')='object'
+          AND NEW.binding_intent->>'projectID'=NEW.project_id::text
+          AND NEW.binding_intent->>'generation'=NEW.generation::text
+          AND NEW.binding_intent->>'verificationID'=p.owner_id::text
+          AND NEW.binding_intent->>'atespaceUID'=p.resources#>>'{atespace,value,metadata,uid}'
+          AND NEW.binding_intent->>'templateUID'=p.resources#>>'{template,value,metadata,uid}'
+          AND NEW.binding_intent->>'templateVersion'=p.resources#>>'{template,value,metadata,version}'
+          AND NEW.binding_intent->>'templateSHA256'=p.intent->>'templateSHA256')
+        OR EXISTS(SELECT 1 FROM factory.substrate_provision p
+          WHERE p.kind IN ('staging','publication')
+            AND p.runtime_attempt_id=NEW.id AND p.project_id=NEW.project_id AND p.generation=NEW.generation
+            AND p.kind=NEW.isolated_kind::text AND NEW.workspace_id IS NULL AND NEW.change_id IS NULL AND NEW.verification_id IS NULL
+            AND p.intent->>'revision'=NEW.revision AND p.intent->>'createdBy'=NEW.created_by::text
+            AND jsonb_typeof(p.resources->'atespace'->'value')='object'
+            AND jsonb_typeof(p.resources->'policy'->'value')='object'
+            AND jsonb_typeof(p.resources->'template'->'value')='object'
+            AND NOT COALESCE((p.resources#>>'{atespace,rejected}')::boolean,false)
+            AND NOT COALESCE((p.resources#>>'{policy,rejected}')::boolean,false)
+            AND NOT COALESCE((p.resources#>>'{template,rejected}')::boolean,false)
+            AND NEW.binding_intent->>'projectID'=NEW.project_id::text AND NEW.binding_intent->>'generation'=NEW.generation::text
+            AND NEW.binding_intent->>'isolatedID'=p.owner_id::text AND NEW.binding_intent->>'isolatedKind'=p.kind
+            AND (NEW.binding_intent->>'promotionID') IS NOT DISTINCT FROM p.intent->>'promotionID'
+            AND NEW.binding_intent->>'atespaceUID'=p.resources#>>'{atespace,value,metadata,uid}'
+            AND NEW.binding_intent->>'templateUID'=p.resources#>>'{template,value,metadata,uid}'
+            AND NEW.binding_intent->>'templateVersion'=p.resources#>>'{template,value,metadata,version}'
+            AND NEW.binding_intent->>'templateSHA256'=p.intent->>'templateSHA256'
+            AND NEW.binding_intent->'environment'=p.intent->'environment'))
+      AND NEW.atespace='fa-'||replace(NEW.id::text,'-','')
+      AND NEW.actor_name='runtime-'||replace(NEW.id::text,'-',''))
       THEN RAISE EXCEPTION 'Native binding requires deterministic active Attempt intent'; END IF;
-  ELSIF ROW(NEW.runtime_attempt_id,NEW.atespace,NEW.actor_name,NEW.intent)
-      IS DISTINCT FROM ROW(OLD.runtime_attempt_id,OLD.atespace,OLD.actor_name,OLD.intent)
+  ELSIF TG_OP='UPDATE' AND OLD.atespace IS NOT NULL AND (
+    ROW(NEW.atespace,NEW.actor_name,NEW.binding_intent)
+      IS DISTINCT FROM ROW(OLD.atespace,OLD.actor_name,OLD.binding_intent)
     OR (OLD.actor_uid IS NOT NULL AND NEW.actor_uid IS DISTINCT FROM OLD.actor_uid)
     OR (OLD.create_attempted_at IS NOT NULL AND NEW.create_attempted_at IS DISTINCT FROM OLD.create_attempted_at)
     OR (OLD.create_rejected AND NOT NEW.create_rejected)
     OR (OLD.delete_intended_at IS NOT NULL AND NEW.delete_intended_at IS DISTINCT FROM OLD.delete_intended_at)
-    OR (OLD.deleted_at IS NOT NULL AND NEW IS DISTINCT FROM OLD)
+    OR (OLD.deleted_at IS NOT NULL AND ROW(NEW.atespace,NEW.actor_name,NEW.binding_intent,NEW.actor_uid,
+        NEW.create_attempted_at,NEW.create_rejected,NEW.delete_intended_at,NEW.deleted_at,
+        NEW.observation,NEW.checkpoint)
+      IS DISTINCT FROM ROW(OLD.atespace,OLD.actor_name,OLD.binding_intent,OLD.actor_uid,
+        OLD.create_attempted_at,OLD.create_rejected,OLD.delete_intended_at,OLD.deleted_at,
+        OLD.observation,OLD.checkpoint)))
     THEN RAISE EXCEPTION 'Native binding identity and dispatch facts are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_prebuild() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE raw bytea;
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native prebuild provisioning names cannot be reused'; END IF;
-  IF TG_OP='INSERT' THEN
-    raw:=digest(NEW.preparation_id::text||':'||NEW.generation::text,'sha256');
-    raw:=set_byte(raw,6,(get_byte(raw,6)&15)|80);
-    raw:=set_byte(raw,8,(get_byte(raw,8)&63)|128);
-    IF NEW.runtime_attempt_id<>encode(substring(raw from 1 for 16),'hex')::uuid
-      OR NOT EXISTS(SELECT 1 FROM factory.project_image_preparation p JOIN factory.project project ON project.id=p.project_id
-        LEFT JOIN factory.project_environment environment ON environment.project_id=p.project_id AND environment.environment=p.environment
-        WHERE p.id=NEW.preparation_id AND p.runtime_attempt_id IS NULL AND p.state='pending'
-          AND NEW.intent#>>'{configuration,projectID}'=p.project_id::text
-          AND NEW.intent#>>'{configuration,database}'=current_database()
-          AND NEW.intent->>'revision'=p.revision AND NEW.intent->>'repository'=project.repository_url
-          AND NEW.intent#>>'{environment,environment}'=p.environment
-          AND NEW.intent#>>'{environment,version}'=p.environment_version::text
-          AND p.environment_version=COALESCE(environment.version,0)
-          AND (NEW.intent#>>'{environment,secretKey}') IS NOT DISTINCT FROM environment.secret_key
-          AND EXISTS(SELECT 1 FROM factory.environment_write publication_grant
-            WHERE publication_grant.project_id=p.project_id AND publication_grant.environment=p.environment
-              AND publication_grant.secret_key=environment.secret_key AND publication_grant.base_version+1=p.environment_version
-              AND publication_grant.state='committed' AND publication_grant.manifest @> jsonb_build_object('registries',jsonb_build_array(
-                jsonb_build_object('host',NEW.intent#>>'{configuration,prebuildRegistry}','hasPassword',true))))
-          AND NEW.intent->>'imageRepository'=NEW.intent#>>'{configuration,prebuildRegistry}'||'/open-factory/prebuilds/'||p.project_id::text
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.id=NEW.runtime_attempt_id))
-      THEN RAISE EXCEPTION 'Native prebuild requires deterministic fresh exact-input intent'; END IF;
-  ELSIF ROW(NEW.preparation_id,NEW.runtime_attempt_id,NEW.generation,NEW.intent)
-      IS DISTINCT FROM ROW(OLD.preparation_id,OLD.runtime_attempt_id,OLD.generation,OLD.intent)
-    OR (OLD.atespace_attempted_at IS NOT NULL AND NEW.atespace_attempted_at IS DISTINCT FROM OLD.atespace_attempted_at)
-    OR (OLD.policy_attempted_at IS NOT NULL AND NEW.policy_attempted_at IS DISTINCT FROM OLD.policy_attempted_at)
-    OR (OLD.template_attempted_at IS NOT NULL AND NEW.template_attempted_at IS DISTINCT FROM OLD.template_attempted_at)
-    OR (OLD.atespace IS NOT NULL AND NEW.atespace IS DISTINCT FROM OLD.atespace)
-    OR (OLD.policy IS NOT NULL AND NEW.policy IS DISTINCT FROM OLD.policy)
-    OR (OLD.template IS NOT NULL AND NEW.template IS DISTINCT FROM OLD.template)
-    OR (OLD.atespace_rejected AND NOT NEW.atespace_rejected)
-    OR (OLD.policy_rejected AND NOT NEW.policy_rejected)
-    OR (OLD.template_rejected AND NOT NEW.template_rejected)
-    THEN RAISE EXCEPTION 'Native prebuild provisioning identity and dispatch facts are immutable';
-  END IF;
   RETURN NEW;
 END $$;
 
@@ -1148,9 +983,9 @@ BEGIN
         OR EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.workspace_id=NEW.workspace_id)
         THEN RAISE EXCEPTION 'Initial service Source requires its exact Workspace seed before any Attempt'; END IF;
     ELSIF NEW.owner<>'actor' OR NEW.seed IS NOT NULL
-      OR NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-        WHERE a.workspace_id=NEW.workspace_id AND b.actor_uid=NEW.actor_uid
-          AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
+      OR NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a
+        WHERE a.workspace_id=NEW.workspace_id AND a.actor_uid=NEW.actor_uid
+          AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=a.workspace_id AND n.generation>a.generation))
       THEN RAISE EXCEPTION 'Source requires its current original Actor binding'; END IF;
     RETURN NEW;
@@ -1179,66 +1014,67 @@ BEGIN
         OR OLD.service_base::text IS DISTINCT FROM OLD.seed->>'id'
         OR NOT EXISTS(
           SELECT 1 FROM factory.runtime_attempt current
-          JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
-          JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
+          JOIN factory.substrate_provision provision ON provision.owner_id=current.workspace_id
+            AND provision.kind='workspace' AND provision.generation=current.generation
           WHERE current.workspace_id=NEW.workspace_id
             AND current.project_id::text=OLD.seed->>'projectID' AND current.revision=OLD.seed->>'revision'
             AND (current.state='create-intended' OR (current.state='starting'
-              AND new_binding.intent->>'sourceRestoreProtocol'='2'))
+              AND current.binding_intent->>'sourceRestoreProtocol'='2'))
             AND current.stop_intended_at IS NULL
-            AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
-            AND new_binding.create_attempted_at IS NOT NULL
-            AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
-            AND new_binding.observation#>>'{metadata,uid}'=NEW.actor_uid::text
-            AND new_binding.observation#>>'{metadata,name}'=new_binding.actor_name
-            AND new_binding.observation#>>'{metadata,atespace}'=new_binding.atespace
-            AND new_binding.intent->>'projectID'=current.project_id::text
-            AND new_binding.intent->>'workspaceID'=NEW.workspace_id::text
-            AND new_binding.intent->>'generation'=current.generation::text
-            AND new_binding.intent->>'atespaceUID'=provision.atespace#>>'{metadata,uid}'
-            AND new_binding.intent->>'templateUID'=provision.template#>>'{metadata,uid}'
-            AND new_binding.intent->>'templateVersion'=provision.template#>>'{metadata,version}'
-            AND new_binding.intent->>'templateSHA256'=provision.intent->>'templateSHA256'
-            AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
-            AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
+            AND current.actor_uid=NEW.actor_uid AND NOT current.create_rejected
+            AND current.create_attempted_at IS NOT NULL
+            AND current.delete_intended_at IS NULL AND current.deleted_at IS NULL
+            AND current.observation#>>'{metadata,uid}'=NEW.actor_uid::text
+            AND current.observation#>>'{metadata,name}'=current.actor_name
+            AND current.observation#>>'{metadata,atespace}'=current.atespace
+            AND current.binding_intent->>'projectID'=current.project_id::text
+            AND current.binding_intent->>'workspaceID'=NEW.workspace_id::text
+            AND current.binding_intent->>'generation'=current.generation::text
+            AND current.binding_intent->>'atespaceUID'=provision.resources#>>'{atespace,value,metadata,uid}'
+            AND current.binding_intent->>'templateUID'=provision.resources#>>'{template,value,metadata,uid}'
+            AND current.binding_intent->>'templateVersion'=provision.resources#>>'{template,value,metadata,version}'
+            AND current.binding_intent->>'templateSHA256'=provision.intent->>'templateSHA256'
+            AND jsonb_typeof(provision.resources->'atespace'->'value')='object'
+            AND jsonb_typeof(provision.resources->'policy'->'value')='object'
+            AND jsonb_typeof(provision.resources->'template'->'value')='object'
+            AND NOT COALESCE((provision.resources#>>'{atespace,rejected}')::boolean,false)
+            AND NOT COALESCE((provision.resources#>>'{policy,rejected}')::boolean,false)
+            AND NOT COALESCE((provision.resources#>>'{template,rejected}')::boolean,false)
             AND provision.intent->>'revision'=OLD.seed->>'revision'
             AND provision.intent->>'branch'=OLD.seed->>'branch'
             AND provision.intent->>'repositoryURL'=OLD.seed->>'repositoryURL'
             AND NOT EXISTS(
               SELECT 1 FROM factory.runtime_attempt other
-              LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=other.id
               WHERE other.workspace_id=current.workspace_id AND other.id<>current.id
                 AND (other.generation<current.generation AND other.state='stopped'
-                  AND retired.deleted_at IS NOT NULL AND retired.intent->>'sourceRestoreProtocol'='2') IS NOT TRUE))
+                  AND other.deleted_at IS NOT NULL AND other.binding_intent->>'sourceRestoreProtocol'='2') IS NOT TRUE))
         THEN RAISE EXCEPTION 'Source first Actor transfer requires its confirmed seed and exact generation-one native binding'; END IF;
     ELSIF NOT EXISTS(
         SELECT 1 FROM factory.runtime_attempt predecessor
-        JOIN factory.substrate_binding old_binding ON old_binding.runtime_attempt_id=predecessor.id
         JOIN factory.runtime_attempt current ON current.workspace_id=predecessor.workspace_id
           AND current.generation>predecessor.generation
-        JOIN factory.substrate_binding new_binding ON new_binding.runtime_attempt_id=current.id
-        JOIN factory.substrate_workspace provision ON provision.workspace_id=current.workspace_id AND provision.generation=current.generation
+        JOIN factory.substrate_provision provision ON provision.owner_id=current.workspace_id
+          AND provision.kind='workspace' AND provision.generation=current.generation
         WHERE predecessor.workspace_id=NEW.workspace_id AND predecessor.state='stopped'
-          AND old_binding.actor_uid=OLD.actor_uid AND old_binding.deleted_at IS NOT NULL
+          AND predecessor.actor_uid=OLD.actor_uid AND predecessor.deleted_at IS NOT NULL
           AND (current.state='create-intended' OR (current.state='starting'
-            AND new_binding.intent->>'sourceRestoreProtocol'='2'))
+            AND current.binding_intent->>'sourceRestoreProtocol'='2'))
           AND current.stop_intended_at IS NULL
-          AND new_binding.actor_uid=NEW.actor_uid AND NOT new_binding.create_rejected
-          AND new_binding.create_attempted_at IS NOT NULL
-          AND new_binding.delete_intended_at IS NULL AND new_binding.deleted_at IS NULL
-          AND new_binding.intent->>'workspaceID'=NEW.workspace_id::text
-          AND new_binding.intent->>'generation'=current.generation::text
-          AND new_binding.intent->>'atespaceUID'=provision.atespace#>>'{metadata,uid}'
-          AND new_binding.intent->>'templateUID'=provision.template#>>'{metadata,uid}'
-          AND new_binding.intent->>'templateVersion'=provision.template#>>'{metadata,version}'
-          AND new_binding.intent->>'templateSHA256'=provision.intent->>'templateSHA256'
+          AND current.actor_uid=NEW.actor_uid AND NOT current.create_rejected
+          AND current.create_attempted_at IS NOT NULL
+          AND current.delete_intended_at IS NULL AND current.deleted_at IS NULL
+          AND current.binding_intent->>'workspaceID'=NEW.workspace_id::text
+          AND current.binding_intent->>'generation'=current.generation::text
+          AND current.binding_intent->>'atespaceUID'=provision.resources#>>'{atespace,value,metadata,uid}'
+          AND current.binding_intent->>'templateUID'=provision.resources#>>'{template,value,metadata,uid}'
+          AND current.binding_intent->>'templateVersion'=provision.resources#>>'{template,value,metadata,version}'
+          AND current.binding_intent->>'templateSHA256'=provision.intent->>'templateSHA256'
           AND NOT EXISTS(
             SELECT 1 FROM factory.runtime_attempt skipped
-            LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=skipped.id
             WHERE skipped.workspace_id=current.workspace_id
               AND skipped.generation>predecessor.generation AND skipped.generation<current.generation
-              AND (skipped.state='stopped' AND retired.deleted_at IS NOT NULL
-                AND retired.intent->>'sourceRestoreProtocol'='2') IS NOT TRUE)
+              AND (skipped.state='stopped' AND skipped.deleted_at IS NOT NULL
+                AND skipped.binding_intent->>'sourceRestoreProtocol'='2') IS NOT TRUE)
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=current.workspace_id AND newer.generation>current.generation))
       THEN RAISE EXCEPTION 'Source Actor transfer requires its confirmed stopped predecessor and current native successor'; END IF;
   END IF;
@@ -1265,24 +1101,26 @@ BEGIN
       OR NEW.checkpoint_id IS NOT NULL OR NEW.generation<>OLD.generation
       OR (NEW.owner='service' AND NEW.service_base IS DISTINCT FROM OLD.checkpoint_id)
       THEN RAISE EXCEPTION 'Source transfer requires a completely confirmed frozen generation'; END IF;
-    IF NEW.actor_uid=OLD.actor_uid AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-      WHERE a.workspace_id=NEW.workspace_id AND b.actor_uid=NEW.actor_uid
-        AND b.checkpoint->>'actorUID'=NEW.actor_uid::text
-        AND b.checkpoint->>'fidelity'='SNAPSHOT_FIDELITY_ROOTFS'
-        AND b.checkpoint#>>'{durableSnapshot,state}'='SNAPSHOT_STORAGE_STATE_COMPLETED'
-        AND ((a.state='paused' AND b.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
-          AND b.checkpoint->>'generation'=b.observation#>>'{status,lastAssignedGeneration}')
+    IF NEW.actor_uid=OLD.actor_uid AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a
+      WHERE a.workspace_id=NEW.workspace_id AND a.actor_uid=NEW.actor_uid
+        AND a.checkpoint->>'actorUID'=NEW.actor_uid::text
+        AND a.checkpoint->>'fidelity' IN ('SNAPSHOT_FIDELITY_ROOTFS','SNAPSHOT_FIDELITY_MEMORY')
+        AND a.checkpoint#>>'{durableSnapshot,state}'='SNAPSHOT_STORAGE_STATE_COMPLETED'
+        AND ((a.state='paused' AND a.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
+          AND a.checkpoint->>'generation'=a.observation#>>'{status,lastAssignedGeneration}')
           OR (NEW.owner='actor' AND a.state='starting' AND a.stop_intended_at IS NULL
-            AND b.intent->>'sourceRestoreProtocol'='2' AND EXISTS(
-              SELECT 1 FROM factory.substrate_actor_rpc resumed
-              WHERE resumed.runtime_attempt_id=a.id AND resumed.actor_uid=NEW.actor_uid
-                AND resumed.action='resume' AND resumed.origin_checkpoint=b.checkpoint
-                AND resumed.attempted_at IS NOT NULL))))
+            AND a.binding_intent->>'sourceRestoreProtocol'='2' AND EXISTS(
+              SELECT 1 FROM factory.operation resumed
+              WHERE resumed.kind='runtime.actor_rpc' AND resumed.scope_type='runtime_attempt'
+                AND resumed.scope_id=a.id::text AND (resumed.payload->>'actorUid')::uuid=NEW.actor_uid
+                AND resumed.payload->>'action'='resume'
+                AND NULLIF(resumed.payload->'originCheckpoint','null'::jsonb) IS NOT DISTINCT FROM a.checkpoint
+                AND (resumed.payload->>'attemptedAt') IS NOT NULL))))
       AND NOT (NEW.owner='service' AND EXISTS(
-        SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+        SELECT 1 FROM factory.runtime_attempt a
         WHERE a.workspace_id=NEW.workspace_id AND a.state='stopping' AND a.stop_intended_at IS NOT NULL
-          AND b.actor_uid=NEW.actor_uid AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected
-          AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
+          AND a.actor_uid=NEW.actor_uid AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected
+          AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
             WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)))
       THEN RAISE EXCEPTION 'Source transfer requires original durable paused ROOTFS or final Stop intent'; END IF;
@@ -1290,10 +1128,10 @@ BEGIN
     IF OLD.owner='service' AND NOT OLD.writable AND NEW.writable
       AND NEW.writer_epoch=OLD.writer_epoch+1 AND NEW.checkpoint_id IS NULL
       AND EXISTS(
-        SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
+        SELECT 1 FROM factory.runtime_attempt a
         WHERE a.workspace_id=NEW.workspace_id AND a.state='stopping' AND a.stop_intended_at IS NOT NULL
-          AND b.intent->>'sourceRestoreProtocol'='2' AND b.actor_uid IS NOT NULL
-          AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected AND b.deleted_at IS NULL
+          AND a.binding_intent->>'sourceRestoreProtocol'='2' AND a.actor_uid IS NOT NULL
+          AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected AND a.deleted_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
             WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation))
       THEN NULL; -- No v2 writer grant was committed; retain the same saved service tree.
@@ -1307,223 +1145,165 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE FUNCTION factory.protect_substrate_worker_capacity() RETURNS trigger
+CREATE FUNCTION factory.protect_substrate_provision() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+DECLARE
+  previous_generation bigint;
+  previous_provision factory.substrate_provision;
+  k text;
+  old_r jsonb;
+  new_r jsonb;
 BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native worker capacity names cannot be reused'; END IF;
-  IF TG_OP='INSERT' AND (
-    NEW.intent->>'database' IS DISTINCT FROM current_database()
-    OR NEW.intent#>>'{node,uid}' IS DISTINCT FROM NEW.node_uid::text
-    OR NEW.intent#>>'{pool,metadata,name}' IS DISTINCT FROM 'factory-native-'||substring(encode(digest(NEW.owner||':'||NEW.node_uid::text,'sha256'),'hex') from 1 for 32)
-    OR NEW.intent#>>'{pool,metadata,labels,factory.dev/native-capacity}' IS DISTINCT FROM NEW.owner
-    OR NEW.intent#>>'{pool,metadata,annotations,factory.dev/creation-intent}' IS NULL)
-    THEN RAISE EXCEPTION 'Native worker capacity requires deterministic installation and node intent'; END IF;
-  IF TG_OP='UPDATE' AND (
-    ROW(NEW.owner,NEW.node_uid,NEW.intent) IS DISTINCT FROM ROW(OLD.owner,OLD.node_uid,OLD.intent)
-    OR (OLD.attempted_at IS NOT NULL AND NEW.attempted_at IS DISTINCT FROM OLD.attempted_at)
-    OR (OLD.rejected AND NOT NEW.rejected)
-    OR (OLD.pool IS NOT NULL AND NEW.pool IS DISTINCT FROM OLD.pool))
-    THEN RAISE EXCEPTION 'Native worker capacity intent and creation facts are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_workspace() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE previous_generation bigint;
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native Workspace provisioning names cannot be reused'; END IF;
+  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native provisioning names cannot be reused'; END IF;
   IF TG_OP='INSERT' THEN
-    SELECT max(generation) INTO previous_generation FROM factory.substrate_workspace
-      WHERE workspace_id=NEW.workspace_id;
-    IF (previous_generation IS NULL AND NEW.generation<>1)
-      OR (previous_generation IS NOT NULL AND (
-        NEW.generation<>previous_generation+1 OR NOT EXISTS(
-          SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-          JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id
-          WHERE a.workspace_id=NEW.workspace_id AND a.generation=previous_generation
- AND a.state='stopped' AND b.deleted_at IS NOT NULL
-            AND s.owner='service' AND s.writable AND s.service_base IS NOT NULL
-            AND ((s.actor_uid=b.actor_uid AND s.checkpoint IS NOT NULL)
-              OR (b.intent->>'sourceRestoreProtocol'='2'
-                AND (s.checkpoint IS NOT NULL OR s.seed_confirmed_at IS NOT NULL))))))
-      THEN RAISE EXCEPTION 'Native Workspace successor requires exact cleanup and independent Source'; END IF;
-    IF NOT EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id
-
-      AND (w.kind='personal' OR EXISTS (
-        SELECT 1 FROM factory.change c JOIN factory.ticket t ON t.id=c.ticket_id
-        JOIN factory.branch_create_operation b ON b.change_id=c.id
-        WHERE c.id=w.change_id AND c.ticket_id=w.ticket_id AND c.project_id=w.project_id
-          AND c.cancel_requested_at IS NULL AND c.state IN ('starting','active','failed')
-          AND t.trashed_at IS NULL AND b.state='succeeded' AND b.observed_head_sha=c.base_sha
-          AND w.source_revision=c.base_sha AND w.source_branch=c.branch_name))
-      AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.workspace_id=w.id AND a.generation>=NEW.generation))
-      THEN RAISE EXCEPTION 'Native provisioning requires a fresh personal or approved Ticket Workspace'; END IF;
-  ELSIF ROW(NEW.workspace_id,NEW.generation,NEW.intent) IS DISTINCT FROM ROW(OLD.workspace_id,OLD.generation,OLD.intent)
-    OR (OLD.atespace_attempted_at IS NOT NULL AND NEW.atespace_attempted_at IS DISTINCT FROM OLD.atespace_attempted_at)
-    OR (OLD.policy_attempted_at IS NOT NULL AND NEW.policy_attempted_at IS DISTINCT FROM OLD.policy_attempted_at)
-    OR (OLD.template_attempted_at IS NOT NULL AND NEW.template_attempted_at IS DISTINCT FROM OLD.template_attempted_at)
-    OR (OLD.atespace IS NOT NULL AND NEW.atespace IS DISTINCT FROM OLD.atespace)
-    OR (OLD.policy IS NOT NULL AND NEW.policy IS DISTINCT FROM OLD.policy)
-    OR (OLD.template IS NOT NULL AND NEW.template IS DISTINCT FROM OLD.template)
-    OR (OLD.atespace_rejected AND NOT NEW.atespace_rejected)
-    OR (OLD.policy_rejected AND NOT NEW.policy_rejected)
-    OR (OLD.template_rejected AND NOT NEW.template_rejected)
-    THEN RAISE EXCEPTION 'Native provisioning identity and dispatch facts are immutable';
+    IF NEW.kind='workspace' THEN
+      SELECT max(generation) INTO previous_generation FROM factory.substrate_provision
+        WHERE owner_id=NEW.owner_id AND kind='workspace';
+      IF (previous_generation IS NULL AND NEW.generation<>1)
+        OR (previous_generation IS NOT NULL AND (
+          NEW.generation<>previous_generation+1 OR NOT EXISTS(
+            SELECT 1 FROM factory.runtime_attempt a
+            JOIN factory.substrate_source s ON s.workspace_id=a.workspace_id
+            WHERE a.workspace_id=NEW.owner_id AND a.generation=previous_generation
+              AND a.state='stopped' AND a.deleted_at IS NOT NULL
+              AND s.owner='service' AND s.writable AND s.service_base IS NOT NULL
+              AND ((s.actor_uid=a.actor_uid AND s.checkpoint IS NOT NULL)
+                OR (a.binding_intent->>'sourceRestoreProtocol'='2'
+                  AND (s.checkpoint IS NOT NULL OR s.seed_confirmed_at IS NOT NULL))))))
+        THEN RAISE EXCEPTION 'Native Workspace successor requires exact cleanup and independent Source'; END IF;
+      IF NOT EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.owner_id
+        AND (w.kind='personal' OR EXISTS (
+          SELECT 1 FROM factory.change c JOIN factory.ticket t ON t.id=c.ticket_id
+          JOIN factory.operation b ON b.kind='delivery.branch_create' AND b.scope_type='change' AND b.scope_id=c.id::text
+          WHERE c.id=w.change_id AND c.ticket_id=w.ticket_id AND c.project_id=w.project_id
+            AND c.cancel_requested_at IS NULL AND c.state IN ('starting','active','failed')
+            AND t.trashed_at IS NULL AND b.state='succeeded' AND b.result->>'observedHeadSha'=c.base_sha
+            AND w.source_revision=c.base_sha AND w.source_branch=c.branch_name))
+        AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.workspace_id=w.id AND a.generation>=NEW.generation))
+        THEN RAISE EXCEPTION 'Native provisioning requires a fresh personal or approved Ticket Workspace'; END IF;
+    ELSIF NEW.kind='verification' THEN
+      SELECT * INTO previous_provision FROM factory.substrate_provision
+        WHERE owner_id=NEW.owner_id AND kind='verification' ORDER BY generation DESC LIMIT 1;
+      IF (previous_provision.runtime_attempt_id IS NULL AND NEW.generation<>1)
+        OR (previous_provision.runtime_attempt_id IS NOT NULL AND (
+          NEW.generation<>previous_provision.generation+1 OR NOT EXISTS(
+            SELECT 1 FROM factory.runtime_attempt a
+            JOIN factory.verification v ON v.id=NEW.owner_id
+            JOIN factory.audit_event decision ON decision.kind='usage.policy_command'
+              AND decision.scope_type='execution_policy'
+              AND decision.scope_id='checks-bootstrap-retry:'||v.change_id::text
+            WHERE a.id=previous_provision.runtime_attempt_id AND a.verification_id=v.id
+              AND a.state='stopped' AND a.deleted_at IS NOT NULL
+              AND decision.payload->'input'->>'verificationID'=v.id::text
+              AND decision.payload->'input'->>'runtimeAttemptID'=a.id::text
+              AND decision.payload->'result'->>'runtimeAttemptID'=a.id::text
+              AND decision.payload->'result'->>'state'='failed')))
+        THEN RAISE EXCEPTION 'Native Verification successor requires exact cleanup and an explicit bootstrap retry decision'; END IF;
+      IF NEW.runtime_attempt_id<>factory.deterministic_uuid(NEW.owner_id::text||':'||NEW.generation::text)
+        OR NOT EXISTS(SELECT 1 FROM factory.verification v JOIN factory.change c ON c.id=v.change_id
+          JOIN factory.ticket t ON t.id=c.ticket_id
+          WHERE v.id=NEW.owner_id AND v.runtime_attempt_id IS NULL
+            AND v.state='pending' AND v.action_run_id IS NOT NULL AND v.runner_uuid IS NOT NULL
+            AND v.runner_token IS NOT NULL AND v.runner_job_handle IS NOT NULL
+            AND c.state='active' AND c.cancel_requested_at IS NULL AND t.trashed_at IS NULL
+            AND NEW.intent#>>'{configuration,projectID}'=c.project_id::text
+            AND NEW.intent#>>'{configuration,database}'=current_database()
+            AND NEW.intent->>'revision'=v.commit_sha AND NEW.intent->>'jobHandle'=v.runner_job_handle
+            AND NEW.intent->>'runnerUUID'=v.runner_uuid::text
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session s WHERE s.change_id=c.id AND (s.state='stopped' OR s.stop_pending))
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.id=NEW.runtime_attempt_id))
+        THEN RAISE EXCEPTION 'Native Verification requires deterministic fresh exact-job intent'; END IF;
+    ELSE
+      IF NEW.runtime_attempt_id<>factory.deterministic_uuid(NEW.owner_id::text||':'||NEW.generation::text)
+        OR (NEW.intent#>>'{configuration,projectID}') IS DISTINCT FROM NEW.project_id::text
+        OR (NEW.intent#>>'{configuration,database}') IS DISTINCT FROM current_database()
+        OR NOT EXISTS(SELECT 1 FROM factory.project project WHERE project.id=NEW.project_id
+          AND project.repository_url=NEW.intent->>'repository'
+          AND project.actor_template_path=NEW.intent->>'actorTemplatePath')
+        OR NOT EXISTS(SELECT 1 FROM auth."user" principal WHERE principal.id::text=NEW.intent->>'createdBy'
+          AND (EXISTS(SELECT 1 FROM factory.project_membership member WHERE member.user_id=principal.id AND member.project_id=NEW.project_id)
+            OR EXISTS(SELECT 1 FROM factory.administrator administrator WHERE administrator.user_id=principal.id)))
+        OR EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=NEW.runtime_attempt_id)
+        THEN RAISE EXCEPTION 'Native isolated provisioning requires deterministic fresh product intent'; END IF;
+      IF NEW.kind='publication' THEN
+        IF NEW.intent->>'promotionID' IS NOT NULL OR NOT EXISTS(
+          SELECT 1 FROM factory.operation publication JOIN factory.project_release release ON release.id=(publication.scope_id)::uuid
+          WHERE publication.kind='releases.attempt' AND publication.scope_type='project_release'
+            AND publication.id=NEW.owner_id AND release.project_id=NEW.project_id
+            AND release.created_by::text=NEW.intent->>'createdBy' AND release.commit_sha=NEW.intent->>'revision'
+            AND release.version=NEW.intent->>'version' AND publication.payload->>'jobHandle'=NEW.intent->>'jobHandle'
+            AND publication.payload->>'runnerUuid'=NEW.intent->>'runnerUUID' AND publication.payload->>'runnerToken' IS NOT NULL
+            AND publication.payload->>'runId' IS NOT NULL AND publication.payload->>'dispatchIntendedAt' IS NOT NULL
+            AND publication.payload->>'runtimeAttemptId' IS NULL AND publication.state='running' AND release.state='running'
+            AND publication.id=(SELECT id FROM factory.operation
+              WHERE kind='releases.attempt' AND scope_type='project_release' AND scope_id=release.id::text
+              ORDER BY (payload->>'ordinal')::int DESC LIMIT 1))
+          OR (NEW.intent#>>'{environment,environment}') IS DISTINCT FROM 'development'
+          OR (NEW.intent#>>'{environment,version}') IS DISTINCT FROM '0' OR NEW.intent#>>'{environment,secretKey}' IS NOT NULL
+          THEN RAISE EXCEPTION 'Native publication requires its exact active job and empty Project environment'; END IF;
+      ELSIF NEW.intent->>'promotionID' IS NOT NULL THEN
+        IF NEW.owner_id::text<>NEW.intent->>'promotionID' OR NOT EXISTS(
+          SELECT 1 FROM factory.operation promotion JOIN factory.change change ON change.id::text=promotion.payload->>'changeId'
+          JOIN factory.ticket ticket ON ticket.id=change.ticket_id
+          JOIN factory.operation merge ON merge.kind='delivery.merge' AND merge.scope_type='change'
+            AND merge.scope_id=change.id::text AND merge.state='succeeded'
+            AND merge.payload->>'commitSha'=promotion.payload->>'commitSha'
+            AND merge.result->>'mergeSha'=merge.payload->>'commitSha'
+          JOIN factory.delivery_approval approval ON approval.id::text=merge.payload->>'approvalId'
+            AND approval.change_id=change.id AND approval.commit_sha=merge.payload->>'commitSha'
+          JOIN factory.verification verification ON verification.id=approval.verification_id
+            AND verification.change_id=change.id AND verification.commit_sha=merge.payload->>'commitSha' AND verification.state='succeeded'
+          JOIN factory.candidate_review review ON review.id=approval.candidate_review_id AND review.verification_id=verification.id
+            AND review.change_id=change.id AND review.commit_sha=merge.payload->>'commitSha' AND review.state='passed'
+          WHERE promotion.id=NEW.owner_id AND promotion.kind='delivery.promotion' AND promotion.scope_type='change'
+            AND promotion.scope_id=change.id::text
+            AND promotion.payload->>'projectId'=NEW.project_id::text AND change.project_id=NEW.project_id
+            AND promotion.payload->>'commitSha'=NEW.intent->>'revision' AND promotion.state='pending'
+            AND (promotion.payload->>'replacementRuntimeAttemptId') IS NULL AND change.state='delivering'
+            AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
+            AND EXISTS(SELECT 1 FROM factory.current_promotion WHERE id=promotion.id))
+          THEN RAISE EXCEPTION 'Native Staging replacement requires its approved exact-commit promotion'; END IF;
+      ELSE
+        IF NEW.owner_id<>factory.deterministic_uuid('staging:'||NEW.project_id::text||':1') OR NOT EXISTS(
+          SELECT 1 FROM factory.operation preview
+          WHERE preview.kind='delivery.staging_preview' AND preview.scope_type='project'
+            AND preview.scope_id=NEW.project_id::text
+            AND preview.payload->>'revision'=NEW.intent->>'revision'
+            AND (preview.payload->>'runtimeAttemptId' IS NULL
+              OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor
+                WHERE predecessor.id::text=preview.payload->>'runtimeAttemptId'
+                  AND predecessor.state='stopped' AND predecessor.deleted_at IS NOT NULL)))
+          OR (NEW.generation>1 AND NOT EXISTS(
+            SELECT 1 FROM factory.substrate_provision previous JOIN factory.runtime_attempt predecessor ON predecessor.id=previous.runtime_attempt_id
+            WHERE previous.owner_id=NEW.owner_id AND previous.kind=NEW.kind AND previous.generation=NEW.generation-1
+              AND predecessor.state='stopped' AND predecessor.deleted_at IS NOT NULL))
+          THEN RAISE EXCEPTION 'Native initial Staging requires its pinned Preview and confirmed predecessor cleanup'; END IF;
+      END IF;
+      IF NEW.kind='staging' AND ((NEW.intent#>>'{environment,environment}') IS DISTINCT FROM 'main-preview'
+        OR NOT EXISTS(SELECT 1 FROM factory.project project
+          LEFT JOIN factory.operation environment ON environment.kind='environments.environment'
+            AND environment.scope_type='project' AND environment.scope_id=project.id::text
+            AND environment.idempotency_key='environments.environment:'||project.id::text||':main-preview'
+          WHERE project.id=NEW.project_id AND NEW.intent#>>'{environment,version}'=COALESCE((environment.payload->>'version')::bigint,0)::text
+            AND (NEW.intent#>>'{environment,secretKey}') IS NOT DISTINCT FROM (environment.payload->>'secretKey')))
+        THEN RAISE EXCEPTION 'Native Staging requires its frozen main-preview environment'; END IF;
+    END IF;
+  ELSE
+    IF ROW(NEW.owner_id,NEW.kind,NEW.generation,NEW.project_id,NEW.runtime_attempt_id,NEW.intent)
+        IS DISTINCT FROM ROW(OLD.owner_id,OLD.kind,OLD.generation,OLD.project_id,OLD.runtime_attempt_id,OLD.intent) THEN
+      RAISE EXCEPTION 'Native provisioning identity and dispatch facts are immutable';
+    END IF;
+    FOREACH k IN ARRAY ARRAY['atespace','policy','template'] LOOP
+      old_r := COALESCE(OLD.resources->k,'{}'::jsonb);
+      new_r := COALESCE(NEW.resources->k,'{}'::jsonb);
+      IF (old_r->>'attemptedAt' IS NOT NULL AND new_r->>'attemptedAt' IS DISTINCT FROM old_r->>'attemptedAt')
+        OR (NULLIF(old_r->'value','null'::jsonb) IS NOT NULL AND new_r->'value' IS DISTINCT FROM old_r->'value')
+        OR (COALESCE((old_r->>'rejected')::boolean,false) AND NOT COALESCE((new_r->>'rejected')::boolean,false)) THEN
+        RAISE EXCEPTION 'Native provisioning identity and dispatch facts are immutable';
+      END IF;
+    END LOOP;
   END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.require_substrate_binding() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NOT EXISTS(SELECT 1 FROM factory.substrate_binding b WHERE b.runtime_attempt_id=NEW.id AND (
-    EXISTS(SELECT 1 FROM factory.development_workspace w WHERE w.id=NEW.workspace_id
-      AND w.project_id=NEW.project_id AND w.change_id IS NOT DISTINCT FROM NEW.change_id)
-    OR EXISTS(SELECT 1 FROM factory.substrate_verification p JOIN factory.verification v ON v.id=p.verification_id
-      JOIN factory.change c ON c.id=v.change_id
-      WHERE p.runtime_attempt_id=NEW.id AND p.verification_id=NEW.verification_id
-        AND p.generation=NEW.generation AND c.project_id=NEW.project_id AND v.commit_sha=NEW.revision
-        AND NEW.workspace_id IS NULL AND NEW.change_id IS NULL AND NEW.isolated_kind='verification'
-        AND b.intent->>'verificationID'=p.verification_id::text)
-    OR EXISTS(SELECT 1 FROM factory.substrate_prebuild p JOIN factory.project_image_preparation preparation ON preparation.id=p.preparation_id
-      WHERE p.runtime_attempt_id=NEW.id AND p.generation=NEW.generation AND preparation.runtime_attempt_id=NEW.id
-        AND preparation.project_id=NEW.project_id AND preparation.revision=NEW.revision
-        AND NEW.workspace_id IS NULL AND NEW.change_id IS NULL AND NEW.isolated_kind='prebuild'
-        AND b.intent->>'preparationID'=p.preparation_id::text)
-    OR EXISTS(SELECT 1 FROM factory.substrate_isolated p
-      WHERE p.runtime_attempt_id=NEW.id AND p.project_id=NEW.project_id AND p.generation=NEW.generation
-        AND NEW.workspace_id IS NULL AND NEW.change_id IS NULL AND NEW.verification_id IS NULL
-        AND p.kind=NEW.isolated_kind::text AND p.intent->>'revision'=NEW.revision
-        AND b.intent->>'isolatedID'=p.owner_id::text AND b.intent->>'isolatedKind'=p.kind)))
-    THEN RAISE EXCEPTION 'Native Attempt requires its persisted matching owner binding'; END IF;
-  RETURN NULL;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_input_stop() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native Stop intent and outcomes cannot be discarded'; END IF;
-  IF TG_OP='INSERT' THEN
-    IF NEW.assignment->>'stopID' IS DISTINCT FROM NEW.stop_id::text
-      OR NEW.assignment->>'attemptID' IS DISTINCT FROM NEW.runtime_attempt_id::text
-      OR NEW.assignment->>'mode' IS DISTINCT FROM 'interrupt'
-      OR NOT EXISTS(
-        SELECT 1 FROM factory.runtime_attempt attempt
-        JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-        JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
-        JOIN factory.change change ON change.id=attempt.change_id AND change.runtime_attempt_id=attempt.id
-        JOIN factory.change_agent_session session ON session.change_id=change.id
-        JOIN factory.change_agent_turn_intent intent ON intent.turn_id=session.stop_turn_id
-        JOIN factory.agent_turn turn ON turn.id=intent.turn_id
-        JOIN factory.substrate_source source ON source.workspace_id=workspace.id
-        WHERE attempt.id=NEW.runtime_attempt_id
-          AND attempt.workspace_id=NEW.workspace_id AND attempt.change_id=NEW.change_id
-          AND attempt.stop_intended_at IS NULL AND workspace.kind='ticket'
-          AND binding.actor_uid=NEW.actor_uid AND binding.checkpoint=NEW.checkpoint
-          AND binding.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
-          AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
-          AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-          AND source.actor_uid=NEW.actor_uid AND source.owner='service' AND source.writable
-          AND source.checkpoint IS NOT NULL AND source.service_base IS NOT NULL
-          AND session.state='stopped' AND session.stop_pending AND session.stop_id=NEW.stop_id
-          AND session.runtime_attempt_id=attempt.id AND session.opencode_session_id=NEW.assignment->>'sessionID'
-          AND intent.runtime_attempt_id=attempt.id AND intent.session_id=session.opencode_session_id
-          AND intent.prompt_id=NEW.assignment->>'promptID' AND turn.authority->>'modelId'=NEW.assignment->>'modelID'
-          AND turn.state IN ('stopped','completed','failed')
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
-            WHERE newer.workspace_id=workspace.id AND newer.generation>attempt.generation))
-      THEN RAISE EXCEPTION 'Native Stop requires the exact pending input and independent paused Source'; END IF;
-  ELSIF ROW(NEW.stop_id,NEW.runtime_attempt_id,NEW.workspace_id,NEW.change_id,NEW.actor_uid,NEW.assignment,NEW.checkpoint,NEW.created_at)
-      IS DISTINCT FROM ROW(OLD.stop_id,OLD.runtime_attempt_id,OLD.workspace_id,OLD.change_id,OLD.actor_uid,OLD.assignment,OLD.checkpoint,OLD.created_at)
-    OR (OLD.source_checkpoint_id IS NOT NULL AND ROW(NEW.source_checkpoint_id,NEW.source_writer_epoch)
-      IS DISTINCT FROM ROW(OLD.source_checkpoint_id,OLD.source_writer_epoch))
-    OR (OLD.resume_attempted_at IS NOT NULL AND NEW.resume_attempted_at IS DISTINCT FROM OLD.resume_attempted_at)
-    OR (OLD.snapshot_attempted_at IS NOT NULL AND NEW.snapshot_attempted_at IS DISTINCT FROM OLD.snapshot_attempted_at)
-    OR (OLD.result IS NOT NULL AND NEW.result IS DISTINCT FROM OLD.result)
-    OR (OLD.completed_at IS NOT NULL AND NEW IS DISTINCT FROM OLD)
-    THEN RAISE EXCEPTION 'Native Stop identity and dispatched outcomes are immutable'; END IF;
-  IF NEW.result IS NOT NULL AND (
-    NEW.result - ARRAY['mode','confirmed','engineExited','processTreeExited'] IS DISTINCT FROM NEW.assignment-'mode'
-    OR COALESCE(NEW.result->>'mode' IN ('interrupt','observe'),false) IS NOT TRUE
-    OR COALESCE(jsonb_typeof(NEW.result->'confirmed')='boolean',false) IS NOT TRUE
-    OR NEW.result->'engineExited' IS DISTINCT FROM 'true'::jsonb
-    OR NEW.result->'processTreeExited' IS DISTINCT FROM 'true'::jsonb)
-    THEN RAISE EXCEPTION 'Native Stop requires its exact joined worker result'; END IF;
-  IF NEW.completed_at IS NOT NULL AND NOT EXISTS(
-    SELECT 1 FROM factory.runtime_attempt attempt
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-    JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
-    WHERE attempt.id=NEW.runtime_attempt_id AND attempt.state='paused'
-      AND attempt.stop_intended_at IS NULL AND binding.actor_uid=NEW.actor_uid
-      AND binding.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED'
-      AND (binding.checkpoint->>'generation')::bigint>(NEW.checkpoint->>'generation')::bigint
-      AND binding.checkpoint->>'uuid' IS DISTINCT FROM NEW.checkpoint->>'uuid'
-      AND NEW.completed_checkpoint=binding.checkpoint
-      AND source.actor_uid=NEW.actor_uid AND source.owner='service' AND source.writable
-      AND source.checkpoint->>'id'=NEW.completed_source_checkpoint_id::text AND source.service_base IS NOT NULL)
-    THEN RAISE EXCEPTION 'Native Stop requires a new durable pause and independent Source'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_actor_rpc() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native lifecycle dispatch facts cannot be discarded'; END IF;
-  IF TG_OP='INSERT' AND NOT EXISTS(
-    SELECT 1 FROM factory.runtime_attempt attempt
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-    WHERE attempt.id=NEW.runtime_attempt_id AND binding.actor_uid=NEW.actor_uid
-      AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
-      AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-      AND binding.observation#>>'{metadata,version}'=NEW.native_version
-      AND NEW.origin_key=COALESCE(binding.checkpoint->>'uuid','initial')
-      AND NEW.origin_checkpoint IS NOT DISTINCT FROM binding.checkpoint
-      AND ((NEW.action='resume' AND binding.observation#>>'{status,state}'='ACTOR_STATE_SUSPENDED')
-        OR (NEW.action='suspend' AND binding.observation#>>'{status,state}'='ACTOR_STATE_RUNNING'
-          AND EXISTS(SELECT 1 FROM factory.substrate_actor_rpc resumed
-            WHERE resumed.runtime_attempt_id=attempt.id AND resumed.action='resume'
-              AND resumed.origin_key=NEW.origin_key AND resumed.actor_uid=NEW.actor_uid
-              AND resumed.attempted_at IS NOT NULL AND resumed.outcome->>'state'='ACTOR_STATE_RUNNING')))
-      AND (NEW.stop_id IS NULL OR EXISTS(
-        SELECT 1 FROM factory.substrate_input_stop stopped
-        JOIN factory.change_agent_session session ON session.change_id=stopped.change_id
-        WHERE stopped.stop_id=NEW.stop_id AND stopped.runtime_attempt_id=attempt.id
-          AND stopped.actor_uid=NEW.actor_uid AND session.stop_id=stopped.stop_id AND session.stop_pending)))
-    THEN RAISE EXCEPTION 'Native lifecycle intent requires its exact original Actor and checkpoint'; END IF;
-  IF TG_OP='UPDATE' AND (
-    ROW(NEW.runtime_attempt_id,NEW.action,NEW.origin_key,NEW.actor_uid,NEW.native_version,NEW.origin_checkpoint,NEW.stop_id,NEW.intended_at)
-      IS DISTINCT FROM ROW(OLD.runtime_attempt_id,OLD.action,OLD.origin_key,OLD.actor_uid,OLD.native_version,OLD.origin_checkpoint,OLD.stop_id,OLD.intended_at)
-    OR (OLD.attempted_at IS NOT NULL AND NEW.attempted_at IS DISTINCT FROM OLD.attempted_at)
-    OR (OLD.outcome IS NOT NULL AND NEW IS DISTINCT FROM OLD))
-    THEN RAISE EXCEPTION 'Native lifecycle identities, dispatch and outcome facts are immutable'; END IF;
-  IF NEW.outcome IS NOT NULL AND (
-    NEW.outcome->>'actorUID' IS DISTINCT FROM NEW.actor_uid::text
-    OR COALESCE(NEW.outcome->>'version','') !~ '^[1-9][0-9]*$'
-    OR (NEW.outcome->>'version')::numeric<NEW.native_version::numeric
-    OR NEW.outcome->>'state' IS DISTINCT FROM CASE WHEN NEW.action='resume' THEN 'ACTOR_STATE_RUNNING' ELSE 'ACTOR_STATE_SUSPENDED' END
-    OR NOT EXISTS(SELECT 1 FROM factory.substrate_binding binding
-      WHERE binding.runtime_attempt_id=NEW.runtime_attempt_id AND binding.actor_uid=NEW.actor_uid
-        AND binding.observation#>>'{metadata,version}'=NEW.outcome->>'version'
-        AND binding.observation#>>'{status,state}'=NEW.outcome->>'state'
-        AND (NEW.action='resume' OR binding.checkpoint=NEW.outcome->'checkpoint')))
-    THEN RAISE EXCEPTION 'Native lifecycle completion requires its independent original-Actor observation'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_capacity_installation() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP<>'INSERT' THEN
-    RAISE EXCEPTION 'Native capacity installation identity is immutable';
-  END IF;
-  IF NEW.intent->>'database' IS DISTINCT FROM current_database()
-    OR COALESCE(NEW.intent#>>'{base,uid}','')=''
-    OR COALESCE(NEW.intent#>>'{node,uid}','')=''
-    OR COALESCE(NEW.intent->>'sandboxUID','')=''
-    THEN RAISE EXCEPTION 'Native capacity requires its observed installation identity'; END IF;
   RETURN NEW;
 END $$;
 
@@ -1546,52 +1326,6 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE FUNCTION factory.guard_review_media() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF ROW(NEW.id,NEW.change_id,NEW.review_id,NEW.browser_session_id,NEW.created_by,
-      NEW.kind,NEW.commit_sha,NEW.runtime_attempt_id,NEW.source_context)
-    IS DISTINCT FROM ROW(OLD.id,OLD.change_id,OLD.review_id,OLD.browser_session_id,OLD.created_by,
-      OLD.kind,OLD.commit_sha,OLD.runtime_attempt_id,OLD.source_context)
-    OR (OLD.state='complete' AND (
-      ROW(NEW.sha256,NEW.byte_length,NEW.duration_ms,NEW.completed_at,NEW.created_at)
-      IS DISTINCT FROM ROW(OLD.sha256,OLD.byte_length,OLD.duration_ms,OLD.completed_at,OLD.created_at)
-      OR NEW.state NOT IN ('complete','deleted')))
-    OR (OLD.state IN ('deleted','unavailable') AND NEW.state<>OLD.state)
-    OR (OLD.kind='still' AND OLD.sha256 IS NOT NULL AND
-      ROW(NEW.sha256,NEW.byte_length) IS DISTINCT FROM ROW(OLD.sha256,OLD.byte_length))
-  THEN RAISE EXCEPTION 'Review media identity and completed content are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.guard_review_scenario() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE review factory.candidate_review;
-BEGIN
-  SELECT * INTO review FROM factory.candidate_review WHERE id=NEW.review_id FOR UPDATE;
-  IF review.result IS NOT NULL OR review.state NOT IN ('pending','running')
-    OR (TG_OP='UPDATE' AND (
-      OLD.ended_at IS NOT NULL OR
-      ROW(NEW.review_id,NEW.id,NEW.title,NEW.category,NEW.criterion,NEW.expected,NEW.started_at,NEW.observation_kind)
-      IS DISTINCT FROM ROW(OLD.review_id,OLD.id,OLD.title,OLD.category,OLD.criterion,OLD.expected,OLD.started_at,OLD.observation_kind)))
-  THEN RAISE EXCEPTION 'Review scenario intent and completed outcome are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_delivery_policy() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF ROW(NEW.id,NEW.project_id,NEW.delegated_by,NEW.created_at) IS DISTINCT FROM
-    ROW(OLD.id,OLD.project_id,OLD.delegated_by,OLD.created_at)
-    OR (OLD.revoked_at IS NOT NULL AND NEW IS DISTINCT FROM OLD) THEN
-    RAISE EXCEPTION 'Delivery delegation and revocation are immutable';
-  END IF;
-  RETURN NEW;
-END $$;
-
 CREATE FUNCTION factory.protect_project_release_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1606,238 +1340,8 @@ BEGIN
   RETURN NEW;
 END; $$;
 
-CREATE FUNCTION factory.protect_promotion_operation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE previous factory.promotion_operation%ROWTYPE;
-BEGIN
-  IF TG_OP='INSERT' THEN
-    IF NEW.ordinal>1 THEN
-      SELECT * INTO previous FROM factory.promotion_operation WHERE id=NEW.supersedes_id;
-      IF NOT FOUND OR previous.state<>'failed' OR previous.ordinal+1<>NEW.ordinal
-        OR ROW(NEW.change_id,NEW.project_id,NEW.commit_sha,NEW.previous_runtime_attempt_id)
-          IS DISTINCT FROM ROW(previous.change_id,previous.project_id,previous.commit_sha,previous.previous_runtime_attempt_id)
-        OR NEW.state<>'pending' OR NEW.replacement_runtime_attempt_id IS NOT NULL
-        OR NOT EXISTS(SELECT 1 FROM factory.execution_policy_command command
-          WHERE command.command_id=NEW.retry_command_id
-            AND command.scope='promotion-retry:'||NEW.change_id
-            AND command.input->>'changeID'=NEW.change_id::text
-            AND command.input->>'promotionID'=previous.id::text)
-      THEN RAISE EXCEPTION 'Promotion retry requires its exact failed predecessor and human command'; END IF;
-    END IF;
-    RETURN NEW;
-  END IF;
-  IF ROW(NEW.id,NEW.change_id,NEW.project_id,NEW.commit_sha,NEW.previous_runtime_attempt_id,
-      NEW.requested_at,NEW.ordinal,NEW.supersedes_id,NEW.retry_command_id)
-    IS DISTINCT FROM ROW(OLD.id,OLD.change_id,OLD.project_id,OLD.commit_sha,OLD.previous_runtime_attempt_id,
-      OLD.requested_at,OLD.ordinal,OLD.supersedes_id,OLD.retry_command_id)
-    OR (OLD.replacement_runtime_attempt_id IS NOT NULL
-      AND NEW.replacement_runtime_attempt_id IS DISTINCT FROM OLD.replacement_runtime_attempt_id)
-    OR (OLD.completed_at IS NOT NULL AND NEW.completed_at IS DISTINCT FROM OLD.completed_at)
-    OR (OLD.state IN ('succeeded','failed') AND NEW.state IS DISTINCT FROM OLD.state)
-    OR (OLD.state='failed' AND NEW IS DISTINCT FROM OLD)
-  THEN RAISE EXCEPTION 'Promotion identity and terminal outcome are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_pull_request_operation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.change_id <> OLD.change_id
-    OR NEW.repository_owner <> OLD.repository_owner
-    OR NEW.repository_name <> OLD.repository_name
-    OR NEW.base_branch <> OLD.base_branch
-    OR NEW.head_branch <> OLD.head_branch
-    OR NEW.first_head_sha <> OLD.first_head_sha
-    OR NEW.title <> OLD.title
-    OR NEW.body <> OLD.body
-    OR NEW.idempotency_key <> OLD.idempotency_key
-    OR (OLD.state IN ('succeeded', 'failed') AND NEW IS DISTINCT FROM OLD)
-  THEN
-    RAISE EXCEPTION 'Pull request intent or terminal result is immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.protect_release_attempt_identity() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.id,NEW.release_id,NEW.command_id,NEW.ordinal,NEW.created_at)
-    IS DISTINCT FROM (OLD.id,OLD.release_id,OLD.command_id,OLD.ordinal,OLD.created_at)
-    OR (OLD.dispatch_intended_at IS NOT NULL AND NEW.dispatch_intended_at IS DISTINCT FROM OLD.dispatch_intended_at)
-    OR (OLD.run_id IS NOT NULL AND NEW.run_id IS DISTINCT FROM OLD.run_id)
-    OR (OLD.job_handle IS NOT NULL AND NEW.job_handle IS DISTINCT FROM OLD.job_handle)
-    OR (OLD.runtime_attempt_id IS NOT NULL AND NEW.runtime_attempt_id IS DISTINCT FROM OLD.runtime_attempt_id)
-    OR (OLD.runner_id IS NOT NULL AND (NEW.runner_id,NEW.runner_uuid) IS DISTINCT FROM (OLD.runner_id,OLD.runner_uuid)) THEN
-    RAISE EXCEPTION 'Publication attempt identity is immutable' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END; $$;
-
-CREATE FUNCTION factory.protect_staging_configuration() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'Staging execution declaration is immutable'; END IF;
-  IF NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=NEW.runtime_attempt_id
-    AND isolated_kind='staging' AND state='create-intended' AND stop_intended_at IS NULL) THEN
-    RAISE EXCEPTION 'Staging declaration requires its active execution intent';
-  END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.protect_substrate_isolated() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE raw bytea; initial_owner uuid;
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native isolated provisioning names cannot be reused'; END IF;
-  IF TG_OP='INSERT' THEN
-    raw:=digest(NEW.owner_id::text||':'||NEW.generation::text,'sha256');
-    raw:=set_byte(raw,6,(get_byte(raw,6)&15)|80);
-    raw:=set_byte(raw,8,(get_byte(raw,8)&63)|128);
-    IF NEW.runtime_attempt_id<>encode(substring(raw from 1 for 16),'hex')::uuid
-      OR (NEW.intent#>>'{configuration,projectID}') IS DISTINCT FROM NEW.project_id::text
-      OR (NEW.intent#>>'{configuration,database}') IS DISTINCT FROM current_database()
-      OR NOT EXISTS(SELECT 1 FROM factory.project project WHERE project.id=NEW.project_id
-        AND project.repository_url=NEW.intent->>'repository'
-        AND project.devcontainer_path=NEW.intent->>'devcontainerPath')
-      OR NOT EXISTS(SELECT 1 FROM auth."user" principal WHERE principal.id::text=NEW.intent->>'createdBy'
-        AND (EXISTS(SELECT 1 FROM factory.project_membership member WHERE member.user_id=principal.id AND member.project_id=NEW.project_id)
-          OR EXISTS(SELECT 1 FROM factory.administrator administrator WHERE administrator.user_id=principal.id)))
-      OR EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=NEW.runtime_attempt_id)
-      THEN RAISE EXCEPTION 'Native isolated provisioning requires deterministic fresh product intent'; END IF;
-    IF NEW.kind='publication' THEN
-      IF NEW.intent->>'promotionID' IS NOT NULL OR NOT EXISTS(
-        SELECT 1 FROM factory.release_attempt publication JOIN factory.project_release release ON release.id=publication.release_id
-        WHERE publication.id=NEW.owner_id AND release.project_id=NEW.project_id
-          AND release.created_by::text=NEW.intent->>'createdBy' AND release.commit_sha=NEW.intent->>'revision'
-          AND release.version=NEW.intent->>'version' AND publication.job_handle=NEW.intent->>'jobHandle'
-          AND publication.runner_uuid=NEW.intent->>'runnerUUID' AND publication.runner_token IS NOT NULL
-          AND publication.run_id IS NOT NULL AND publication.dispatch_intended_at IS NOT NULL
-          AND publication.runtime_attempt_id IS NULL AND publication.state='running' AND release.state='running'
-          AND publication.id=(SELECT id FROM factory.release_attempt WHERE release_id=release.id ORDER BY ordinal DESC LIMIT 1))
-        OR (NEW.intent#>>'{environment,environment}') IS DISTINCT FROM 'development'
-        OR (NEW.intent#>>'{environment,version}') IS DISTINCT FROM '0' OR NEW.intent#>>'{environment,secretKey}' IS NOT NULL
-        THEN RAISE EXCEPTION 'Native publication requires its exact active job and empty Project environment'; END IF;
-    ELSIF NEW.intent->>'promotionID' IS NOT NULL THEN
-      IF NEW.owner_id::text<>NEW.intent->>'promotionID' OR NOT EXISTS(
-        SELECT 1 FROM factory.promotion_operation promotion JOIN factory.change change ON change.id=promotion.change_id
-        JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-        JOIN factory.merge_operation merge ON merge.change_id=change.id AND merge.state='succeeded'
-          AND merge.commit_sha=promotion.commit_sha AND merge.observed_default_sha=merge.commit_sha
-        JOIN factory.delivery_approval approval ON approval.id=merge.delivery_approval_id
-          AND approval.change_id=change.id AND approval.commit_sha=merge.commit_sha
-        JOIN factory.verification verification ON verification.id=approval.verification_id
-          AND verification.change_id=change.id AND verification.commit_sha=merge.commit_sha AND verification.state='succeeded'
-        JOIN factory.candidate_review review ON review.id=approval.candidate_review_id AND review.verification_id=verification.id
-          AND review.change_id=change.id AND review.commit_sha=merge.commit_sha AND review.state='passed'
-        WHERE promotion.id=NEW.owner_id AND promotion.project_id=NEW.project_id AND change.project_id=NEW.project_id
-          AND promotion.commit_sha=NEW.intent->>'revision' AND promotion.state='pending'
-          AND promotion.replacement_runtime_attempt_id IS NULL AND change.state='delivering'
-          AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-          AND EXISTS(SELECT 1 FROM factory.current_promotion WHERE id=promotion.id))
-        THEN RAISE EXCEPTION 'Native Staging replacement requires its approved exact-commit promotion'; END IF;
-    ELSE
-      raw:=digest('staging:'||NEW.project_id::text||':1','sha256');
-      raw:=set_byte(raw,6,(get_byte(raw,6)&15)|80);
-      raw:=set_byte(raw,8,(get_byte(raw,8)&63)|128);
-      initial_owner:=encode(substring(raw from 1 for 16),'hex')::uuid;
-      IF NEW.owner_id<>initial_owner OR NOT EXISTS(
-        SELECT 1 FROM factory.staging_preview preview WHERE preview.project_id=NEW.project_id
-          AND preview.revision=NEW.intent->>'revision' AND (preview.runtime_attempt_id IS NULL
-            OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-              WHERE predecessor.id=preview.runtime_attempt_id
-                AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL)))
-        OR (NEW.generation>1 AND NOT EXISTS(
-          SELECT 1 FROM factory.substrate_isolated previous JOIN factory.runtime_attempt predecessor ON predecessor.id=previous.runtime_attempt_id
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-          WHERE previous.owner_id=NEW.owner_id AND previous.kind=NEW.kind AND previous.generation=NEW.generation-1
-            AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL))
-        THEN RAISE EXCEPTION 'Native initial Staging requires its pinned Preview and confirmed predecessor cleanup'; END IF;
-    END IF;
-    IF NEW.kind='staging' AND ((NEW.intent#>>'{environment,environment}') IS DISTINCT FROM 'main-preview'
-      OR NOT EXISTS(SELECT 1 FROM factory.project project
-        LEFT JOIN factory.project_environment environment ON environment.project_id=project.id AND environment.environment='main-preview'
-        WHERE project.id=NEW.project_id AND NEW.intent#>>'{environment,version}'=COALESCE(environment.version,0)::text
-          AND (NEW.intent#>>'{environment,secretKey}') IS NOT DISTINCT FROM environment.secret_key))
-      THEN RAISE EXCEPTION 'Native Staging requires its frozen main-preview environment'; END IF;
-  ELSIF ROW(NEW.owner_id,NEW.kind,NEW.project_id,NEW.generation,NEW.runtime_attempt_id,NEW.intent)
-      IS DISTINCT FROM ROW(OLD.owner_id,OLD.kind,OLD.project_id,OLD.generation,OLD.runtime_attempt_id,OLD.intent)
-    OR (OLD.atespace_attempted_at IS NOT NULL AND NEW.atespace_attempted_at IS DISTINCT FROM OLD.atespace_attempted_at)
-    OR (OLD.policy_attempted_at IS NOT NULL AND NEW.policy_attempted_at IS DISTINCT FROM OLD.policy_attempted_at)
-    OR (OLD.template_attempted_at IS NOT NULL AND NEW.template_attempted_at IS DISTINCT FROM OLD.template_attempted_at)
-    OR (OLD.atespace IS NOT NULL AND NEW.atespace IS DISTINCT FROM OLD.atespace)
-    OR (OLD.policy IS NOT NULL AND NEW.policy IS DISTINCT FROM OLD.policy)
-    OR (OLD.template IS NOT NULL AND NEW.template IS DISTINCT FROM OLD.template)
-    OR (OLD.atespace_rejected AND NOT NEW.atespace_rejected)
-    OR (OLD.policy_rejected AND NOT NEW.policy_rejected)
-    OR (OLD.template_rejected AND NOT NEW.template_rejected)
-    THEN RAISE EXCEPTION 'Native isolated intent, identities and dispatch facts are immutable'; END IF;
-  RETURN NEW;
-END $$;
-
 -- Native 21-verification-functions.sql.
 -- Verification routines. Run before Drizzle tables, with check_function_bodies disabled.
-
-CREATE FUNCTION factory.protect_substrate_verification() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE raw bytea;
-  predecessor factory.substrate_verification;
-BEGIN
-  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Native Verification provisioning names cannot be reused'; END IF;
-  IF TG_OP='INSERT' THEN
-    raw:=digest(NEW.verification_id::text||':'||NEW.generation::text,'sha256');
-    raw:=set_byte(raw,6,(get_byte(raw,6)&15)|80);
-    raw:=set_byte(raw,8,(get_byte(raw,8)&63)|128);
-    SELECT * INTO predecessor FROM factory.substrate_verification
-      WHERE verification_id=NEW.verification_id ORDER BY generation DESC LIMIT 1;
-    IF (predecessor.runtime_attempt_id IS NULL AND NEW.generation<>1)
-      OR (predecessor.runtime_attempt_id IS NOT NULL AND (
-        NEW.generation<>predecessor.generation+1 OR NOT EXISTS(
-          SELECT 1 FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-          JOIN factory.verification v ON v.id=NEW.verification_id
-          JOIN factory.execution_policy_command decision ON decision.scope='checks-bootstrap-retry:'||v.change_id::text
-          WHERE a.id=predecessor.runtime_attempt_id AND a.verification_id=v.id
-            AND a.state='stopped' AND b.deleted_at IS NOT NULL
-            AND decision.input->>'verificationID'=v.id::text
-            AND decision.input->>'runtimeAttemptID'=a.id::text
-            AND decision.result->>'runtimeAttemptID'=a.id::text
-            AND decision.result->>'state'='failed')))
-      THEN RAISE EXCEPTION 'Native Verification successor requires exact cleanup and an explicit bootstrap retry decision'; END IF;
-    IF NEW.runtime_attempt_id<>encode(substring(raw from 1 for 16),'hex')::uuid
-      OR NOT EXISTS(SELECT 1 FROM factory.verification v JOIN factory.change c ON c.id=v.change_id
-        JOIN factory.ticket t ON t.id=c.ticket_id
-        WHERE v.id=NEW.verification_id AND v.runtime_attempt_id IS NULL
-          AND v.state='pending' AND v.action_run_id IS NOT NULL AND v.runner_uuid IS NOT NULL
-          AND v.runner_token IS NOT NULL AND v.runner_job_handle IS NOT NULL
-          AND c.state='active' AND c.cancel_requested_at IS NULL AND t.trashed_at IS NULL
-          AND NEW.intent#>>'{configuration,projectID}'=c.project_id::text
-          AND NEW.intent#>>'{configuration,database}'=current_database()
-          AND NEW.intent->>'revision'=v.commit_sha AND NEW.intent->>'jobHandle'=v.runner_job_handle
-          AND NEW.intent->>'runnerUUID'=v.runner_uuid::text
-          AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session s WHERE s.change_id=c.id AND (s.state='stopped' OR s.stop_pending))
-          AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt a WHERE a.id=NEW.runtime_attempt_id))
-      THEN RAISE EXCEPTION 'Native Verification requires deterministic fresh exact-job intent'; END IF;
-  ELSIF ROW(NEW.verification_id,NEW.runtime_attempt_id,NEW.generation,NEW.intent)
-      IS DISTINCT FROM ROW(OLD.verification_id,OLD.runtime_attempt_id,OLD.generation,OLD.intent)
-    OR (OLD.atespace_attempted_at IS NOT NULL AND NEW.atespace_attempted_at IS DISTINCT FROM OLD.atespace_attempted_at)
-    OR (OLD.policy_attempted_at IS NOT NULL AND NEW.policy_attempted_at IS DISTINCT FROM OLD.policy_attempted_at)
-    OR (OLD.template_attempted_at IS NOT NULL AND NEW.template_attempted_at IS DISTINCT FROM OLD.template_attempted_at)
-    OR (OLD.atespace IS NOT NULL AND NEW.atespace IS DISTINCT FROM OLD.atespace)
-    OR (OLD.policy IS NOT NULL AND NEW.policy IS DISTINCT FROM OLD.policy)
-    OR (OLD.template IS NOT NULL AND NEW.template IS DISTINCT FROM OLD.template)
-    OR (OLD.atespace_rejected AND NOT NEW.atespace_rejected)
-    OR (OLD.policy_rejected AND NOT NEW.policy_rejected)
-    OR (OLD.template_rejected AND NOT NEW.template_rejected)
-    THEN RAISE EXCEPTION 'Native Verification provisioning identity and dispatch facts are immutable';
-  END IF;
-  RETURN NEW;
-END $$;
 
 CREATE FUNCTION factory.protect_verification_job_binding() RETURNS trigger
     LANGUAGE plpgsql
@@ -1848,8 +1352,8 @@ BEGIN
       NEW.action_run_id IS DISTINCT FROM OLD.action_run_id OR NEW.commit_sha<>OLD.commit_sha)
     THEN RAISE EXCEPTION 'Verification native job binding is immutable'; END IF;
   IF OLD.runner_job_handle IS NULL AND NEW.runner_job_handle IS NOT NULL AND EXISTS(
-    SELECT 1 FROM factory.substrate_binding b
-    WHERE b.runtime_attempt_id=OLD.runtime_attempt_id AND b.create_attempted_at IS NOT NULL)
+    SELECT 1 FROM factory.runtime_attempt a
+    WHERE a.id=OLD.runtime_attempt_id AND a.create_attempted_at IS NOT NULL)
     THEN RAISE EXCEPTION 'Cannot change a dispatched Verification runner'; END IF;
   RETURN NEW;
 END $$;
@@ -1880,7 +1384,7 @@ BEGIN
     END IF;
   END IF;
 
-  IF TG_TABLE_NAME IN ('inbox_receipt','account_access','administrator') THEN
+  IF TG_TABLE_NAME IN ('account_access','administrator') THEN
     person := (record->>'user_id')::uuid;
     FOR project IN
       SELECT id FROM factory.project WHERE EXISTS(
@@ -1889,9 +1393,7 @@ BEGIN
       ORDER BY id
     LOOP
       PERFORM factory.touch_read_version(project,'inbox',project,person::text);
-      IF TG_TABLE_NAME<>'inbox_receipt' THEN
-        PERFORM factory.touch_read_version(project,'inbox',project);
-      END IF;
+      PERFORM factory.touch_read_version(project,'inbox',project);
     END LOOP;
     RETURN NULL;
   END IF;
@@ -1902,20 +1404,53 @@ BEGIN
   conversation := (record->>'conversation_id')::uuid;
   IF TG_TABLE_NAME='project' THEN project := (record->>'id')::uuid; END IF;
   IF TG_TABLE_NAME='ticket' THEN ticket := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='audit_event' THEN
+    IF record->>'kind'='tickets.responsibility_event' AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='access.change_editing_decision' AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='review.feedback_message' AND record->>'scope_type'='review_feedback' THEN
+      SELECT change_id INTO change FROM factory.review_feedback WHERE id=(record->>'scope_id')::uuid;
+    ELSE
+      RETURN NULL;
+    END IF;
+  END IF;
+  IF TG_TABLE_NAME='operation' THEN
+    IF record->>'kind'='inbox.receipt' AND record->>'scope_type'='user' THEN
+      person := (record->>'scope_id')::uuid;
+      FOR project IN
+        SELECT id FROM factory.project WHERE EXISTS(
+          SELECT 1 FROM factory.project_membership WHERE project_id=id AND user_id=person)
+          OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=person)
+        ORDER BY id
+      LOOP
+        PERFORM factory.touch_read_version(project,'inbox',project,person::text);
+      END LOOP;
+      RETURN NULL;
+    ELSIF record->>'kind' IN ('delivery.merge','delivery.pull_request','delivery.promotion') AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='access.change_editing_request' AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+      audience := record->'payload'->>'ownerId';
+    ELSIF record->>'kind'='review.scenario' AND record->>'scope_type'='candidate_review' THEN
+      SELECT change_id INTO change FROM factory.candidate_review WHERE id=(record->>'scope_id')::uuid;
+    ELSIF record->>'kind' IN ('project.delivery_queue','delivery.staging_preview','knowledge.generation') AND record->>'scope_type'='project' THEN
+      project := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind' IN ('tickets.responsibility','tickets.implementation_order') AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='tickets.follow' AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+      audience := record->'payload'->>'userId';
+    ELSIF record->>'kind'='usage.coding_pause' AND record->>'scope_type'='agent_turn' THEN
+      SELECT change_id INTO change FROM factory.agent_turn WHERE id=(record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='runtime.compute_wait' AND record->>'scope_type'='runtime_attempt' THEN
+      SELECT project_id,change_id INTO project,change FROM factory.runtime_attempt WHERE id=(record->>'scope_id')::uuid;
+    ELSE
+      RETURN NULL;
+    END IF;
+  END IF;
   IF TG_TABLE_NAME='change' THEN change := (record->>'id')::uuid; END IF;
   IF TG_TABLE_NAME='ticket_conversation' THEN conversation := (record->>'id')::uuid; END IF;
-  IF TG_TABLE_NAME='coding_pause' THEN
-    SELECT change_id INTO change FROM factory.agent_turn WHERE id=(record->>'turn_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='runtime_compute_wait' THEN
-    SELECT project_id,change_id INTO project,change FROM factory.runtime_attempt WHERE id=(record->>'attempt_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='review_feedback_message' THEN
-    SELECT change_id INTO change FROM factory.review_feedback WHERE id=(record->>'feedback_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='review_scenario' THEN
-    SELECT change_id INTO change FROM factory.candidate_review WHERE id=(record->>'review_id')::uuid;
-  END IF;
   IF change IS NOT NULL THEN
     SELECT project_id,ticket_id INTO project,ticket FROM factory.change WHERE id=projection.change;
   ELSIF conversation IS NOT NULL THEN
@@ -1925,8 +1460,6 @@ BEGIN
     SELECT project_id INTO project FROM factory.ticket WHERE id=projection.ticket;
   END IF;
   IF TG_TABLE_NAME='agent_turn' AND ticket IS NULL THEN audience := record->>'created_by'; END IF;
-  IF TG_TABLE_NAME='ticket_follow' THEN audience := record->>'user_id'; END IF;
-  IF TG_TABLE_NAME='change_editing_request' THEN audience := record->>'owner_id'; END IF;
   IF audience='shared' AND (
     TG_TABLE_NAME='technical_design_revision' OR
     (TG_TABLE_NAME='conversation_entry' AND record->'payload'->>'visibility'='developer') OR
@@ -1949,14 +1482,16 @@ BEGIN
   IF change IS NOT NULL THEN
     PERFORM factory.touch_read_version(project,'review',change,audience);
   END IF;
-  IF TG_TABLE_NAME IN ('change','runtime_attempt','runtime_compute_wait','staging_preview','verification','candidate_review',
-    'change_agent_session','change_writer','change_editing_decision',
-    'coding_pause','delivery_approval','merge_operation','promotion_operation',
-    'pull_request_operation','review_feedback','review_feedback_message','review_media','review_scenario','implementation_order','project_delivery_queue')
-    OR (TG_TABLE_NAME='agent_turn' AND change IS NOT NULL) THEN
+  IF TG_TABLE_NAME IN ('change','runtime_attempt','verification','candidate_review',
+    'change_agent_session','change_writer',
+    'delivery_approval',
+    'review_feedback','review_media')
+    OR (TG_TABLE_NAME='agent_turn' AND change IS NOT NULL)
+    OR (TG_TABLE_NAME='audit_event' AND record->>'kind' IN ('access.change_editing_decision','review.feedback_message'))
+    OR (TG_TABLE_NAME='operation' AND record->>'kind' IN ('delivery.merge','delivery.pull_request','delivery.promotion','delivery.staging_preview','project.delivery_queue','runtime.compute_wait','review.scenario','tickets.implementation_order','usage.coding_pause')) THEN
     PERFORM factory.touch_read_version(project,'lifecycle',project);
   END IF;
-  IF TG_TABLE_NAME IN ('knowledge_generation','knowledge_page') THEN
+  IF TG_TABLE_NAME='knowledge_page' OR (TG_TABLE_NAME='operation' AND record->>'kind'='knowledge.generation') THEN
     PERFORM factory.touch_read_version(project,'knowledge',project);
   END IF;
   RETURN NULL;
@@ -1992,20 +1527,24 @@ BEGIN
   ELSIF TG_TABLE_NAME IN ('monitoring_hook','monitoring_incident') THEN
     project := (record->>'project_id')::uuid;
     target_scope := 'inputs';
-  ELSIF TG_TABLE_NAME IN ('project_release','release_access') THEN
+  ELSIF TG_TABLE_NAME='project_release' THEN
     project := (record->>'project_id')::uuid;
     target_scope := 'releases';
-  ELSIF TG_TABLE_NAME='release_attempt' THEN
-    SELECT project_id INTO project FROM factory.project_release WHERE id=(record->>'release_id')::uuid;
-    IF project IS NULL THEN RETURN NULL; END IF;
-    target_scope := 'releases';
-  ELSIF TG_TABLE_NAME='mcp_project_grant' THEN
-    project := (record->>'project_id')::uuid;
-    target_scope := 'sources';
-  ELSIF TG_TABLE_NAME='mcp_choice' THEN
-    IF record->>'scope'='personal' THEN RETURN NULL; END IF;
-    IF record->>'scope'='project' THEN project := (record->>'context_id')::uuid; END IF;
-    target_scope := 'sources';
+  ELSIF TG_TABLE_NAME='operation' THEN
+    IF record->>'kind'='releases.access' AND record->>'scope_type'='project' THEN
+      project := (record->>'scope_id')::uuid;
+      target_scope := 'releases';
+    ELSIF record->>'kind'='releases.attempt' AND record->>'scope_type'='project_release' THEN
+      SELECT project_id INTO project FROM factory.project_release WHERE id=(record->>'scope_id')::uuid;
+      IF project IS NULL THEN RETURN NULL; END IF;
+      target_scope := 'releases';
+    ELSIF record->>'kind'='mcp.choice' THEN
+      IF record->>'scope_type'='personal' THEN RETURN NULL; END IF;
+      IF record->>'scope_type'='project' THEN project := (record->>'scope_id')::uuid; END IF;
+      target_scope := 'sources';
+    ELSE
+      RETURN NULL;
+    END IF;
   ELSE
     library := COALESCE((record->>'library_id')::uuid,(record->>'id')::uuid);
     IF TG_TABLE_NAME='mcp_library' THEN
@@ -2013,6 +1552,20 @@ BEGIN
       library_scope := record->>'scope';
     ELSE
       SELECT scope,project_id INTO library_scope,project FROM factory.mcp_library WHERE id=library;
+    END IF;
+    IF TG_TABLE_NAME='mcp_connection' AND library_scope='personal' THEN
+      FOR project IN
+        SELECT DISTINCT key::uuid FROM (
+          SELECT jsonb_object_keys(COALESCE(CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN OLD.project_grants END,'{}'::jsonb)) AS key
+          UNION
+          SELECT jsonb_object_keys(COALESCE(CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN NEW.project_grants END,'{}'::jsonb)) AS key
+        ) keys
+        WHERE key ~ '^[0-9a-f-]{36}$'
+        ORDER BY 1
+      LOOP
+        PERFORM factory.touch_read_version(project,'sources',project);
+      END LOOP;
+      RETURN NULL;
     END IF;
     IF library_scope IS NULL OR library_scope='personal' THEN RETURN NULL; END IF;
     target_scope := 'sources';
@@ -2069,22 +1622,12 @@ $_$;
 
 RESET check_function_bodies;
 
-CREATE TABLE "factory"."access_revocation" (
-	"user_id" uuid PRIMARY KEY NOT NULL,
-	"version" bigint DEFAULT 1 NOT NULL,
-	"processed_version" bigint DEFAULT 0 NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "access_revocation_check" CHECK (("factory"."access_revocation"."processed_version" >= 0) AND ("factory"."access_revocation"."processed_version" <= "factory"."access_revocation"."version"))
-);
-
 CREATE TABLE "factory"."account_access" (
-	"id" uuid DEFAULT gen_random_uuid() NOT NULL,
 	"user_id" uuid PRIMARY KEY NOT NULL,
 	"disabled_at" timestamp with time zone,
 	"directory_disabled_at" timestamp with time zone,
 	"disabled_by" uuid,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "account_access_id_key" UNIQUE("id")
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 
 CREATE TABLE "factory"."administrator" (
@@ -2122,24 +1665,6 @@ CREATE TABLE "factory"."agent_turn" (
 	CONSTRAINT "agent_turn_review_authority" CHECK ((("factory"."agent_turn"."input" ->> 'kind'::text) = 'change-review'::text) = ("factory"."agent_turn"."authority" ? 'review'::text))
 );
 
-CREATE TABLE "factory"."agent_turn_mcp" (
-	"turn_id" uuid NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"credential_epoch" uuid NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"policy_version" bigint NOT NULL,
-	"tools" jsonb NOT NULL,
-	"required" boolean NOT NULL,
-	CONSTRAINT "agent_turn_mcp_pkey" PRIMARY KEY("turn_id","connection_id")
-);
-
-CREATE TABLE "factory"."agent_turn_skill" (
-	"turn_id" uuid NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"loaded_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "agent_turn_skill_pkey" PRIMARY KEY("turn_id","revision_id")
-);
-
 CREATE TABLE "factory"."attachment" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -2167,16 +1692,6 @@ CREATE TABLE "factory"."attachment" (
 	CONSTRAINT "attachment_state_check" CHECK ("factory"."attachment"."state" = ANY (ARRAY['uploading'::text, 'ready'::text, 'failed'::text, 'deleting'::text, 'deleted'::text]))
 );
 
-CREATE TABLE "factory"."attachment_draft" (
-	"id" uuid NOT NULL,
-	"owner_id" uuid NOT NULL,
-	"project_id" uuid NOT NULL,
-	"sequence" bigint NOT NULL,
-	"attachment_ids" uuid[] NOT NULL,
-	CONSTRAINT "attachment_draft_pkey" PRIMARY KEY("id","owner_id"),
-	CONSTRAINT "attachment_draft_sequence_check" CHECK ("factory"."attachment_draft"."sequence" >= 0)
-);
-
 CREATE TABLE "factory"."attachment_reference" (
 	"attachment_id" uuid NOT NULL,
 	"kind" text NOT NULL,
@@ -2187,18 +1702,17 @@ CREATE TABLE "factory"."attachment_reference" (
 	CONSTRAINT "attachment_reference_kind_check" CHECK ("factory"."attachment_reference"."kind" = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text]))
 );
 
-CREATE TABLE "factory"."attachment_storage" (
-	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"id" uuid NOT NULL,
-	CONSTRAINT "attachment_storage_id_key" UNIQUE("id"),
-	CONSTRAINT "attachment_storage_singleton_check" CHECK (("factory"."attachment_storage"."singleton"))
-);
-
-CREATE TABLE "factory"."attachment_turn_context" (
-	"turn_id" uuid NOT NULL,
-	"source" text DEFAULT 'admission' NOT NULL,
-	"content" text NOT NULL,
-	CONSTRAINT "attachment_turn_context_pkey" PRIMARY KEY("turn_id","source")
+CREATE TABLE "factory"."audit_event" (
+	"id" uuid PRIMARY KEY NOT NULL,
+	"kind" text NOT NULL,
+	"scope_type" text NOT NULL,
+	"scope_id" text NOT NULL,
+	"dedupe_key" text,
+	"actor_id" uuid NOT NULL,
+	"payload" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "audit_event_dedupe_key_key" UNIQUE("dedupe_key"),
+	CONSTRAINT "audit_event_payload_check" CHECK (jsonb_typeof("factory"."audit_event"."payload") = 'object'::text)
 );
 
 CREATE TABLE "auth"."account" (
@@ -2253,39 +1767,6 @@ CREATE TABLE "auth"."verification" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE "factory"."branch_create_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"repository_owner" text NOT NULL,
-	"repository_name" text NOT NULL,
-	"branch_name" text NOT NULL,
-	"start_sha" text NOT NULL,
-	"idempotency_key" text NOT NULL,
-	"state" "factory"."branch_operation_state" DEFAULT 'pending' NOT NULL,
-	"attempt_count" integer DEFAULT 0 NOT NULL,
-	"lease_owner" text,
-	"lease_expires_at" timestamp with time zone,
-	"lease_generation" bigint DEFAULT 0 NOT NULL,
-	"reconcile_after" timestamp with time zone DEFAULT now() NOT NULL,
-	"observed_head_sha" text,
-	"last_error" text,
-	"requested_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "branch_create_operation_change_id_key" UNIQUE("change_id"),
-	CONSTRAINT "branch_create_operation_repository_owner_repository_name_br_key" UNIQUE("repository_owner","repository_name","branch_name"),
-	CONSTRAINT "branch_create_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "branch_create_operation_lease_generation_check" CHECK ("factory"."branch_create_operation"."lease_generation" >= 0),
-	CONSTRAINT "branch_create_operation_attempt_count_check" CHECK ("factory"."branch_create_operation"."attempt_count" >= 0),
-	CONSTRAINT "branch_create_operation_check" CHECK (("factory"."branch_create_operation"."lease_owner" IS NULL) = ("factory"."branch_create_operation"."lease_expires_at" IS NULL)),
-	CONSTRAINT "branch_create_operation_check1" CHECK (("factory"."branch_create_operation"."state" = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = ("factory"."branch_create_operation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "branch_create_operation_check2" CHECK (("factory"."branch_create_operation"."state" <> 'succeeded'::branch_operation_state) OR ("factory"."branch_create_operation"."observed_head_sha" = "factory"."branch_create_operation"."start_sha")),
-	CONSTRAINT "branch_create_operation_observed_head_sha_check" CHECK (("factory"."branch_create_operation"."observed_head_sha" IS NULL) OR ("factory"."branch_create_operation"."observed_head_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "branch_create_operation_repository_name_check" CHECK (length(btrim("factory"."branch_create_operation"."repository_name")) > 0),
-	CONSTRAINT "branch_create_operation_repository_owner_check" CHECK (length(btrim("factory"."branch_create_operation"."repository_owner")) > 0),
-	CONSTRAINT "branch_create_operation_start_sha_check" CHECK ("factory"."branch_create_operation"."start_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
-);
-
 CREATE TABLE "factory"."build_browser_session" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"turn_id" uuid NOT NULL,
@@ -2338,7 +1819,6 @@ CREATE TABLE "factory"."candidate_review" (
 	"repair_prompted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
-	"coverage_version" integer DEFAULT 1 NOT NULL,
 	CONSTRAINT "candidate_review_id_change_id_verification_id_commit_sha_key" UNIQUE("id","change_id","verification_id","commit_sha"),
 	CONSTRAINT "candidate_review_verification_id_ordinal_key" UNIQUE("verification_id","ordinal"),
 	CONSTRAINT "candidate_review_supersedes_id_key" UNIQUE("supersedes_id"),
@@ -2421,7 +1901,6 @@ CREATE TABLE "factory"."change_agent_turn_intent" (
 	"session_title" text NOT NULL,
 	"runtime_attempt_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"skill_loading" text DEFAULT 'eager' NOT NULL,
 	"skill_manifest" jsonb,
 	"skill_attachments" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"model_request_epoch" bigint DEFAULT 0 NOT NULL,
@@ -2432,19 +1911,18 @@ CREATE TABLE "factory"."change_agent_turn_intent" (
 	CONSTRAINT "change_agent_turn_intent_prompt_id_check" CHECK (("factory"."change_agent_turn_intent"."prompt_id" ~~ 'msg_%'::text) AND (length("factory"."change_agent_turn_intent"."prompt_id") <= 200)),
 	CONSTRAINT "change_agent_turn_intent_prompt_text_check" CHECK ((length(btrim("factory"."change_agent_turn_intent"."prompt_text")) > 0) AND (octet_length("factory"."change_agent_turn_intent"."prompt_text") <= 4000000)),
 	CONSTRAINT "change_agent_turn_intent_session_id_check" CHECK (("factory"."change_agent_turn_intent"."session_id" ~~ 'ses%'::text) AND (length("factory"."change_agent_turn_intent"."session_id") <= 200)),
-	CONSTRAINT "change_agent_turn_intent_session_title_check" CHECK ((length("factory"."change_agent_turn_intent"."session_title") >= 1) AND (length("factory"."change_agent_turn_intent"."session_title") <= 200)),
-	CONSTRAINT "change_agent_turn_intent_skill_loading_check" CHECK ("factory"."change_agent_turn_intent"."skill_loading" = ANY (ARRAY['eager'::text, 'native'::text]))
+	CONSTRAINT "change_agent_turn_intent_session_title_check" CHECK ((length("factory"."change_agent_turn_intent"."session_title") >= 1) AND (length("factory"."change_agent_turn_intent"."session_title") <= 200))
 );
 
 CREATE TABLE "factory"."change_commit_operation" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"change_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid,
+	"runtime_attempt_id" uuid NOT NULL,
 	"sequence" integer NOT NULL,
 	"branch_name" text NOT NULL,
 	"expected_parent_sha" text NOT NULL,
 	"integration_base_sha" text,
-	"merge_parent_sha" text,
+	"is_merge" boolean DEFAULT false NOT NULL,
 	"commit_sha" text,
 	"observed_remote_sha" text,
 	"commit_message" text NOT NULL,
@@ -2456,48 +1934,19 @@ CREATE TABLE "factory"."change_commit_operation" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"completed_at" timestamp with time zone,
 	"source" "factory"."change_commit_source" DEFAULT 'agent' NOT NULL,
-	"repository_path" text,
-	"repository_blob_sha" text,
-	"repository_content" text,
-	"content_digest" text,
 	CONSTRAINT "change_commit_operation_change_id_sequence_key" UNIQUE("change_id","sequence"),
 	CONSTRAINT "change_commit_operation_idempotency_key_key" UNIQUE("idempotency_key"),
 	CONSTRAINT "change_commit_operation_expected_parent_sha_check" CHECK ("factory"."change_commit_operation"."expected_parent_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
 	CONSTRAINT "change_commit_integration_base" CHECK (("factory"."change_commit_operation"."integration_base_sha" IS NULL) OR ("factory"."change_commit_operation"."integration_base_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-	CONSTRAINT "change_commit_merge_parent" CHECK (("factory"."change_commit_operation"."merge_parent_sha" IS NULL) OR (("factory"."change_commit_operation"."merge_parent_sha" = "factory"."change_commit_operation"."integration_base_sha") AND ("factory"."change_commit_operation"."merge_parent_sha" <> "factory"."change_commit_operation"."expected_parent_sha"))),
+	CONSTRAINT "change_commit_is_merge" CHECK ((NOT "factory"."change_commit_operation"."is_merge") OR (("factory"."change_commit_operation"."integration_base_sha" IS NOT NULL) AND ("factory"."change_commit_operation"."integration_base_sha" <> "factory"."change_commit_operation"."expected_parent_sha"))),
 	CONSTRAINT "change_commit_operation_check" CHECK (("factory"."change_commit_operation"."state" = ANY (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state])) = ("factory"."change_commit_operation"."completed_at" IS NOT NULL)),
 	CONSTRAINT "change_commit_operation_check2" CHECK (("factory"."change_commit_operation"."state" <> 'succeeded'::change_commit_state) OR ("factory"."change_commit_operation"."observed_remote_sha" = "factory"."change_commit_operation"."commit_sha")),
 	CONSTRAINT "change_commit_operation_commit_message_check" CHECK ((length(btrim("factory"."change_commit_operation"."commit_message")) >= 1) AND (length(btrim("factory"."change_commit_operation"."commit_message")) <= 240)),
-	CONSTRAINT "change_commit_operation_commit_presence_check" CHECK (("factory"."change_commit_operation"."state" <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR ("factory"."change_commit_operation"."commit_sha" IS NOT NULL) OR (("factory"."change_commit_operation"."source" = 'repository-document'::change_commit_source) AND ("factory"."change_commit_operation"."state" = 'push-intended'::change_commit_state))),
+	CONSTRAINT "change_commit_operation_commit_presence_check" CHECK (("factory"."change_commit_operation"."state" <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR ("factory"."change_commit_operation"."commit_sha" IS NOT NULL)),
 	CONSTRAINT "change_commit_operation_commit_sha_check" CHECK (("factory"."change_commit_operation"."commit_sha" IS NULL) OR ("factory"."change_commit_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
 	CONSTRAINT "change_commit_operation_observed_remote_sha_check" CHECK (("factory"."change_commit_operation"."observed_remote_sha" IS NULL) OR ("factory"."change_commit_operation"."observed_remote_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
 	CONSTRAINT "change_commit_operation_sequence_check" CHECK ("factory"."change_commit_operation"."sequence" > 0),
-	CONSTRAINT "change_commit_operation_source_check" CHECK (((("factory"."change_commit_operation"."source")::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND ("factory"."change_commit_operation"."runtime_attempt_id" IS NOT NULL) AND ("factory"."change_commit_operation"."repository_path" IS NULL) AND ("factory"."change_commit_operation"."repository_blob_sha" IS NULL) AND ("factory"."change_commit_operation"."repository_content" IS NULL) AND ("factory"."change_commit_operation"."content_digest" IS NULL)) OR ((("factory"."change_commit_operation"."source")::text = 'repository-document'::text) AND ("factory"."change_commit_operation"."runtime_attempt_id" IS NULL) AND ("factory"."change_commit_operation"."repository_path" IS NOT NULL) AND ("factory"."change_commit_operation"."repository_blob_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND ("factory"."change_commit_operation"."repository_content" IS NOT NULL) AND ("factory"."change_commit_operation"."content_digest" ~ '^[0-9a-f]{64}$'::text)))
-);
-
-CREATE TABLE "factory"."change_editing_decision" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"target_id" uuid,
-	"request_id" uuid,
-	"writer_epoch" bigint NOT NULL,
-	"kind" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "change_editing_decision_kind_check" CHECK ("factory"."change_editing_decision"."kind" = ANY (ARRAY['takeover'::text, 'idle-takeover'::text, 'approve'::text, 'release'::text]))
-);
-
-CREATE TABLE "factory"."change_editing_request" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"requester_id" uuid NOT NULL,
-	"owner_id" uuid NOT NULL,
-	"writer_epoch" bigint NOT NULL,
-	"state" text DEFAULT 'requested' NOT NULL,
-	"decided_by" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"decided_at" timestamp with time zone,
-	CONSTRAINT "change_editing_request_state_check" CHECK ("factory"."change_editing_request"."state" = ANY (ARRAY['requested'::text, 'accepted'::text, 'superseded'::text]))
+	CONSTRAINT "change_commit_operation_source_check" CHECK ((("factory"."change_commit_operation"."source")::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND ("factory"."change_commit_operation"."runtime_attempt_id" IS NOT NULL))
 );
 
 CREATE TABLE "factory"."change_writer" (
@@ -2518,14 +1967,6 @@ CREATE TABLE "factory"."change_writer" (
 	CONSTRAINT "change_writer_epoch_check" CHECK ("factory"."change_writer"."epoch" > 0),
 	CONSTRAINT "change_writer_handoff_kind_check" CHECK ("factory"."change_writer"."handoff_kind" = ANY (ARRAY['takeover'::text, 'release'::text])),
 	CONSTRAINT "change_writer_state_check" CHECK ("factory"."change_writer"."state" = ANY (ARRAY['unassigned'::text, 'agent-preparing'::text, 'agent'::text, 'handoff'::text, 'human'::text]))
-);
-
-CREATE TABLE "factory"."coding_pause" (
-	"turn_id" uuid PRIMARY KEY NOT NULL,
-	"reason" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"resumed_by_turn_id" uuid,
-	CONSTRAINT "coding_pause_reason_check" CHECK ("factory"."coding_pause"."reason" = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
 );
 
 CREATE TABLE "factory"."conversation_context" (
@@ -2590,27 +2031,6 @@ CREATE TABLE "factory"."delivery_approval" (
 	CONSTRAINT "delivery_one_delegation" CHECK (("factory"."delivery_approval"."delivery_policy_id" IS NULL) OR ("factory"."delivery_approval"."monitoring_policy_id" IS NULL))
 );
 
-CREATE TABLE "factory"."developer_ide" (
-	"user_id" uuid PRIMARY KEY NOT NULL,
-	"service_epoch" bigint DEFAULT 1 NOT NULL,
-	"state" text NOT NULL,
-	"image" text NOT NULL,
-	"namespace_uid" text,
-	"pod_uid" text,
-	"failure" text,
-	"create_intended_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"create_observed_at" timestamp with time zone,
-	"stop_intended_at" timestamp with time zone,
-	"stopped_at" timestamp with time zone,
-	"last_active_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"resource_id" uuid DEFAULT gen_random_uuid() NOT NULL,
-	CONSTRAINT "developer_ide_resource_id_unique" UNIQUE("resource_id"),
-	CONSTRAINT "developer_ide_image_check" CHECK ("factory"."developer_ide"."image" ~ '@sha256:[0-9a-f]{64}$'::text),
-	CONSTRAINT "developer_ide_service_epoch_check" CHECK ("factory"."developer_ide"."service_epoch" > 0),
-	CONSTRAINT "developer_ide_state_check" CHECK ("factory"."developer_ide"."state" = ANY (ARRAY['create-intended'::text, 'preparing'::text, 'ready'::text, 'failed'::text, 'stop-intended'::text, 'stopped'::text]))
-);
-
 CREATE TABLE "factory"."development_workspace" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -2631,25 +2051,6 @@ CREATE TABLE "factory"."development_workspace" (
 	CONSTRAINT "development_workspace_source_revision_check" CHECK ("factory"."development_workspace"."source_revision" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
 );
 
-CREATE TABLE "factory"."environment_write" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"environment" text NOT NULL,
-	"base_version" bigint NOT NULL,
-	"fingerprint" text NOT NULL,
-	"manifest" jsonb NOT NULL,
-	"secret_key" text NOT NULL,
-	"state" text DEFAULT 'write-intended' NOT NULL,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"committed_at" timestamp with time zone,
-	CONSTRAINT "environment_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "environment_write_base_version_check" CHECK ("factory"."environment_write"."base_version" >= 0),
-	CONSTRAINT "environment_write_environment_check" CHECK ("factory"."environment_write"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "environment_write_fingerprint_check" CHECK ("factory"."environment_write"."fingerprint" ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "environment_write_state_check" CHECK ("factory"."environment_write"."state" = ANY (ARRAY['write-intended'::text, 'committed'::text, 'discarded'::text]))
-);
-
 CREATE TABLE "factory"."epic" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -2667,21 +2068,6 @@ CREATE TABLE "factory"."epic" (
 	CONSTRAINT "epic_version_check" CHECK ("factory"."epic"."version" > 0)
 );
 
-CREATE TABLE "factory"."epic_confirmation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"proposal_entry_id" uuid NOT NULL,
-	"epic_id" uuid NOT NULL,
-	"origin_ticket_id" uuid,
-	"input_digest" text NOT NULL,
-	"decision" jsonb NOT NULL,
-	"members" jsonb NOT NULL,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "epic_confirmation_proposal_entry_id_key" UNIQUE("proposal_entry_id"),
-	CONSTRAINT "epic_confirmation_input_digest_check" CHECK ("factory"."epic_confirmation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
-);
-
 CREATE TABLE "factory"."execution_policy" (
 	"scope" text PRIMARY KEY NOT NULL,
 	"version" bigint NOT NULL,
@@ -2695,141 +2081,6 @@ CREATE TABLE "factory"."execution_policy" (
 	CONSTRAINT "execution_policy_version_check" CHECK ("factory"."execution_policy"."version" >= 1)
 );
 
-CREATE TABLE "factory"."execution_policy_command" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"scope" text NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"input" jsonb NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE "factory"."external_identity" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"issuer" text NOT NULL,
-	"subject" text NOT NULL,
-	"user_id" uuid NOT NULL,
-	"directory_subject" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "external_identity_issuer_subject_key" UNIQUE("issuer","subject")
-);
-
-CREATE TABLE "factory"."forge_account_intent" (
-	"user_id" uuid PRIMARY KEY NOT NULL,
-	"username" text NOT NULL,
-	"source_id" bigint NOT NULL,
-	"forge_user_id" bigint,
-	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"observed_at" timestamp with time zone,
-	CONSTRAINT "forge_account_intent_username_key" UNIQUE("username"),
-	CONSTRAINT "forge_account_intent_state_check" CHECK ("factory"."forge_account_intent"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text, 'disabled'::text]))
-);
-
-CREATE TABLE "factory"."forge_branch_intent" (
-	"project_id" uuid NOT NULL,
-	"branch" text NOT NULL,
-	"writers" text[] NOT NULL,
-	"merger" text NOT NULL,
-	"confirmed" boolean DEFAULT false NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "forge_branch_intent_pkey" PRIMARY KEY("project_id","branch")
-);
-
-CREATE TABLE "factory"."forge_connection" (
-	"id" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"source_name" text NOT NULL,
-	"discovery_url" text NOT NULL,
-	"redirect_uri" text NOT NULL,
-	"source_id" bigint,
-	"state" text NOT NULL,
-	"intended_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"observed_at" timestamp with time zone,
-	CONSTRAINT "forge_connection_id_check" CHECK (("factory"."forge_connection"."id")),
-	CONSTRAINT "forge_connection_source_name_check" CHECK ("factory"."forge_connection"."source_name" = 'Factory'::text),
-	CONSTRAINT "forge_connection_state_check" CHECK ("factory"."forge_connection"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text]))
-);
-
-CREATE TABLE "factory"."forge_grant_intent" (
-	"project_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"desired" boolean NOT NULL,
-	"confirmed" boolean,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "forge_grant_intent_pkey" PRIMARY KEY("project_id","user_id")
-);
-
-CREATE TABLE "factory"."forge_identity_intent" (
-	"client_id" text PRIMARY KEY NOT NULL,
-	"redirect_uri" text NOT NULL,
-	"intended_by" uuid NOT NULL,
-	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"observed_at" timestamp with time zone,
-	CONSTRAINT "forge_identity_intent_state_check" CHECK ("factory"."forge_identity_intent"."state" = ANY (ARRAY['create-intended'::text, 'ready'::text]))
-);
-
-CREATE TABLE "factory"."identity_configuration" (
-	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"version" bigint NOT NULL,
-	"setup_id" uuid NOT NULL,
-	"activated_by" uuid NOT NULL,
-	"activated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "identity_configuration_singleton_check" CHECK (("factory"."identity_configuration"."singleton"))
-);
-
-CREATE TABLE "factory"."identity_setup" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"base_version" bigint NOT NULL,
-	"metadata" jsonb NOT NULL,
-	"fingerprint" text NOT NULL,
-	"secret_key" text NOT NULL,
-	"created_by" uuid NOT NULL,
-	"state" text NOT NULL,
-	"tested_at" timestamp with time zone,
-	"tested_user_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "identity_setup_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "identity_setup_base_version_check" CHECK ("factory"."identity_setup"."base_version" >= 0),
-	CONSTRAINT "identity_setup_state_check" CHECK ("factory"."identity_setup"."state" = ANY (ARRAY['write-intended'::text, 'saved'::text, 'active'::text, 'superseded'::text]))
-);
-
-CREATE TABLE "factory"."implementation_order" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"ticket_id" uuid NOT NULL,
-	"created_by" uuid NOT NULL,
-	"requirement_revision_id" uuid NOT NULL,
-	"technical_design_revision_id" uuid,
-	"coding_reasoning" text,
-	"source_sha" text NOT NULL,
-	"state" text DEFAULT 'waiting' NOT NULL,
-	"change_id" uuid,
-	"cancelled_by" uuid,
-	"cancelled_at" timestamp with time zone,
-	"last_error" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "implementation_order_source_sha_check" CHECK ("factory"."implementation_order"."source_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "implementation_order_state_check" CHECK ("factory"."implementation_order"."state" = ANY (ARRAY['waiting'::text, 'started'::text, 'blocked'::text, 'cancelled'::text]))
-);
-
-CREATE TABLE "factory"."inbox_receipt" (
-	"user_id" uuid NOT NULL,
-	"item_id" text NOT NULL,
-	"seen_event_id" text,
-	"archived" boolean DEFAULT false NOT NULL,
-	CONSTRAINT "inbox_receipt_pkey" PRIMARY KEY("user_id","item_id")
-);
-
-CREATE TABLE "factory"."installation_maintenance" (
-	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"enabled" boolean DEFAULT false NOT NULL,
-	"requested_at" timestamp with time zone,
-	CONSTRAINT "installation_maintenance_singleton_check" CHECK (("factory"."installation_maintenance"."singleton"))
-);
-
 CREATE TABLE "auth"."jwks" (
 	"id" text PRIMARY KEY NOT NULL,
 	"publicKey" text NOT NULL,
@@ -2838,33 +2089,6 @@ CREATE TABLE "auth"."jwks" (
 	"expiresAt" timestamp with time zone,
 	"alg" text,
 	"crv" text
-);
-
-CREATE TABLE "factory"."knowledge_generation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"source_commit_sha" text NOT NULL,
-	"state" "factory"."knowledge_generation_state" DEFAULT 'pending' NOT NULL,
-	"page_count" integer,
-	"conflict_count" integer,
-	"failure" text,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	"model_id" text,
-	"attempt_id" uuid,
-	"model_connection_id" uuid,
-	"model_connection_version" bigint,
-	"progress" jsonb,
-	CONSTRAINT "knowledge_generation_check" CHECK (("factory"."knowledge_generation"."state" = ANY (ARRAY['succeeded'::knowledge_generation_state, 'failed'::knowledge_generation_state])) = ("factory"."knowledge_generation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "knowledge_generation_conflict_count_check" CHECK (("factory"."knowledge_generation"."conflict_count" IS NULL) OR ("factory"."knowledge_generation"."conflict_count" >= 0)),
-	CONSTRAINT "knowledge_generation_failure_check" CHECK (("factory"."knowledge_generation"."failure" IS NULL) OR (length("factory"."knowledge_generation"."failure") <= 4000)),
-	CONSTRAINT "knowledge_generation_model_id_check" CHECK (("factory"."knowledge_generation"."model_id" IS NULL) OR ((length("factory"."knowledge_generation"."model_id") >= 1) AND (length("factory"."knowledge_generation"."model_id") <= 200))),
-	CONSTRAINT "knowledge_generation_page_count_check" CHECK (("factory"."knowledge_generation"."page_count" IS NULL) OR ("factory"."knowledge_generation"."page_count" >= 0)),
-	CONSTRAINT "knowledge_generation_progress_shape" CHECK (("factory"."knowledge_generation"."progress" IS NULL) OR ((jsonb_typeof("factory"."knowledge_generation"."progress") = 'object'::text) AND (("factory"."knowledge_generation"."progress" ->> 'phase'::text) = ANY (ARRAY['planning'::text, 'writing'::text, 'publishing'::text, 'done'::text])) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'topicsTotal'::text)) = 'number'::text) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'topicsDone'::text)) = 'number'::text) AND (((("factory"."knowledge_generation"."progress" ->> 'topicsTotal'::text))::numeric >= (0)::numeric) AND ((("factory"."knowledge_generation"."progress" ->> 'topicsTotal'::text))::numeric <= (100)::numeric)) AND (((("factory"."knowledge_generation"."progress" ->> 'topicsDone'::text))::numeric >= (0)::numeric) AND ((("factory"."knowledge_generation"."progress" ->> 'topicsDone'::text))::numeric <= (100)::numeric)) AND (jsonb_typeof(("factory"."knowledge_generation"."progress" -> 'currentTopic'::text)) = ANY (ARRAY['string'::text, 'null'::text])) AND (octet_length(("factory"."knowledge_generation"."progress")::text) <= 1000))),
-	CONSTRAINT "knowledge_generation_source_commit_sha_check" CHECK ("factory"."knowledge_generation"."source_commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "knowledge_model_connection_pair" CHECK (("factory"."knowledge_generation"."model_connection_id" IS NULL) = ("factory"."knowledge_generation"."model_connection_version" IS NULL))
 );
 
 CREATE TABLE "factory"."knowledge_page" (
@@ -2900,15 +2124,6 @@ CREATE TABLE "factory"."knowledge_page" (
 	CONSTRAINT "knowledge_page_source_commit_sha_check" CHECK ("factory"."knowledge_page"."source_commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
 	CONSTRAINT "knowledge_page_title_check" CHECK ((length(btrim("factory"."knowledge_page"."title")) >= 1) AND (length(btrim("factory"."knowledge_page"."title")) <= 200)),
 	CONSTRAINT "knowledge_page_version_check" CHECK ("factory"."knowledge_page"."version" > 0)
-);
-
-CREATE TABLE "factory"."knowledge_page_alias" (
-	"project_id" uuid NOT NULL,
-	"slug" text NOT NULL,
-	"page_id" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "knowledge_page_alias_pkey" PRIMARY KEY("project_id","slug"),
-	CONSTRAINT "knowledge_page_alias_slug_check" CHECK ("factory"."knowledge_page_alias"."slug" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)
 );
 
 CREATE TABLE "factory"."knowledge_page_outline" (
@@ -2950,31 +2165,6 @@ CREATE TABLE "factory"."knowledge_revision" (
 	CONSTRAINT "knowledge_revision_title_check" CHECK ((length(btrim("factory"."knowledge_revision"."title")) >= 1) AND (length(btrim("factory"."knowledge_revision"."title")) <= 200))
 );
 
-CREATE TABLE "factory"."learning_application" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"proposal_id" uuid NOT NULL,
-	"target" jsonb NOT NULL,
-	"edit_digest" text NOT NULL,
-	"activation" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"applied_revision_id" uuid NOT NULL,
-	"applied_version" integer NOT NULL,
-	"applied_by" uuid NOT NULL,
-	"comparison_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"state" text DEFAULT 'applied' NOT NULL,
-	"reverted_revision_id" uuid,
-	"reverted_version" integer,
-	"reverted_by" uuid,
-	"reverted_comparison_id" uuid,
-	"reverted_at" timestamp with time zone,
-	CONSTRAINT "learning_application_proposal_id_key" UNIQUE("proposal_id"),
-	CONSTRAINT "learning_application_applied_version_check" CHECK ("factory"."learning_application"."applied_version" > 0),
-	CONSTRAINT "learning_application_activation_check" CHECK ((jsonb_typeof("factory"."learning_application"."activation") = 'array'::text) AND (jsonb_array_length("factory"."learning_application"."activation") <= 2)),
-	CONSTRAINT "learning_application_check" CHECK ((("factory"."learning_application"."state" = 'applied'::text) AND ("factory"."learning_application"."reverted_revision_id" IS NULL) AND ("factory"."learning_application"."reverted_version" IS NULL) AND ("factory"."learning_application"."reverted_by" IS NULL) AND ("factory"."learning_application"."reverted_at" IS NULL) AND ("factory"."learning_application"."reverted_comparison_id" IS NULL)) OR (("factory"."learning_application"."state" = 'reverted'::text) AND ("factory"."learning_application"."reverted_revision_id" IS NOT NULL) AND ("factory"."learning_application"."reverted_version" = ("factory"."learning_application"."applied_version" + 1)) AND ("factory"."learning_application"."reverted_by" IS NOT NULL) AND ("factory"."learning_application"."reverted_at" IS NOT NULL))),
-	CONSTRAINT "learning_application_edit_digest_check" CHECK ("factory"."learning_application"."edit_digest" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_application_state_check" CHECK ("factory"."learning_application"."state" = ANY (ARRAY['applied'::text, 'reverted'::text]))
-);
-
 CREATE TABLE "factory"."learning_case" (
 	"id" text PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -2992,27 +2182,6 @@ CREATE TABLE "factory"."learning_case" (
 	CONSTRAINT "learning_case_snapshot_check" CHECK (octet_length(("factory"."learning_case"."snapshot")::text) <= 65536)
 );
 
-CREATE TABLE "factory"."learning_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"input" jsonb NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE "factory"."learning_policy" (
-	"scope_key" text PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"owner_id" uuid,
-	"enabled" boolean NOT NULL,
-	"automatic_skills" boolean DEFAULT false NOT NULL,
-	"version" integer NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "learning_policy_check" CHECK ("factory"."learning_policy"."scope_key" = ((("factory"."learning_policy"."project_id")::text || ':'::text) || COALESCE(("factory"."learning_policy"."owner_id")::text, 'project'::text))),
-	CONSTRAINT "learning_policy_version_check" CHECK ("factory"."learning_policy"."version" > 0)
-);
-
 CREATE TABLE "factory"."learning_proposal" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"review_id" uuid NOT NULL,
@@ -3023,11 +2192,13 @@ CREATE TABLE "factory"."learning_proposal" (
 	"decided_by" uuid,
 	"decided_at" timestamp with time zone,
 	"ticket_id" uuid,
+	"application" jsonb,
 	CONSTRAINT "learning_proposal_review_id_ordinal_key" UNIQUE("review_id","ordinal"),
 	CONSTRAINT "learning_proposal_decision_id_key" UNIQUE("decision_id"),
 	CONSTRAINT "learning_proposal_content_check" CHECK (octet_length(("factory"."learning_proposal"."content")::text) <= 32000),
 	CONSTRAINT "learning_proposal_ordinal_check" CHECK ("factory"."learning_proposal"."ordinal" >= 0),
-	CONSTRAINT "learning_proposal_state_check" CHECK ("factory"."learning_proposal"."state" = ANY (ARRAY['proposed'::text, 'dismissed'::text, 'ticket-created'::text, 'applied'::text]))
+	CONSTRAINT "learning_proposal_state_check" CHECK ("factory"."learning_proposal"."state" = ANY (ARRAY['proposed'::text, 'dismissed'::text, 'ticket-created'::text, 'applied'::text])),
+	CONSTRAINT "learning_proposal_application_check" CHECK ("factory"."learning_proposal"."application" IS NULL OR jsonb_typeof("factory"."learning_proposal"."application") = 'object'::text)
 );
 
 CREATE TABLE "factory"."learning_review" (
@@ -3058,103 +2229,6 @@ CREATE TABLE "factory"."learning_review" (
 	CONSTRAINT "learning_review_state_check" CHECK ("factory"."learning_review"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
 );
 
-CREATE TABLE "factory"."learning_source_artifact" (
-	"turn_id" uuid NOT NULL,
-	"ordinal" integer NOT NULL,
-	"reference" text NOT NULL,
-	"body" text NOT NULL,
-	"truncated" boolean NOT NULL,
-	CONSTRAINT "learning_source_artifact_pkey" PRIMARY KEY("turn_id","ordinal"),
-	CONSTRAINT "learning_source_artifact_body_check" CHECK ((length("factory"."learning_source_artifact"."body") >= 1) AND (length("factory"."learning_source_artifact"."body") <= 2000)),
-	CONSTRAINT "learning_source_artifact_ordinal_check" CHECK (("factory"."learning_source_artifact"."ordinal" >= 0) AND ("factory"."learning_source_artifact"."ordinal" <= 2)),
-	CONSTRAINT "learning_source_artifact_reference_check" CHECK ((length("factory"."learning_source_artifact"."reference") >= 1) AND (length("factory"."learning_source_artifact"."reference") <= 400))
-);
-
-CREATE TABLE "factory"."learning_trial" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"proposal_id" uuid NOT NULL,
-	"phase" text NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"policy_version" integer NOT NULL,
-	"model_id" text NOT NULL,
-	"model_connection" jsonb,
-	"judge_key" text NOT NULL,
-	"rubric" text NOT NULL,
-	"input" jsonb NOT NULL,
-	"input_digest" text NOT NULL,
-	"state" text DEFAULT 'running' NOT NULL,
-	"result" jsonb,
-	"reason" text,
-	"owner_token" uuid NOT NULL,
-	"owner_expires_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "learning_trial_proposal_id_phase_key" UNIQUE("proposal_id","phase"),
-	CONSTRAINT "learning_trial_input_check" CHECK (octet_length(("factory"."learning_trial"."input")::text) <= 196608),
-	CONSTRAINT "learning_trial_input_digest_check" CHECK ("factory"."learning_trial"."input_digest" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_trial_phase_check" CHECK ("factory"."learning_trial"."phase" = ANY (ARRAY['adopt'::text, 'recover'::text])),
-	CONSTRAINT "learning_trial_policy_version_check" CHECK ("factory"."learning_trial"."policy_version" > 0),
-	CONSTRAINT "learning_trial_result_check" CHECK (octet_length(("factory"."learning_trial"."result")::text) <= 65536),
-	CONSTRAINT "learning_trial_state_check" CHECK ("factory"."learning_trial"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."learning_trial_step" (
-	"trial_id" uuid NOT NULL,
-	"stage" integer NOT NULL,
-	"input" jsonb NOT NULL,
-	"input_digest" text NOT NULL,
-	"state" text DEFAULT 'running' NOT NULL,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "learning_trial_step_pkey" PRIMARY KEY("trial_id","stage"),
-	CONSTRAINT "learning_trial_step_input_check" CHECK (octet_length(("factory"."learning_trial_step"."input")::text) <= 196608),
-	CONSTRAINT "learning_trial_step_input_digest_check" CHECK ("factory"."learning_trial_step"."input_digest" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "learning_trial_step_result_check" CHECK (octet_length(("factory"."learning_trial_step"."result")::text) <= 65536),
-	CONSTRAINT "learning_trial_step_stage_check" CHECK (("factory"."learning_trial_step"."stage" >= 0) AND ("factory"."learning_trial_step"."stage" <= 2)),
-	CONSTRAINT "learning_trial_step_state_check" CHECK ("factory"."learning_trial_step"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."mcp_access_decision" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"credential_epoch" uuid NOT NULL,
-	"project_id" uuid,
-	"action" text NOT NULL,
-	"decided_by" uuid NOT NULL,
-	"decided_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_access_decision_action_check" CHECK ("factory"."mcp_access_decision"."action" = ANY (ARRAY['grant'::text, 'revoke'::text, 'disconnect'::text]))
-);
-
-CREATE TABLE "factory"."mcp_choice" (
-	"library_id" uuid NOT NULL,
-	"scope" text NOT NULL,
-	"context_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"role" text NOT NULL,
-	"state" text NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"version" bigint NOT NULL,
-	CONSTRAINT "mcp_choice_pkey" PRIMARY KEY("library_id","scope","context_id","user_id","role"),
-	CONSTRAINT "mcp_choice_check" CHECK (("factory"."mcp_choice"."scope" <> 'personal'::text) OR ("factory"."mcp_choice"."state" <> 'required'::text)),
-	CONSTRAINT "mcp_choice_role_check" CHECK ("factory"."mcp_choice"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "mcp_choice_scope_check" CHECK ("factory"."mcp_choice"."scope" = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])),
-	CONSTRAINT "mcp_choice_state_check" CHECK ("factory"."mcp_choice"."state" = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
-	CONSTRAINT "mcp_choice_version_check" CHECK ("factory"."mcp_choice"."version" > 0)
-);
-
-CREATE TABLE "factory"."mcp_connect_intent" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"created_by" uuid NOT NULL,
-	"fingerprint" text NOT NULL,
-	"state" text NOT NULL,
-	"authorization_url" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_connect_intent_state_check" CHECK ("factory"."mcp_connect_intent"."state" = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'uncertain'::text]))
-);
-
 CREATE TABLE "factory"."mcp_connection" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"revision_id" uuid NOT NULL,
@@ -3164,10 +2238,12 @@ CREATE TABLE "factory"."mcp_connection" (
 	"credential_epoch" uuid NOT NULL,
 	"tools" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"allowed_tools" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"project_grants" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"authorized_by" uuid NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "mcp_connection_state_check" CHECK ("factory"."mcp_connection"."state" = ANY (ARRAY['disconnected'::text, 'authorizing'::text, 'review'::text, 'ready'::text, 'reconnect'::text, 'revoked'::text])),
-	CONSTRAINT "mcp_connection_tools_check" CHECK ((jsonb_typeof("factory"."mcp_connection"."tools") = 'array'::text) AND (octet_length(("factory"."mcp_connection"."tools")::text) <= 1000000))
+	CONSTRAINT "mcp_connection_tools_check" CHECK ((jsonb_typeof("factory"."mcp_connection"."tools") = 'array'::text) AND (octet_length(("factory"."mcp_connection"."tools")::text) <= 1000000)),
+	CONSTRAINT "mcp_connection_project_grants_check" CHECK (jsonb_typeof("factory"."mcp_connection"."project_grants") = 'object'::text)
 );
 
 CREATE TABLE "factory"."mcp_library" (
@@ -3175,61 +2251,14 @@ CREATE TABLE "factory"."mcp_library" (
 	"scope" text NOT NULL,
 	"owner_id" uuid,
 	"project_id" uuid,
+	"cover_key" text,
+	"cover_version" bigint,
+	"cover_updated_by" uuid,
 	CONSTRAINT "mcp_library_check" CHECK ((("factory"."mcp_library"."scope" = 'personal'::text) AND ("factory"."mcp_library"."owner_id" IS NOT NULL) AND ("factory"."mcp_library"."project_id" IS NULL)) OR (("factory"."mcp_library"."scope" = 'project'::text) AND ("factory"."mcp_library"."owner_id" IS NULL) AND ("factory"."mcp_library"."project_id" IS NOT NULL)) OR (("factory"."mcp_library"."scope" = 'system'::text) AND ("factory"."mcp_library"."owner_id" IS NULL) AND ("factory"."mcp_library"."project_id" IS NULL))),
-	CONSTRAINT "mcp_library_scope_check" CHECK ("factory"."mcp_library"."scope" = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text]))
-);
-
-CREATE TABLE "factory"."mcp_library_cover" (
-	"library_id" uuid PRIMARY KEY NOT NULL,
-	"cover_key" text NOT NULL,
-	"version" bigint NOT NULL,
-	"updated_by" uuid NOT NULL,
-	CONSTRAINT "mcp_library_cover_cover_key_check" CHECK ("factory"."mcp_library_cover"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
-	CONSTRAINT "mcp_library_cover_version_check" CHECK ("factory"."mcp_library_cover"."version" > 0)
-);
-
-CREATE TABLE "factory"."mcp_oauth_flow" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"created_by" uuid NOT NULL,
-	"state_digest" text NOT NULL,
-	"state" text NOT NULL,
-	"expires_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_oauth_flow_state_digest_key" UNIQUE("state_digest"),
-	CONSTRAINT "mcp_oauth_flow_state_check" CHECK ("factory"."mcp_oauth_flow"."state" = ANY (ARRAY['pending'::text, 'exchanging'::text, 'completed'::text, 'failed'::text]))
-);
-
-CREATE TABLE "factory"."mcp_observation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"turn_id" uuid NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"tool_name" text NOT NULL,
-	"tool_digest" text NOT NULL,
-	"result_digest" text NOT NULL,
-	"is_error" boolean NOT NULL,
-	"observed_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE "factory"."mcp_policy_approval" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"credential_epoch" uuid NOT NULL,
-	"version" bigint NOT NULL,
-	"tools" jsonb NOT NULL,
-	"reviewed_by" uuid NOT NULL,
-	"reviewed_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_policy_approval_connection_id_version_key" UNIQUE("connection_id","version")
-);
-
-CREATE TABLE "factory"."mcp_project_grant" (
-	"connection_id" uuid NOT NULL,
-	"credential_epoch" uuid NOT NULL,
-	"project_id" uuid NOT NULL,
-	"granted_by" uuid NOT NULL,
-	"granted_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_project_grant_pkey" PRIMARY KEY("connection_id","project_id")
+	CONSTRAINT "mcp_library_scope_check" CHECK ("factory"."mcp_library"."scope" = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])),
+	CONSTRAINT "mcp_library_cover_nulls_check" CHECK (("factory"."mcp_library"."cover_key" IS NULL) = ("factory"."mcp_library"."cover_version" IS NULL AND "factory"."mcp_library"."cover_updated_by" IS NULL)),
+	CONSTRAINT "mcp_library_cover_key_check" CHECK ("factory"."mcp_library"."cover_key" IS NULL OR "factory"."mcp_library"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
+	CONSTRAINT "mcp_library_cover_version_check" CHECK ("factory"."mcp_library"."cover_version" IS NULL OR "factory"."mcp_library"."cover_version" > 0)
 );
 
 CREATE TABLE "factory"."mcp_revision" (
@@ -3246,64 +2275,6 @@ CREATE TABLE "factory"."mcp_revision" (
 	CONSTRAINT "mcp_revision_revision_check" CHECK ("factory"."mcp_revision"."revision" > 0)
 );
 
-CREATE TABLE "factory"."mcp_secret_write" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"base_key" text,
-	"credential_epoch" uuid NOT NULL,
-	"secret_key" text NOT NULL,
-	"digest" text NOT NULL,
-	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_secret_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "mcp_secret_write_state_check" CHECK ("factory"."mcp_secret_write"."state" = ANY (ARRAY['intended'::text, 'committed'::text, 'superseded'::text]))
-);
-
-CREATE TABLE "factory"."mcp_share_proposal" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"proposed_by" uuid NOT NULL,
-	"target" text NOT NULL,
-	"project_id" uuid,
-	"accepted_library_id" uuid,
-	"accepted_by" uuid,
-	"accepted_at" timestamp with time zone,
-	CONSTRAINT "mcp_share_proposal_check" CHECK (("factory"."mcp_share_proposal"."target" = 'project'::text) = ("factory"."mcp_share_proposal"."project_id" IS NOT NULL)),
-	CONSTRAINT "mcp_share_proposal_target_check" CHECK ("factory"."mcp_share_proposal"."target" = ANY (ARRAY['project'::text, 'system'::text]))
-);
-
-CREATE TABLE "factory"."mcp_token_refresh" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"credential_epoch" uuid NOT NULL,
-	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "mcp_token_refresh_state_check" CHECK ("factory"."mcp_token_refresh"."state" = ANY (ARRAY['intended'::text, 'committed'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."merge_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"delivery_approval_id" uuid NOT NULL,
-	"pull_request_number" bigint NOT NULL,
-	"base_sha" text NOT NULL,
-	"commit_sha" text NOT NULL,
-	"idempotency_key" text NOT NULL,
-	"state" "factory"."merge_operation_state" DEFAULT 'pending' NOT NULL,
-	"observed_default_sha" text,
-	"last_error" text,
-	"requested_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "merge_operation_delivery_approval_id_key" UNIQUE("delivery_approval_id"),
-	CONSTRAINT "merge_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "merge_operation_base_sha_check" CHECK ("factory"."merge_operation"."base_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "merge_operation_check" CHECK (("factory"."merge_operation"."state" = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = ("factory"."merge_operation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "merge_operation_check1" CHECK (("factory"."merge_operation"."state" <> 'succeeded'::merge_operation_state) OR ("factory"."merge_operation"."observed_default_sha" = "factory"."merge_operation"."commit_sha")),
-	CONSTRAINT "merge_operation_commit_sha_check" CHECK ("factory"."merge_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "merge_operation_observed_default_sha_check" CHECK (("factory"."merge_operation"."observed_default_sha" IS NULL) OR ("factory"."merge_operation"."observed_default_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text))
-);
-
 CREATE TABLE "factory"."model_connection_version" (
 	"connection_id" uuid NOT NULL,
 	"version" bigint NOT NULL,
@@ -3318,91 +2289,26 @@ CREATE TABLE "factory"."model_connection_version" (
 	CONSTRAINT "model_connection_version_version_check" CHECK ("factory"."model_connection_version"."version" > 0)
 );
 
-CREATE TABLE "factory"."model_connection_write" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"base_version" bigint NOT NULL,
-	"provider" text NOT NULL,
-	"endpoint" text NOT NULL,
-	"fingerprint" text NOT NULL,
-	"secret_key" text NOT NULL,
-	"state" text DEFAULT 'write-intended' NOT NULL,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"committed_at" timestamp with time zone,
-	CONSTRAINT "model_connection_write_secret_key_key" UNIQUE("secret_key"),
-	CONSTRAINT "model_connection_write_fingerprint_check" CHECK ("factory"."model_connection_write"."fingerprint" ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "model_connection_write_base_version_check" CHECK ("factory"."model_connection_write"."base_version" >= 0),
-	CONSTRAINT "model_connection_write_provider_check" CHECK ("factory"."model_connection_write"."provider" = ANY (ARRAY['openai'::text, 'anthropic'::text, 'deepseek'::text])),
-	CONSTRAINT "model_connection_write_state_check" CHECK ("factory"."model_connection_write"."state" = ANY (ARRAY['write-intended'::text, 'committed'::text]))
-);
-
-CREATE TABLE "factory"."model_defaults" (
-	"singleton" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"version" bigint NOT NULL,
-	"planning_model_id" text NOT NULL,
-	"build_model_id" text NOT NULL,
-	"updated_by" uuid NOT NULL,
+CREATE TABLE "factory"."model_settings" (
+	"scope_type" text NOT NULL,
+	"scope_key" text NOT NULL,
+	"project_id" uuid,
+	"user_id" uuid,
+	"version" bigint DEFAULT 1 NOT NULL,
+	"settings" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"connection_id" uuid,
+	"connection_version" bigint,
+	"updated_by" uuid,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"role_rules" jsonb,
-	CONSTRAINT "model_defaults_build_model_id_check" CHECK ((length("factory"."model_defaults"."build_model_id") >= 1) AND (length("factory"."model_defaults"."build_model_id") <= 200)),
-	CONSTRAINT "model_defaults_planning_model_id_check" CHECK ((length("factory"."model_defaults"."planning_model_id") >= 1) AND (length("factory"."model_defaults"."planning_model_id") <= 200)),
-	CONSTRAINT "model_defaults_singleton_check" CHECK (("factory"."model_defaults"."singleton")),
-	CONSTRAINT "model_defaults_version_check" CHECK ("factory"."model_defaults"."version" > 0),
-	CONSTRAINT "model_role_rules_object" CHECK (("factory"."model_defaults"."role_rules" IS NULL) OR (jsonb_typeof("factory"."model_defaults"."role_rules") = 'object'::text))
-);
-
-CREATE TABLE "factory"."model_role_connection" (
-	"role" text PRIMARY KEY NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"connection_version" bigint NOT NULL,
-	"model_id" text NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "model_role_connection_role_check" CHECK ("factory"."model_role_connection"."role" = ANY (ARRAY['planning'::text, 'build'::text]))
-);
-
-CREATE TABLE "factory"."model_role_probe" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"role" text NOT NULL,
-	"connection_id" uuid NOT NULL,
-	"connection_version" bigint NOT NULL,
-	"model_id" text NOT NULL,
-	"settings_version" bigint NOT NULL,
-	"created_by" uuid NOT NULL,
-	"state" text NOT NULL,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"finished_at" timestamp with time zone,
-	"reasoning_effort" text,
-	CONSTRAINT "model_role_probe_check" CHECK (("factory"."model_role_probe"."state" = 'probing'::text) = ("factory"."model_role_probe"."result" IS NULL)),
-	CONSTRAINT "model_role_probe_reasoning_check" CHECK (("factory"."model_role_probe"."reasoning_effort" IS NULL) OR (("factory"."model_role_probe"."role" = 'build'::text) AND ("factory"."model_role_probe"."reasoning_effort" = ANY (ARRAY['medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))),
-	CONSTRAINT "model_role_probe_result_check" CHECK (("factory"."model_role_probe"."result" IS NULL) OR (jsonb_typeof("factory"."model_role_probe"."result") = 'object'::text)),
-	CONSTRAINT "model_role_probe_role_check" CHECK ("factory"."model_role_probe"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "model_role_probe_settings_version_check" CHECK ("factory"."model_role_probe"."settings_version" >= 0),
-	CONSTRAINT "model_role_probe_state_check" CHECK ("factory"."model_role_probe"."state" = ANY (ARRAY['probing'::text, 'finished'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."monitoring_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"hook_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"input_digest" text NOT NULL,
-	"action" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "monitoring_command_action_check" CHECK ("factory"."monitoring_command"."action" = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text]))
-);
-
-CREATE TABLE "factory"."monitoring_evidence" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"incident_id" uuid NOT NULL,
-	"kind" text NOT NULL,
-	"digest" text NOT NULL,
-	"path" text,
-	"commit_sha" text,
-	"observed_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "monitoring_evidence_digest_check" CHECK ("factory"."monitoring_evidence"."digest" ~ '^[a-f0-9]{64}$'::text)
+	CONSTRAINT "model_settings_pkey" PRIMARY KEY("scope_type","scope_key"),
+	CONSTRAINT "model_settings_scope_type_check" CHECK ("factory"."model_settings"."scope_type" = ANY (ARRAY['default'::text, 'project'::text, 'personal'::text, 'role_connection'::text])),
+	CONSTRAINT "model_settings_version_check" CHECK ("factory"."model_settings"."version" > 0),
+	CONSTRAINT "model_settings_settings_check" CHECK (jsonb_typeof("factory"."model_settings"."settings") = 'object'::text),
+	CONSTRAINT "model_settings_connection_pair_check" CHECK (("factory"."model_settings"."connection_id" IS NULL) = ("factory"."model_settings"."connection_version" IS NULL)),
+	CONSTRAINT "model_settings_role_connection_check" CHECK (("factory"."model_settings"."scope_type" <> 'role_connection'::text) OR (("factory"."model_settings"."scope_key" = ANY (ARRAY['planning'::text, 'build'::text])) AND ("factory"."model_settings"."connection_id" IS NOT NULL))),
+	CONSTRAINT "model_settings_project_scope_check" CHECK (("factory"."model_settings"."scope_type" <> 'project'::text) OR (("factory"."model_settings"."project_id" IS NOT NULL) AND ("factory"."model_settings"."user_id" IS NULL))),
+	CONSTRAINT "model_settings_personal_scope_check" CHECK (("factory"."model_settings"."scope_type" <> 'personal'::text) OR (("factory"."model_settings"."project_id" IS NOT NULL) AND ("factory"."model_settings"."user_id" IS NOT NULL))),
+	CONSTRAINT "model_settings_default_scope_check" CHECK (("factory"."model_settings"."scope_type" <> 'default'::text) OR (("factory"."model_settings"."scope_key" = 'default'::text) AND ("factory"."model_settings"."project_id" IS NULL) AND ("factory"."model_settings"."user_id" IS NULL)))
 );
 
 CREATE TABLE "factory"."monitoring_hook" (
@@ -3456,14 +2362,11 @@ CREATE TABLE "factory"."monitoring_incident" (
 CREATE TABLE "factory"."monitoring_policy" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"hook_id" uuid NOT NULL,
-	"connection_id" uuid,
-	"assignment" jsonb,
 	"delegated_by" uuid NOT NULL,
-	"delegated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"delegation" text NOT NULL,
 	"instructions" text,
 	"source_ids" uuid[] DEFAULT '{}' NOT NULL,
-	"source_assignments" jsonb,
+	"source_assignments" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	CONSTRAINT "monitoring_policy_delegation_check" CHECK ("factory"."monitoring_policy"."delegation" = ANY (ARRAY['prepare-ticket'::text, 'application-fix-and-delivery'::text])),
 	CONSTRAINT "monitoring_policy_instructions_check" CHECK ((length("factory"."monitoring_policy"."instructions") >= 1) AND (length("factory"."monitoring_policy"."instructions") <= 6000))
 );
@@ -3593,41 +2496,26 @@ CREATE TABLE "auth"."oauthResource" (
 	CONSTRAINT "oauthResource_identifier_key" UNIQUE("identifier")
 );
 
-CREATE TABLE "factory"."personal_git_operation" (
+CREATE TABLE "factory"."operation" (
 	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"action" text NOT NULL,
-	"expected_head" text NOT NULL,
-	"branch" text NOT NULL,
-	"message" text NOT NULL,
-	"state" text DEFAULT 'intended' NOT NULL,
+	"kind" text NOT NULL,
+	"scope_type" text NOT NULL,
+	"scope_id" text NOT NULL,
+	"idempotency_key" text,
+	"active_key" text,
+	"state" text NOT NULL,
+	"payload" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"result" jsonb,
-	"failure" text,
+	"error" text,
+	"created_by" uuid,
+	"lease_owner" text,
+	"lease_expires_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"attempted_at" timestamp with time zone,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "personal_git_operation_action_check" CHECK ("factory"."personal_git_operation"."action" = ANY (ARRAY['commit'::text, 'fetch'::text, 'pull'::text])),
-	CONSTRAINT "personal_git_operation_branch_check" CHECK ((length("factory"."personal_git_operation"."branch") >= 1) AND (length("factory"."personal_git_operation"."branch") <= 200)),
-	CONSTRAINT "personal_git_operation_check" CHECK (("factory"."personal_git_operation"."state" = ANY (ARRAY['succeeded'::text, 'failed'::text])) = ("factory"."personal_git_operation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "personal_git_operation_check1" CHECK (("factory"."personal_git_operation"."state" <> 'succeeded'::text) OR (("factory"."personal_git_operation"."result" IS NOT NULL) AND (jsonb_typeof("factory"."personal_git_operation"."result") = 'object'::text))),
-	CONSTRAINT "personal_git_operation_expected_head_check" CHECK ("factory"."personal_git_operation"."expected_head" ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
-	CONSTRAINT "personal_git_operation_message_check" CHECK (length("factory"."personal_git_operation"."message") <= 240),
-	CONSTRAINT "personal_git_operation_state_check" CHECK ("factory"."personal_git_operation"."state" = ANY (ARRAY['intended'::text, 'attempted'::text, 'succeeded'::text, 'failed'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."personal_model_settings" (
-	"project_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"version" bigint NOT NULL,
-	"planning_model_id" text,
-	"build_model_id" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "personal_model_settings_pkey" PRIMARY KEY("project_id","user_id"),
-	CONSTRAINT "personal_model_settings_build_model_id_check" CHECK ((length("factory"."personal_model_settings"."build_model_id") >= 1) AND (length("factory"."personal_model_settings"."build_model_id") <= 200)),
-	CONSTRAINT "personal_model_settings_planning_model_id_check" CHECK ((length("factory"."personal_model_settings"."planning_model_id") >= 1) AND (length("factory"."personal_model_settings"."planning_model_id") <= 200)),
-	CONSTRAINT "personal_model_settings_version_check" CHECK ("factory"."personal_model_settings"."version" > 0)
+	"completed_at" timestamp with time zone,
+	CONSTRAINT "operation_idempotency_key_key" UNIQUE("idempotency_key"),
+	CONSTRAINT "operation_active_key_key" UNIQUE("active_key"),
+	CONSTRAINT "operation_payload_check" CHECK (jsonb_typeof("factory"."operation"."payload") = 'object'::text)
 );
 
 CREATE TABLE "factory"."project" (
@@ -3636,7 +2524,7 @@ CREATE TABLE "factory"."project" (
 	"name" text NOT NULL,
 	"repository_url" text NOT NULL,
 	"default_branch" text NOT NULL,
-	"devcontainer_path" text NOT NULL,
+	"actor_template_path" text NOT NULL,
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -3644,62 +2532,9 @@ CREATE TABLE "factory"."project" (
 	CONSTRAINT "project_slug_key" UNIQUE("slug"),
 	CONSTRAINT "project_default_branch_check" CHECK ((length("factory"."project"."default_branch") >= 1) AND (length("factory"."project"."default_branch") <= 200)),
 	CONSTRAINT "project_desktop_background_key_check" CHECK ("factory"."project"."desktop_background_key" = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text])),
-	CONSTRAINT "project_devcontainer_path_check" CHECK (("factory"."project"."devcontainer_path" <> ''::text) AND ("factory"."project"."devcontainer_path" !~ '(^/|(^|/)\.\.(/|$))'::text)),
+	CONSTRAINT "project_actor_template_path_check" CHECK (("factory"."project"."actor_template_path" <> ''::text) AND ("factory"."project"."actor_template_path" !~ '(^/|(^|/)\.\.(/|$))'::text)),
 	CONSTRAINT "project_name_check" CHECK ((length("factory"."project"."name") >= 1) AND (length("factory"."project"."name") <= 200)),
 	CONSTRAINT "project_slug_check" CHECK ("factory"."project"."slug" ~ '^[a-z][a-z0-9-]{1,62}$'::text)
-);
-
-CREATE TABLE "factory"."project_delivery_policy" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"delegated_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"revoked_at" timestamp with time zone,
-	"revoked_command_id" uuid,
-	"revoked_by" uuid
-);
-
-CREATE TABLE "factory"."project_delivery_queue" (
-	"project_id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_delivery_queue_change_id_key" UNIQUE("change_id")
-);
-
-CREATE TABLE "factory"."project_environment" (
-	"project_id" uuid NOT NULL,
-	"environment" text NOT NULL,
-	"version" bigint DEFAULT 0 NOT NULL,
-	"manifest" jsonb DEFAULT '{"variables":[],"registries":[]}'::jsonb NOT NULL,
-	"secret_key" text,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_environment_pkey" PRIMARY KEY("project_id","environment"),
-	CONSTRAINT "project_environment_environment_check" CHECK ("factory"."project_environment"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "project_environment_version_check" CHECK ("factory"."project_environment"."version" >= 0)
-);
-
-CREATE TABLE "factory"."project_image_preparation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"environment" text NOT NULL,
-	"revision" text NOT NULL,
-	"environment_version" bigint NOT NULL,
-	"runtime_attempt_id" uuid,
-	"state" text DEFAULT 'pending' NOT NULL,
-	"identity" text,
-	"image" text,
-	"failure" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_image_preparation_project_id_environment_revision_e_key" UNIQUE("project_id","environment","revision","environment_version"),
-	CONSTRAINT "project_image_preparation_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "project_image_preparation_check" CHECK (("factory"."project_image_preparation"."state" = 'succeeded'::text) = (("factory"."project_image_preparation"."identity" IS NOT NULL) AND ("factory"."project_image_preparation"."image" IS NOT NULL))),
-	CONSTRAINT "project_image_preparation_environment_check" CHECK ("factory"."project_image_preparation"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text])),
-	CONSTRAINT "project_image_preparation_environment_version_check" CHECK ("factory"."project_image_preparation"."environment_version" >= 0),
-	CONSTRAINT "project_image_preparation_identity_check" CHECK ("factory"."project_image_preparation"."identity" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_image_preparation_image_check" CHECK ("factory"."project_image_preparation"."image" ~ '^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_image_preparation_revision_check" CHECK ("factory"."project_image_preparation"."revision" ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
-	CONSTRAINT "project_image_preparation_state_check" CHECK ("factory"."project_image_preparation"."state" = ANY (ARRAY['pending'::text, 'running'::text, 'succeeded'::text, 'unsupported'::text, 'failed'::text]))
 );
 
 CREATE TABLE "factory"."project_membership" (
@@ -3711,18 +2546,6 @@ CREATE TABLE "factory"."project_membership" (
 	"manage_project" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "project_membership_pkey" PRIMARY KEY("project_id","user_id"),
 	CONSTRAINT "project_membership_role_check" CHECK ("factory"."project_membership"."role" = ANY (ARRAY['product-contributor'::text, 'developer'::text]))
-);
-
-CREATE TABLE "factory"."project_model_settings" (
-	"project_id" uuid PRIMARY KEY NOT NULL,
-	"version" bigint NOT NULL,
-	"planning" jsonb NOT NULL,
-	"build" jsonb NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_model_settings_planning_check" CHECK (jsonb_typeof("factory"."project_model_settings"."planning") = 'object'::text),
-	CONSTRAINT "project_model_settings_build_check" CHECK (jsonb_typeof("factory"."project_model_settings"."build") = 'object'::text),
-	CONSTRAINT "project_model_settings_version_check" CHECK ("factory"."project_model_settings"."version" > 0)
 );
 
 CREATE TABLE "factory"."project_release" (
@@ -3753,147 +2576,6 @@ CREATE TABLE "factory"."project_release" (
 	CONSTRAINT "project_release_version_check" CHECK ("factory"."project_release"."version" ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'::text)
 );
 
-CREATE TABLE "factory"."project_repository_intent" (
-	"command_id" uuid PRIMARY KEY NOT NULL,
-	"setup_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"project_id" uuid NOT NULL,
-	"name" text NOT NULL,
-	"slug" text NOT NULL,
-	"kind" text NOT NULL,
-	"source_url" text NOT NULL,
-	"credential_key" text,
-	"fingerprint" text NOT NULL,
-	"state" text NOT NULL,
-	"default_branch" text,
-	"failure" text,
-	"credential_removed_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "project_repository_intent_setup_id_key" UNIQUE("setup_id"),
-	CONSTRAINT "project_repository_intent_project_id_key" UNIQUE("project_id"),
-	CONSTRAINT "project_repository_intent_slug_key" UNIQUE("slug"),
-	CONSTRAINT "project_repository_intent_credential_key_key" UNIQUE("credential_key"),
-	CONSTRAINT "project_repository_intent_fingerprint_check" CHECK ("factory"."project_repository_intent"."fingerprint" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "project_repository_intent_kind_check" CHECK ("factory"."project_repository_intent"."kind" = ANY (ARRAY['starter'::text, 'import'::text])),
-	CONSTRAINT "project_repository_intent_state_check" CHECK ("factory"."project_repository_intent"."state" = ANY (ARRAY['credential-intended'::text, 'create-intended'::text, 'repository-ready'::text, 'committed'::text, 'uncertain'::text, 'failed'::text]))
-);
-
-CREATE TABLE "factory"."project_setup_confirmation" (
-	"inspection_id" uuid PRIMARY KEY NOT NULL,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE "factory"."project_setup_draft" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"user_id" uuid NOT NULL,
-	"version" bigint DEFAULT 1 NOT NULL,
-	"name" text DEFAULT '' NOT NULL,
-	"slug" text DEFAULT '' NOT NULL,
-	"kind" text DEFAULT 'starter' NOT NULL,
-	"source_url" text DEFAULT '' NOT NULL,
-	"state" text DEFAULT 'draft' NOT NULL,
-	"project_id" uuid,
-	"command_id" uuid,
-	"failure" text,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_setup_draft_user_id_key" UNIQUE("user_id"),
-	CONSTRAINT "project_setup_draft_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "project_setup_draft_kind_check" CHECK ("factory"."project_setup_draft"."kind" = ANY (ARRAY['starter'::text, 'import'::text])),
-	CONSTRAINT "project_setup_draft_name_check" CHECK (length("factory"."project_setup_draft"."name") <= 200),
-	CONSTRAINT "project_setup_draft_slug_check" CHECK (("factory"."project_setup_draft"."slug" = ''::text) OR ("factory"."project_setup_draft"."slug" ~ '^[a-z][a-z0-9-]{1,62}$'::text)),
-	CONSTRAINT "project_setup_draft_source_url_check" CHECK (length("factory"."project_setup_draft"."source_url") <= 2000),
-	CONSTRAINT "project_setup_draft_state_check" CHECK ("factory"."project_setup_draft"."state" = ANY (ARRAY['draft'::text, 'creating'::text, 'checking'::text, 'created'::text, 'failed'::text])),
-	CONSTRAINT "project_setup_draft_version_check" CHECK ("factory"."project_setup_draft"."version" > 0)
-);
-
-CREATE TABLE "factory"."project_setup_inspection" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"source_commit" text NOT NULL,
-	"state" text NOT NULL,
-	"output" jsonb,
-	"failure" text,
-	"model_id" text,
-	"connection_id" uuid,
-	"connection_version" bigint,
-	"parent_id" uuid,
-	"answers" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"created_by" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_setup_inspection_source_commit_check" CHECK ("factory"."project_setup_inspection"."source_commit" ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'::text),
-	CONSTRAINT "project_setup_inspection_check" CHECK (("factory"."project_setup_inspection"."connection_id" IS NULL) = ("factory"."project_setup_inspection"."connection_version" IS NULL)),
-	CONSTRAINT "project_setup_inspection_state_check" CHECK ("factory"."project_setup_inspection"."state" = ANY (ARRAY['inspecting'::text, 'complete'::text, 'proposal'::text, 'failed'::text, 'confirming'::text, 'confirmed'::text, 'superseded'::text]))
-);
-
-CREATE TABLE "factory"."project_setup_readiness" (
-	"project_id" uuid NOT NULL,
-	"task" text NOT NULL,
-	"state" text DEFAULT 'pending' NOT NULL,
-	"command_id" uuid NOT NULL,
-	"operation_id" uuid,
-	"failure" text,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "project_setup_readiness_pkey" PRIMARY KEY("project_id","task"),
-	CONSTRAINT "project_setup_readiness_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "project_setup_readiness_state_check" CHECK ("factory"."project_setup_readiness"."state" = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text])),
-	CONSTRAINT "project_setup_readiness_task_check" CHECK ("factory"."project_setup_readiness"."task" = ANY (ARRAY['configuration'::text, 'development-secrets'::text, 'preview-secrets'::text, 'protection'::text, 'hook'::text, 'wiki'::text, 'development'::text, 'preview-image'::text, 'main-preview'::text]))
-);
-
-CREATE TABLE "factory"."promotion_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"project_id" uuid NOT NULL,
-	"commit_sha" text NOT NULL,
-	"previous_runtime_attempt_id" uuid,
-	"replacement_runtime_attempt_id" uuid,
-	"state" "factory"."promotion_operation_state" DEFAULT 'pending' NOT NULL,
-	"last_error" text,
-	"requested_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	"ordinal" integer DEFAULT 1 NOT NULL,
-	"supersedes_id" uuid,
-	"retry_command_id" uuid,
-	CONSTRAINT "promotion_operation_sequence" UNIQUE("change_id","ordinal"),
-	CONSTRAINT "promotion_operation_replacement_runtime_attempt_id_key" UNIQUE("replacement_runtime_attempt_id"),
-	CONSTRAINT "promotion_operation_supersedes_id_key" UNIQUE("supersedes_id"),
-	CONSTRAINT "promotion_operation_retry_command_id_key" UNIQUE("retry_command_id"),
-	CONSTRAINT "promotion_operation_retry_identity" CHECK ((("factory"."promotion_operation"."ordinal" = 1) AND ("factory"."promotion_operation"."supersedes_id" IS NULL) AND ("factory"."promotion_operation"."retry_command_id" IS NULL)) OR (("factory"."promotion_operation"."ordinal" > 1) AND ("factory"."promotion_operation"."supersedes_id" IS NOT NULL) AND ("factory"."promotion_operation"."retry_command_id" = "factory"."promotion_operation"."id"))),
-	CONSTRAINT "promotion_operation_check" CHECK (("factory"."promotion_operation"."state" = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = ("factory"."promotion_operation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "promotion_operation_commit_sha_check" CHECK ("factory"."promotion_operation"."commit_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "promotion_operation_ordinal_check" CHECK ("factory"."promotion_operation"."ordinal" > 0)
-);
-
-CREATE TABLE "factory"."pull_request_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"repository_owner" text NOT NULL,
-	"repository_name" text NOT NULL,
-	"base_branch" text NOT NULL,
-	"head_branch" text NOT NULL,
-	"first_head_sha" text NOT NULL,
-	"title" text NOT NULL,
-	"body" text NOT NULL,
-	"idempotency_key" text NOT NULL,
-	"state" "factory"."pull_request_operation_state" DEFAULT 'pending' NOT NULL,
-	"pull_request_number" bigint,
-	"pull_request_url" text,
-	"last_error" text,
-	"requested_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "pull_request_operation_change_id_key" UNIQUE("change_id"),
-	CONSTRAINT "pull_request_operation_idempotency_key_key" UNIQUE("idempotency_key"),
-	CONSTRAINT "pull_request_operation_body_check" CHECK (length("factory"."pull_request_operation"."body") <= 10000),
-	CONSTRAINT "pull_request_operation_check" CHECK (("factory"."pull_request_operation"."state" = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = ("factory"."pull_request_operation"."completed_at" IS NOT NULL)),
-	CONSTRAINT "pull_request_operation_check1" CHECK (("factory"."pull_request_operation"."state" <> 'succeeded'::pull_request_operation_state) OR (("factory"."pull_request_operation"."pull_request_number" IS NOT NULL) AND ("factory"."pull_request_operation"."pull_request_url" IS NOT NULL))),
-	CONSTRAINT "pull_request_operation_first_head_sha_check" CHECK ("factory"."pull_request_operation"."first_head_sha" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text),
-	CONSTRAINT "pull_request_operation_title_check" CHECK ((length(btrim("factory"."pull_request_operation"."title")) >= 1) AND (length(btrim("factory"."pull_request_operation"."title")) <= 240))
-);
-
 CREATE TABLE "factory"."read_version" (
 	"project_id" uuid NOT NULL,
 	"audience" text NOT NULL,
@@ -3903,64 +2585,6 @@ CREATE TABLE "factory"."read_version" (
 	CONSTRAINT "read_version_pkey" PRIMARY KEY("project_id","audience","scope","resource_id"),
 	CONSTRAINT "read_version_audience_check" CHECK (("factory"."read_version"."audience" = ANY (ARRAY['shared'::text, 'developer'::text])) OR ("factory"."read_version"."audience" ~ '^[0-9a-f-]{36}$'::text)),
 	CONSTRAINT "read_version_scope_check" CHECK ("factory"."read_version"."scope" = ANY (ARRAY['lifecycle'::text, 'ticket'::text, 'conversation'::text, 'review'::text, 'inbox'::text, 'knowledge'::text, 'inputs'::text, 'sources'::text, 'releases'::text]))
-);
-
-CREATE TABLE "factory"."release_access" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"command_id" uuid NOT NULL,
-	"name" text NOT NULL,
-	"scope" text NOT NULL,
-	"state" text NOT NULL,
-	"username" text NOT NULL,
-	"secret_key" text NOT NULL,
-	"created_by" uuid NOT NULL,
-	"release_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"revoked_at" timestamp with time zone,
-	"token_id" bigint,
-	"replaces_id" uuid,
-	CONSTRAINT "release_access_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "release_access_username_key" UNIQUE("username"),
-	CONSTRAINT "release_access_scope_check" CHECK ("factory"."release_access"."scope" = ANY (ARRAY['git'::text, 'packages'::text, 'publish'::text])),
-	CONSTRAINT "release_access_state_check" CHECK ("factory"."release_access"."state" = ANY (ARRAY['pending'::text, 'active'::text, 'revoking'::text, 'revoked'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."release_attempt" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"release_id" uuid NOT NULL,
-	"command_id" uuid NOT NULL,
-	"ordinal" integer NOT NULL,
-	"state" text DEFAULT 'pending' NOT NULL,
-	"dispatch_intended_at" timestamp with time zone,
-	"run_id" bigint,
-	"runner_id" bigint,
-	"runner_uuid" text,
-	"runner_token" text,
-	"job_handle" text,
-	"runtime_attempt_id" uuid,
-	"cleaned_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "release_attempt_release_id_ordinal_key" UNIQUE("release_id","ordinal"),
-	CONSTRAINT "release_attempt_command_id_key" UNIQUE("command_id"),
-	CONSTRAINT "release_attempt_check" CHECK (("factory"."release_attempt"."run_id" IS NULL) OR ("factory"."release_attempt"."dispatch_intended_at" IS NOT NULL)),
-	CONSTRAINT "release_attempt_ordinal_check" CHECK ("factory"."release_attempt"."ordinal" > 0)
-);
-
-CREATE TABLE "factory"."repository_mirror_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"project_id" uuid NOT NULL,
-	"created_by" uuid NOT NULL,
-	"action" text NOT NULL,
-	"target_url" text,
-	"remote_name" text,
-	"fingerprint" text NOT NULL,
-	"before_state" jsonb NOT NULL,
-	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "repository_mirror_command_action_check" CHECK ("factory"."repository_mirror_command"."action" = ANY (ARRAY['create'::text, 'remove'::text, 'sync'::text])),
-	CONSTRAINT "repository_mirror_command_state_check" CHECK ("factory"."repository_mirror_command"."state" = ANY (ARRAY['executing'::text, 'completed'::text, 'failed'::text, 'uncertain'::text, 'acknowledged'::text]))
 );
 
 CREATE TABLE "factory"."requirement_approval" (
@@ -3994,16 +2618,6 @@ CREATE TABLE "factory"."requirement_revision" (
 	CONSTRAINT "requirement_revision_ordinal_check" CHECK ("factory"."requirement_revision"."ordinal" > 0)
 );
 
-CREATE TABLE "factory"."requirements_entry_intent" (
-	"ticket_id" uuid PRIMARY KEY NOT NULL,
-	"command_id" uuid NOT NULL,
-	"created_by" uuid NOT NULL,
-	"admitted_at" timestamp with time zone,
-	"failure" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "requirements_entry_intent_command_id_key" UNIQUE("command_id")
-);
-
 CREATE TABLE "factory"."review_feedback" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"change_id" uuid NOT NULL,
@@ -4021,26 +2635,6 @@ CREATE TABLE "factory"."review_feedback" (
 	CONSTRAINT "review_feedback_commit_sha_check" CHECK ("factory"."review_feedback"."commit_sha" ~ '^[a-f0-9]{40}$'::text),
 	CONSTRAINT "review_feedback_kind_check" CHECK ("factory"."review_feedback"."kind" = ANY (ARRAY['comment'::text, 'thread'::text])),
 	CONSTRAINT "review_feedback_state_check" CHECK ("factory"."review_feedback"."state" = ANY (ARRAY['open'::text, 'implemented'::text, 'resolved'::text]))
-);
-
-CREATE TABLE "factory"."review_feedback_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"change_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"input" jsonb NOT NULL,
-	"feedback_id" uuid,
-	"turn_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "review_feedback_command_turn_id_key" UNIQUE("turn_id")
-);
-
-CREATE TABLE "factory"."review_feedback_message" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"feedback_id" uuid NOT NULL,
-	"author_id" uuid NOT NULL,
-	"body" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "review_feedback_message_body_check" CHECK ((length("factory"."review_feedback_message"."body") >= 1) AND (length("factory"."review_feedback_message"."body") <= 2000))
 );
 
 CREATE TABLE "factory"."review_media" (
@@ -4072,32 +2666,6 @@ CREATE TABLE "factory"."review_media" (
 	CONSTRAINT "review_media_state_check" CHECK ("factory"."review_media"."state" = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text]))
 );
 
-CREATE TABLE "factory"."review_scenario" (
-	"review_id" uuid NOT NULL,
-	"id" text NOT NULL,
-	"title" text NOT NULL,
-	"category" text NOT NULL,
-	"criterion" integer NOT NULL,
-	"expected" text NOT NULL,
-	"started_at" timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-	"ended_at" timestamp with time zone,
-	"observed" text,
-	"media_started_ms" bigint,
-	"media_session_id" uuid,
-	"status" text,
-	"observation_kind" text,
-	CONSTRAINT "review_scenario_pkey" PRIMARY KEY("review_id","id"),
-	CONSTRAINT "review_scenario_category_check" CHECK ("factory"."review_scenario"."category" = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])),
-	CONSTRAINT "review_scenario_criterion_check" CHECK ("factory"."review_scenario"."criterion" > 0),
-	CONSTRAINT "review_scenario_expected_check" CHECK ((length("factory"."review_scenario"."expected") >= 1) AND (length("factory"."review_scenario"."expected") <= 1000)),
-	CONSTRAINT "review_scenario_id_check" CHECK ("factory"."review_scenario"."id" ~ '^[a-z0-9-]{1,64}$'::text),
-	CONSTRAINT "review_scenario_media_started_ms_check" CHECK ("factory"."review_scenario"."media_started_ms" >= 0),
-	CONSTRAINT "review_scenario_observation_kind_check" CHECK ("factory"."review_scenario"."observation_kind" = ANY (ARRAY['app'::text, 'source'::text])),
-	CONSTRAINT "review_scenario_observed_check" CHECK ((length("factory"."review_scenario"."observed") >= 1) AND (length("factory"."review_scenario"."observed") <= 2000)),
-	CONSTRAINT "review_scenario_status_check" CHECK ("factory"."review_scenario"."status" = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])),
-	CONSTRAINT "review_scenario_title_check" CHECK ((length("factory"."review_scenario"."title") >= 1) AND (length("factory"."review_scenario"."title") <= 200))
-);
-
 CREATE TABLE "factory"."runtime_attempt" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -4107,11 +2675,8 @@ CREATE TABLE "factory"."runtime_attempt" (
 	"revision" text NOT NULL,
 	"state" "factory"."runtime_attempt_state" NOT NULL,
 	"parent_connector_token_hash" text NOT NULL,
-	"child_connector_token_hash" text NOT NULL,
 	"create_intended_at" timestamp with time zone NOT NULL,
-	"create_observed_at" timestamp with time zone,
 	"stop_intended_at" timestamp with time zone,
-	"stopped_at" timestamp with time zone,
 	"failure" text,
 	"declared_apps" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"created_by" uuid NOT NULL,
@@ -4121,44 +2686,43 @@ CREATE TABLE "factory"."runtime_attempt" (
 	"verification_id" uuid,
 	"ready_at" timestamp with time zone,
 	"app_ready_at" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"atespace" text,
+	"actor_name" text,
+	"binding_intent" jsonb,
+	"actor_uid" uuid,
+	"create_attempted_at" timestamp with time zone,
+	"create_rejected" boolean DEFAULT false NOT NULL,
+	"delete_intended_at" timestamp with time zone,
+	"deleted_at" timestamp with time zone,
+	"observation" jsonb,
+	"checkpoint" jsonb,
 	CONSTRAINT "runtime_attempt_id_change_id_key" UNIQUE("id","change_id"),
 	CONSTRAINT "runtime_attempt_id_project_id_key" UNIQUE("id","project_id"),
 	CONSTRAINT "runtime_attempt_id_workspace_id_key" UNIQUE("id","workspace_id"),
 	CONSTRAINT "runtime_attempt_verification_identity_unique" UNIQUE("id","verification_id"),
+	CONSTRAINT "runtime_attempt_atespace_key" UNIQUE("atespace"),
+	CONSTRAINT "runtime_attempt_actor_uid_key" UNIQUE("actor_uid"),
 	CONSTRAINT "runtime_attempt_app_ready_shape" CHECK ((jsonb_typeof("factory"."runtime_attempt"."app_ready_at") = 'object'::text) AND (octet_length(("factory"."runtime_attempt"."app_ready_at")::text) <= 4096)),
+	CONSTRAINT "runtime_attempt_binding_actor_check" CHECK (("factory"."runtime_attempt"."actor_uid" IS NULL) OR ("factory"."runtime_attempt"."create_attempted_at" IS NOT NULL)),
+	CONSTRAINT "runtime_attempt_binding_delete_check" CHECK (("factory"."runtime_attempt"."deleted_at" IS NULL) OR ("factory"."runtime_attempt"."delete_intended_at" IS NOT NULL)),
+	CONSTRAINT "runtime_attempt_binding_intent_check" CHECK (("factory"."runtime_attempt"."binding_intent" IS NULL) OR (jsonb_typeof("factory"."runtime_attempt"."binding_intent") = 'object'::text)),
+	CONSTRAINT "runtime_attempt_binding_tuple_check" CHECK ((("factory"."runtime_attempt"."atespace" IS NULL) = ("factory"."runtime_attempt"."actor_name" IS NULL)) AND (("factory"."runtime_attempt"."atespace" IS NULL) = ("factory"."runtime_attempt"."binding_intent" IS NULL))),
 	CONSTRAINT "runtime_attempt_declared_apps_check" CHECK (jsonb_typeof("factory"."runtime_attempt"."declared_apps") = 'array'::text),
 	CONSTRAINT "runtime_attempt_generation_check" CHECK ("factory"."runtime_attempt"."generation" > 0),
 	CONSTRAINT "runtime_attempt_native_owner" CHECK ((
         ("factory"."runtime_attempt"."workspace_id" IS NOT NULL AND "factory"."runtime_attempt"."isolated_kind" IS NULL AND "factory"."runtime_attempt"."verification_id" IS NULL)
         OR ("factory"."runtime_attempt"."workspace_id" IS NULL AND "factory"."runtime_attempt"."change_id" IS NULL AND (
           ("factory"."runtime_attempt"."isolated_kind" = 'verification'::isolated_runtime_kind AND "factory"."runtime_attempt"."verification_id" IS NOT NULL)
-          OR ("factory"."runtime_attempt"."isolated_kind" = ANY (ARRAY['prebuild'::isolated_runtime_kind, 'staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind]) AND "factory"."runtime_attempt"."verification_id" IS NULL)
+          OR ("factory"."runtime_attempt"."isolated_kind" = ANY (ARRAY['staging'::isolated_runtime_kind, 'publication'::isolated_runtime_kind]) AND "factory"."runtime_attempt"."verification_id" IS NULL)
         ))
       ) IS TRUE)
-);
-
-CREATE TABLE "factory"."runtime_compute_wait" (
-	"attempt_id" uuid PRIMARY KEY NOT NULL,
-	"reason" text DEFAULT 'compute-capacity' NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "runtime_compute_wait_reason_check" CHECK ("factory"."runtime_compute_wait"."reason" = ANY (ARRAY['compute-capacity'::text, 'accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text]))
-);
-
-CREATE TABLE "factory"."runtime_environment_intent" (
-	"runtime_attempt_id" uuid PRIMARY KEY NOT NULL,
-	"environment" text NOT NULL,
-	"version" bigint NOT NULL,
-	"secret_key" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "runtime_environment_intent_version_check" CHECK ("factory"."runtime_environment_intent"."version" >= 0),
-	CONSTRAINT "runtime_environment_intent_environment_check" CHECK ("factory"."runtime_environment_intent"."environment" = ANY (ARRAY['development'::text, 'main-preview'::text]))
 );
 
 CREATE TABLE "factory"."schema_migration" (
 	"version" integer PRIMARY KEY NOT NULL,
 	"applied_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"source_digest" text NOT NULL,
-	CONSTRAINT "schema_migration_version_check" CHECK ("factory"."schema_migration"."version" = 1),
+	CONSTRAINT "schema_migration_version_check" CHECK ("factory"."schema_migration"."version" >= 1),
 	CONSTRAINT "schema_migration_source_digest_check" CHECK ("factory"."schema_migration"."source_digest" ~ '^[a-f0-9]{64}$'::text)
 );
 
@@ -4274,96 +2838,21 @@ CREATE TABLE "auth"."scimUser" (
 	CONSTRAINT "scimUser_orderKey_key" UNIQUE("orderKey")
 );
 
-CREATE TABLE "factory"."session_archive" (
-	"turn_id" uuid PRIMARY KEY NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"session_id" text NOT NULL,
-	"prompt_id" text NOT NULL,
-	"source_refs" jsonb NOT NULL,
-	"state" text DEFAULT 'pending' NOT NULL,
-	"attempts" integer DEFAULT 0 NOT NULL,
-	"manifest_key" text,
-	"manifest_sha256" text,
-	"through_message_id" text,
-	"producer_version" text,
-	"summary" jsonb,
-	"last_error" text,
-	"retry_after" timestamp with time zone DEFAULT now() NOT NULL,
-	"saved_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "session_archive_attempts_check" CHECK ("factory"."session_archive"."attempts" >= 0),
-	CONSTRAINT "session_archive_check" CHECK (("factory"."session_archive"."state" = 'saved'::text) = ("factory"."session_archive"."saved_at" IS NOT NULL)),
-	CONSTRAINT "session_archive_check1" CHECK (("factory"."session_archive"."state" <> 'saved'::text) OR (("factory"."session_archive"."manifest_key" IS NOT NULL) AND ("factory"."session_archive"."manifest_sha256" IS NOT NULL) AND ("factory"."session_archive"."through_message_id" IS NOT NULL) AND ("factory"."session_archive"."producer_version" IS NOT NULL) AND ("factory"."session_archive"."summary" IS NOT NULL))),
-	CONSTRAINT "session_archive_last_error_check" CHECK (length("factory"."session_archive"."last_error") <= 2000),
-	CONSTRAINT "session_archive_manifest_sha256_check" CHECK ("factory"."session_archive"."manifest_sha256" ~ '^[a-f0-9]{64}$'::text),
-	CONSTRAINT "session_archive_prompt_id_check" CHECK ((length("factory"."session_archive"."prompt_id") >= 1) AND (length("factory"."session_archive"."prompt_id") <= 200)),
-	CONSTRAINT "session_archive_session_id_check" CHECK ((length("factory"."session_archive"."session_id") >= 1) AND (length("factory"."session_archive"."session_id") <= 200)),
-	CONSTRAINT "session_archive_source_refs_check" CHECK ((jsonb_typeof("factory"."session_archive"."source_refs") = 'object'::text) AND (octet_length(("factory"."session_archive"."source_refs")::text) <= 16384)),
-	CONSTRAINT "session_archive_state_check" CHECK ("factory"."session_archive"."state" = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])),
-	CONSTRAINT "session_archive_summary_check" CHECK ((jsonb_typeof("factory"."session_archive"."summary") = 'object'::text) AND (octet_length(("factory"."session_archive"."summary")::text) <= 16384))
-);
-
-CREATE TABLE "factory"."shared_document_resolution" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"path" text NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"choice" text NOT NULL,
-	"document_revision" text NOT NULL,
-	"disk_version" text NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "shared_document_resolution_choice_check" CHECK ("factory"."shared_document_resolution"."choice" = ANY (ARRAY['keep-shared'::text, 'use-saved'::text]))
-);
-
 CREATE TABLE "factory"."skill_library" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"storage_key" text NOT NULL,
 	"scope" text NOT NULL,
 	"owner_id" uuid,
 	"project_id" uuid,
+	"cover_key" text,
+	"cover_version" bigint,
+	"cover_updated_by" uuid,
 	CONSTRAINT "skill_library_storage_key_key" UNIQUE("storage_key"),
 	CONSTRAINT "skill_library_check" CHECK ((("factory"."skill_library"."scope" = 'personal'::text) AND ("factory"."skill_library"."owner_id" IS NOT NULL) AND ("factory"."skill_library"."project_id" IS NULL)) OR (("factory"."skill_library"."scope" = 'project'::text) AND ("factory"."skill_library"."owner_id" IS NULL) AND ("factory"."skill_library"."project_id" IS NOT NULL)) OR (("factory"."skill_library"."scope" = 'system'::text) AND ("factory"."skill_library"."owner_id" IS NULL) AND ("factory"."skill_library"."project_id" IS NULL))),
-	CONSTRAINT "skill_library_scope_check" CHECK ("factory"."skill_library"."scope" = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text]))
-);
-
-CREATE TABLE "factory"."skill_library_choice" (
-	"library_id" uuid NOT NULL,
-	"scope" text NOT NULL,
-	"context_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"role" text NOT NULL,
-	"state" text NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"version" bigint NOT NULL,
-	CONSTRAINT "skill_library_choice_pkey" PRIMARY KEY("library_id","scope","context_id","user_id","role"),
-	CONSTRAINT "skill_library_choice_check" CHECK (("factory"."skill_library_choice"."state" <> 'required'::text) OR ("factory"."skill_library_choice"."scope" <> 'personal'::text)),
-	CONSTRAINT "skill_library_choice_role_check" CHECK ("factory"."skill_library_choice"."role" = ANY (ARRAY['planning'::text, 'build'::text])),
-	CONSTRAINT "skill_library_choice_scope_check" CHECK ("factory"."skill_library_choice"."scope" = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text])),
-	CONSTRAINT "skill_library_choice_state_check" CHECK ("factory"."skill_library_choice"."state" = ANY (ARRAY['inherit'::text, 'enable'::text, 'disable'::text, 'required'::text])),
-	CONSTRAINT "skill_library_choice_version_check" CHECK ("factory"."skill_library_choice"."version" > 0)
-);
-
-CREATE TABLE "factory"."skill_library_cover" (
-	"library_id" uuid PRIMARY KEY NOT NULL,
-	"cover_key" text NOT NULL,
-	"version" bigint NOT NULL,
-	"updated_by" uuid NOT NULL,
-	CONSTRAINT "skill_library_cover_cover_key_check" CHECK ("factory"."skill_library_cover"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
-	CONSTRAINT "skill_library_cover_version_check" CHECK ("factory"."skill_library_cover"."version" > 0)
-);
-
-CREATE TABLE "factory"."skill_library_revision" (
-	"library_id" uuid NOT NULL,
-	"revision_id" uuid PRIMARY KEY NOT NULL,
-	"copied_from" uuid
-);
-
-CREATE TABLE "factory"."skill_publication" (
-	"revision_id" uuid PRIMARY KEY NOT NULL,
-	"published" boolean NOT NULL,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	CONSTRAINT "skill_library_scope_check" CHECK ("factory"."skill_library"."scope" = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text])),
+	CONSTRAINT "skill_library_cover_nulls_check" CHECK (("factory"."skill_library"."cover_key" IS NULL) = ("factory"."skill_library"."cover_version" IS NULL AND "factory"."skill_library"."cover_updated_by" IS NULL)),
+	CONSTRAINT "skill_library_cover_key_check" CHECK ("factory"."skill_library"."cover_key" IS NULL OR "factory"."skill_library"."cover_key" ~ '^[a-z][a-z-]{1,63}$'::text),
+	CONSTRAINT "skill_library_cover_version_check" CHECK ("factory"."skill_library"."cover_version" IS NULL OR "factory"."skill_library"."cover_version" > 0)
 );
 
 CREATE TABLE "factory"."skill_revision" (
@@ -4374,22 +2863,16 @@ CREATE TABLE "factory"."skill_revision" (
 	"content_digest" text NOT NULL,
 	"created_by" uuid NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"library_id" uuid,
+	"copied_from" uuid,
+	"published" boolean DEFAULT false NOT NULL,
+	"published_updated_by" uuid,
+	"published_updated_at" timestamp with time zone,
 	CONSTRAINT "skill_revision_skill_key_revision_key" UNIQUE("skill_key","revision"),
 	CONSTRAINT "skill_revision_skill_key_check" CHECK ("factory"."skill_revision"."skill_key" ~ '^[a-z][a-z0-9-]{1,63}$'::text),
 	CONSTRAINT "skill_revision_content_check" CHECK ((jsonb_typeof("factory"."skill_revision"."content") = 'object'::text) AND (octet_length(("factory"."skill_revision"."content")::text) <= 2100000)),
 	CONSTRAINT "skill_revision_content_digest_check" CHECK ("factory"."skill_revision"."content_digest" ~ '^[a-f0-9]{64}$'::text),
 	CONSTRAINT "skill_revision_revision_check" CHECK ("factory"."skill_revision"."revision" > 0)
-);
-
-CREATE TABLE "factory"."skill_share_proposal" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"revision_id" uuid NOT NULL,
-	"proposed_by" uuid NOT NULL,
-	"target" text NOT NULL,
-	"project_id" uuid,
-	"accepted_library_id" uuid,
-	CONSTRAINT "skill_share_proposal_check" CHECK (("factory"."skill_share_proposal"."target" = 'project'::text) = ("factory"."skill_share_proposal"."project_id" IS NOT NULL)),
-	CONSTRAINT "skill_share_proposal_target_check" CHECK ("factory"."skill_share_proposal"."target" = ANY (ARRAY['system'::text, 'project'::text]))
 );
 
 CREATE TABLE "auth"."ssoProvider" (
@@ -4404,149 +2887,36 @@ CREATE TABLE "auth"."ssoProvider" (
 	CONSTRAINT "ssoProvider_providerId_key" UNIQUE("providerId")
 );
 
-CREATE TABLE "factory"."staging_configuration" (
-	"runtime_attempt_id" uuid PRIMARY KEY NOT NULL,
-	"declaration" jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "staging_configuration_declaration_check" CHECK (jsonb_typeof("factory"."staging_configuration"."declaration") = 'object'::text)
-);
-
-CREATE TABLE "factory"."staging_preview" (
-	"project_id" uuid PRIMARY KEY NOT NULL,
-	"revision" text NOT NULL,
-	"runtime_attempt_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "staging_preview_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "staging_preview_revision_check" CHECK ("factory"."staging_preview"."revision" ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)
-);
-
-CREATE TABLE "factory"."substrate_actor_rpc" (
-	"runtime_attempt_id" uuid NOT NULL,
-	"action" text NOT NULL,
-	"origin_key" text NOT NULL,
-	"actor_uid" uuid NOT NULL,
-	"native_version" text NOT NULL,
-	"origin_checkpoint" jsonb,
-	"stop_id" uuid,
-	"intended_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"attempted_at" timestamp with time zone,
-	"outcome" jsonb,
-	"outcome_recorded_at" timestamp with time zone,
-	CONSTRAINT "substrate_actor_rpc_pkey" PRIMARY KEY("runtime_attempt_id","action","origin_key"),
-	CONSTRAINT "substrate_actor_rpc_action_check" CHECK ("factory"."substrate_actor_rpc"."action" = ANY (ARRAY['resume'::text, 'suspend'::text])),
-	CONSTRAINT "substrate_actor_rpc_native_version_check" CHECK ("factory"."substrate_actor_rpc"."native_version" ~ '^[1-9][0-9]*$'::text),
-	CONSTRAINT "substrate_actor_rpc_origin_checkpoint_check" CHECK (jsonb_typeof("factory"."substrate_actor_rpc"."origin_checkpoint") = 'object'::text),
-	CONSTRAINT "substrate_actor_rpc_outcome_check" CHECK ((jsonb_typeof("factory"."substrate_actor_rpc"."outcome") = 'object'::text) AND (octet_length(("factory"."substrate_actor_rpc"."outcome")::text) <= 65536)),
-	CONSTRAINT "substrate_actor_rpc_check" CHECK ("factory"."substrate_actor_rpc"."origin_key" = COALESCE(("factory"."substrate_actor_rpc"."origin_checkpoint" ->> 'uuid'::text), 'initial'::text)),
-	CONSTRAINT "substrate_actor_rpc_check1" CHECK (("factory"."substrate_actor_rpc"."outcome" IS NULL) = ("factory"."substrate_actor_rpc"."outcome_recorded_at" IS NULL)),
-	CONSTRAINT "substrate_actor_rpc_check2" CHECK (("factory"."substrate_actor_rpc"."outcome" IS NULL) OR ("factory"."substrate_actor_rpc"."attempted_at" IS NOT NULL))
-);
-
-CREATE TABLE "factory"."substrate_binding" (
-	"runtime_attempt_id" uuid PRIMARY KEY NOT NULL,
-	"atespace" text NOT NULL,
-	"actor_name" text NOT NULL,
-	"intent" jsonb NOT NULL,
-	"actor_uid" uuid,
-	"create_attempted_at" timestamp with time zone,
-	"create_rejected" boolean DEFAULT false NOT NULL,
-	"delete_intended_at" timestamp with time zone,
-	"deleted_at" timestamp with time zone,
-	"observation" jsonb,
-	"checkpoint" jsonb,
-	CONSTRAINT "substrate_binding_atespace_actor_name_key" UNIQUE("atespace","actor_name"),
-	CONSTRAINT "substrate_binding_atespace_key" UNIQUE("atespace"),
-	CONSTRAINT "substrate_binding_actor_uid_key" UNIQUE("actor_uid"),
-	CONSTRAINT "substrate_binding_check" CHECK (("factory"."substrate_binding"."actor_uid" IS NULL) OR ("factory"."substrate_binding"."create_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_binding_check1" CHECK (("factory"."substrate_binding"."deleted_at" IS NULL) OR ("factory"."substrate_binding"."delete_intended_at" IS NOT NULL)),
-	CONSTRAINT "substrate_binding_intent_check" CHECK (jsonb_typeof("factory"."substrate_binding"."intent") = 'object'::text)
-);
-
-CREATE TABLE "factory"."substrate_capacity_installation" (
-	"owner" text PRIMARY KEY NOT NULL,
-	"intent" jsonb NOT NULL,
-	CONSTRAINT "substrate_capacity_installation_owner_check" CHECK ("factory"."substrate_capacity_installation"."owner" ~ '^[a-f0-9]{32}$'::text),
-	CONSTRAINT "substrate_capacity_installation_intent_check" CHECK (jsonb_typeof("factory"."substrate_capacity_installation"."intent") = 'object'::text)
-);
-
-CREATE TABLE "factory"."substrate_input_stop" (
-	"stop_id" uuid PRIMARY KEY NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"change_id" uuid NOT NULL,
-	"actor_uid" uuid NOT NULL,
-	"assignment" jsonb NOT NULL,
-	"checkpoint" jsonb NOT NULL,
-	"source_checkpoint_id" uuid,
-	"source_writer_epoch" bigint,
-	"resume_attempted_at" timestamp with time zone,
-	"snapshot_attempted_at" timestamp with time zone,
-	"result" jsonb,
-	"completed_checkpoint" jsonb,
-	"completed_source_checkpoint_id" uuid,
-	"completed_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "substrate_input_stop_assignment_check" CHECK ((jsonb_typeof("factory"."substrate_input_stop"."assignment") = 'object'::text) AND (octet_length(("factory"."substrate_input_stop"."assignment")::text) <= 8192)),
-	CONSTRAINT "substrate_input_stop_checkpoint_check" CHECK (jsonb_typeof("factory"."substrate_input_stop"."checkpoint") = 'object'::text),
-	CONSTRAINT "substrate_input_stop_source_writer_epoch_check" CHECK ("factory"."substrate_input_stop"."source_writer_epoch" > 0),
-	CONSTRAINT "substrate_input_stop_result_check" CHECK ((jsonb_typeof("factory"."substrate_input_stop"."result") = 'object'::text) AND (octet_length(("factory"."substrate_input_stop"."result")::text) <= 8192)),
-	CONSTRAINT "substrate_input_stop_check" CHECK (("factory"."substrate_input_stop"."source_checkpoint_id" IS NULL) = ("factory"."substrate_input_stop"."source_writer_epoch" IS NULL)),
-	CONSTRAINT "substrate_input_stop_check1" CHECK (("factory"."substrate_input_stop"."resume_attempted_at" IS NULL) OR ("factory"."substrate_input_stop"."source_checkpoint_id" IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check2" CHECK (("factory"."substrate_input_stop"."result" IS NULL) OR ("factory"."substrate_input_stop"."resume_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check3" CHECK (("factory"."substrate_input_stop"."snapshot_attempted_at" IS NULL) OR ("factory"."substrate_input_stop"."resume_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_input_stop_check4" CHECK (("factory"."substrate_input_stop"."completed_at" IS NULL) OR (("factory"."substrate_input_stop"."result" IS NOT NULL) AND (("factory"."substrate_input_stop"."result" -> 'confirmed'::text) = 'true'::jsonb) AND ("factory"."substrate_input_stop"."completed_checkpoint" IS NOT NULL) AND ("factory"."substrate_input_stop"."completed_source_checkpoint_id" IS NOT NULL)))
-);
-
-CREATE TABLE "factory"."substrate_isolated" (
+CREATE TABLE "factory"."substrate_provision" (
 	"owner_id" uuid NOT NULL,
 	"kind" text NOT NULL,
-	"project_id" uuid NOT NULL,
-	"generation" bigint NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
+	"generation" bigint DEFAULT 1 NOT NULL,
+	"project_id" uuid,
+	"runtime_attempt_id" uuid,
 	"intent" jsonb NOT NULL,
-	"atespace_attempted_at" timestamp with time zone,
-	"atespace_rejected" boolean DEFAULT false NOT NULL,
-	"atespace" jsonb,
-	"policy_attempted_at" timestamp with time zone,
-	"policy_rejected" boolean DEFAULT false NOT NULL,
-	"policy" jsonb,
-	"template_attempted_at" timestamp with time zone,
-	"template_rejected" boolean DEFAULT false NOT NULL,
-	"template" jsonb,
-	CONSTRAINT "substrate_isolated_pkey" PRIMARY KEY("owner_id","kind","generation"),
-	CONSTRAINT "substrate_isolated_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "substrate_isolated_check" CHECK (("factory"."substrate_isolated"."atespace" IS NULL) OR (("factory"."substrate_isolated"."atespace_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."atespace") = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check1" CHECK (("factory"."substrate_isolated"."policy" IS NULL) OR (("factory"."substrate_isolated"."policy_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."policy") = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check2" CHECK (("factory"."substrate_isolated"."template" IS NULL) OR (("factory"."substrate_isolated"."template_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_isolated"."template") = 'object'::text))),
-	CONSTRAINT "substrate_isolated_check3" CHECK (("factory"."substrate_isolated"."kind" = 'staging'::text) OR ("factory"."substrate_isolated"."generation" = 1)),
-	CONSTRAINT "substrate_isolated_check4" CHECK ((("factory"."substrate_isolated"."intent" ->> 'promotionID'::text) IS NULL) OR (("factory"."substrate_isolated"."kind" = 'staging'::text) AND ("factory"."substrate_isolated"."generation" = 1))),
-	CONSTRAINT "substrate_isolated_check5" CHECK (("factory"."substrate_isolated"."kind" = 'staging'::text) = (jsonb_typeof(("factory"."substrate_isolated"."intent" -> 'declaration'::text)) = 'object'::text)),
-	CONSTRAINT "substrate_isolated_generation_check" CHECK ("factory"."substrate_isolated"."generation" > 0),
-	CONSTRAINT "substrate_isolated_intent_check" CHECK (jsonb_typeof("factory"."substrate_isolated"."intent") = 'object'::text),
-	CONSTRAINT "substrate_isolated_kind_check" CHECK ("factory"."substrate_isolated"."kind" = ANY (ARRAY['staging'::text, 'publication'::text]))
-);
-
-CREATE TABLE "factory"."substrate_prebuild" (
-	"preparation_id" uuid PRIMARY KEY NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"generation" bigint NOT NULL,
-	"intent" jsonb NOT NULL,
-	"atespace_attempted_at" timestamp with time zone,
-	"atespace_rejected" boolean DEFAULT false NOT NULL,
-	"atespace" jsonb,
-	"policy_attempted_at" timestamp with time zone,
-	"policy_rejected" boolean DEFAULT false NOT NULL,
-	"policy" jsonb,
-	"template_attempted_at" timestamp with time zone,
-	"template_rejected" boolean DEFAULT false NOT NULL,
-	"template" jsonb,
-	CONSTRAINT "substrate_prebuild_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
-	CONSTRAINT "substrate_prebuild_check" CHECK (("factory"."substrate_prebuild"."atespace" IS NULL) OR (("factory"."substrate_prebuild"."atespace_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."atespace") = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_check1" CHECK (("factory"."substrate_prebuild"."policy" IS NULL) OR (("factory"."substrate_prebuild"."policy_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."policy") = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_check2" CHECK (("factory"."substrate_prebuild"."template" IS NULL) OR (("factory"."substrate_prebuild"."template_attempted_at" IS NOT NULL) AND (jsonb_typeof("factory"."substrate_prebuild"."template") = 'object'::text))),
-	CONSTRAINT "substrate_prebuild_generation_check" CHECK ("factory"."substrate_prebuild"."generation" = 1),
-	CONSTRAINT "substrate_prebuild_intent_check" CHECK (jsonb_typeof("factory"."substrate_prebuild"."intent") = 'object'::text)
+	"resources" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	CONSTRAINT "substrate_provision_pkey" PRIMARY KEY("owner_id","kind","generation"),
+	CONSTRAINT "substrate_provision_runtime_attempt_id_key" UNIQUE("runtime_attempt_id"),
+	CONSTRAINT "substrate_provision_kind_check" CHECK ("factory"."substrate_provision"."kind" = ANY (ARRAY['workspace'::text, 'verification'::text, 'staging'::text, 'publication'::text])),
+	CONSTRAINT "substrate_provision_generation_check" CHECK (("factory"."substrate_provision"."generation" > 0) AND ("factory"."substrate_provision"."generation" <= '9007199254740991'::bigint)),
+	CONSTRAINT "substrate_provision_intent_check" CHECK (jsonb_typeof("factory"."substrate_provision"."intent") = 'object'::text),
+	CONSTRAINT "substrate_provision_resources_check" CHECK (jsonb_typeof("factory"."substrate_provision"."resources") = 'object'::text
+        AND (("factory"."substrate_provision"."resources" - ARRAY['atespace','policy','template']) = '{}'::jsonb)
+        AND (("factory"."substrate_provision"."resources" -> 'atespace') IS NULL OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'atespace') = 'object'::text
+          AND (("factory"."substrate_provision"."resources" -> 'atespace' -> 'value') IS NULL OR ("factory"."substrate_provision"."resources" -> 'atespace' -> 'value') = 'null'::jsonb
+            OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'atespace' -> 'value') = 'object'::text AND jsonb_typeof("factory"."substrate_provision"."resources" -> 'atespace' -> 'attemptedAt') = 'string'::text))))
+        AND (("factory"."substrate_provision"."resources" -> 'policy') IS NULL OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'policy') = 'object'::text
+          AND (("factory"."substrate_provision"."resources" -> 'policy' -> 'value') IS NULL OR ("factory"."substrate_provision"."resources" -> 'policy' -> 'value') = 'null'::jsonb
+            OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'policy' -> 'value') = 'object'::text AND jsonb_typeof("factory"."substrate_provision"."resources" -> 'policy' -> 'attemptedAt') = 'string'::text))))
+        AND (("factory"."substrate_provision"."resources" -> 'template') IS NULL OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'template') = 'object'::text
+          AND (("factory"."substrate_provision"."resources" -> 'template' -> 'value') IS NULL OR ("factory"."substrate_provision"."resources" -> 'template' -> 'value') = 'null'::jsonb
+            OR (jsonb_typeof("factory"."substrate_provision"."resources" -> 'template' -> 'value') = 'object'::text AND jsonb_typeof("factory"."substrate_provision"."resources" -> 'template' -> 'attemptedAt') = 'string'::text))))),
+	CONSTRAINT "substrate_provision_attempt_check" CHECK (("factory"."substrate_provision"."kind" = 'workspace'::text) = ("factory"."substrate_provision"."runtime_attempt_id" IS NULL)),
+	CONSTRAINT "substrate_provision_project_check" CHECK (("factory"."substrate_provision"."kind" = ANY (ARRAY['staging'::text, 'publication'::text])) = ("factory"."substrate_provision"."project_id" IS NOT NULL)),
+	CONSTRAINT "substrate_provision_publication_generation_check" CHECK (("factory"."substrate_provision"."kind" <> 'publication'::text) OR ("factory"."substrate_provision"."generation" = 1)),
+	CONSTRAINT "substrate_provision_promotion_check" CHECK ((("factory"."substrate_provision"."intent" ->> 'promotionID'::text) IS NULL) OR (("factory"."substrate_provision"."kind" = 'staging'::text) AND ("factory"."substrate_provision"."generation" = 1))),
+	CONSTRAINT "substrate_provision_declaration_check" CHECK ((("factory"."substrate_provision"."kind" <> 'staging'::text) OR (jsonb_typeof(("factory"."substrate_provision"."intent" -> 'declaration'::text)) = 'object'::text))
+        AND (("factory"."substrate_provision"."kind" <> 'publication'::text) OR ("factory"."substrate_provision"."intent" -> 'declaration'::text) IS NULL OR ("factory"."substrate_provision"."intent" -> 'declaration'::text) = 'null'::jsonb))
 );
 
 CREATE TABLE "factory"."substrate_source" (
@@ -4584,67 +2954,6 @@ CREATE TABLE "factory"."substrate_source" (
 	CONSTRAINT "substrate_source_generation_check" CHECK ("factory"."substrate_source"."generation" >= 0),
 	CONSTRAINT "substrate_source_owner_check" CHECK ("factory"."substrate_source"."owner" = ANY (ARRAY['actor'::text, 'service'::text])),
 	CONSTRAINT "substrate_source_writer_epoch_check" CHECK ("factory"."substrate_source"."writer_epoch" > 0)
-);
-
-CREATE TABLE "factory"."substrate_verification" (
-	"verification_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"generation" bigint NOT NULL,
-	"intent" jsonb NOT NULL,
-	"atespace_attempted_at" timestamp with time zone,
-	"atespace_rejected" boolean DEFAULT false NOT NULL,
-	"atespace" jsonb,
-	"policy_attempted_at" timestamp with time zone,
-	"policy_rejected" boolean DEFAULT false NOT NULL,
-	"policy" jsonb,
-	"template_attempted_at" timestamp with time zone,
-	"template_rejected" boolean DEFAULT false NOT NULL,
-	"template" jsonb,
-	CONSTRAINT "substrate_verification_pkey" PRIMARY KEY("runtime_attempt_id"),
-	CONSTRAINT "substrate_verification_verification_id_generation_key" UNIQUE("verification_id","generation"),
-	CONSTRAINT "substrate_verification_atespace_check" CHECK (("factory"."substrate_verification"."atespace" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."atespace") = 'object'::text)),
-	CONSTRAINT "substrate_verification_check" CHECK (("factory"."substrate_verification"."atespace" IS NULL) OR ("factory"."substrate_verification"."atespace_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_verification_check1" CHECK (("factory"."substrate_verification"."policy" IS NULL) OR ("factory"."substrate_verification"."policy_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_verification_check2" CHECK (("factory"."substrate_verification"."template" IS NULL) OR ("factory"."substrate_verification"."template_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_verification_generation_check" CHECK ("factory"."substrate_verification"."generation" > 0),
-	CONSTRAINT "substrate_verification_intent_check" CHECK (jsonb_typeof("factory"."substrate_verification"."intent") = 'object'::text),
-	CONSTRAINT "substrate_verification_policy_check" CHECK (("factory"."substrate_verification"."policy" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."policy") = 'object'::text)),
-	CONSTRAINT "substrate_verification_template_check" CHECK (("factory"."substrate_verification"."template" IS NULL) OR (jsonb_typeof("factory"."substrate_verification"."template") = 'object'::text))
-);
-
-CREATE TABLE "factory"."substrate_worker_capacity" (
-	"owner" text NOT NULL,
-	"node_uid" uuid NOT NULL,
-	"intent" jsonb NOT NULL,
-	"attempted_at" timestamp with time zone,
-	"rejected" boolean DEFAULT false NOT NULL,
-	"pool" jsonb,
-	CONSTRAINT "substrate_worker_capacity_pkey" PRIMARY KEY("owner","node_uid"),
-	CONSTRAINT "substrate_worker_capacity_check" CHECK (("factory"."substrate_worker_capacity"."pool" IS NULL) OR ("factory"."substrate_worker_capacity"."attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_worker_capacity_intent_check" CHECK (jsonb_typeof("factory"."substrate_worker_capacity"."intent") = 'object'::text),
-	CONSTRAINT "substrate_worker_capacity_owner_check" CHECK ("factory"."substrate_worker_capacity"."owner" ~ '^[a-f0-9]{32}$'::text),
-	CONSTRAINT "substrate_worker_capacity_pool_check" CHECK (("factory"."substrate_worker_capacity"."pool" IS NULL) OR (jsonb_typeof("factory"."substrate_worker_capacity"."pool") = 'object'::text))
-);
-
-CREATE TABLE "factory"."substrate_workspace" (
-	"workspace_id" uuid NOT NULL,
-	"generation" bigint DEFAULT 1 NOT NULL,
-	"intent" jsonb NOT NULL,
-	"atespace_attempted_at" timestamp with time zone,
-	"atespace_rejected" boolean DEFAULT false NOT NULL,
-	"atespace" jsonb,
-	"policy_attempted_at" timestamp with time zone,
-	"policy_rejected" boolean DEFAULT false NOT NULL,
-	"policy" jsonb,
-	"template_attempted_at" timestamp with time zone,
-	"template_rejected" boolean DEFAULT false NOT NULL,
-	"template" jsonb,
-	CONSTRAINT "substrate_workspace_pkey" PRIMARY KEY("workspace_id","generation"),
-	CONSTRAINT "substrate_workspace_check" CHECK (("factory"."substrate_workspace"."atespace" IS NULL) OR ("factory"."substrate_workspace"."atespace_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_check1" CHECK (("factory"."substrate_workspace"."policy" IS NULL) OR ("factory"."substrate_workspace"."policy_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_check2" CHECK (("factory"."substrate_workspace"."template" IS NULL) OR ("factory"."substrate_workspace"."template_attempted_at" IS NOT NULL)),
-	CONSTRAINT "substrate_workspace_generation_check" CHECK (("factory"."substrate_workspace"."generation" > 0) AND ("factory"."substrate_workspace"."generation" <= '9007199254740991'::bigint)),
-	CONSTRAINT "substrate_workspace_intent_check" CHECK (jsonb_typeof("factory"."substrate_workspace"."intent") = 'object'::text)
 );
 
 CREATE TABLE "factory"."technical_design_revision" (
@@ -4745,37 +3054,6 @@ CREATE TABLE "factory"."ticket_document_revision" (
 	CONSTRAINT "ticket_document_revision_title_check" CHECK (length("factory"."ticket_document_revision"."title") > 0)
 );
 
-CREATE TABLE "factory"."ticket_follow" (
-	"ticket_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"following" boolean NOT NULL,
-	CONSTRAINT "ticket_follow_pkey" PRIMARY KEY("ticket_id","user_id")
-);
-
-CREATE TABLE "factory"."ticket_follow_up" (
-	"ticket_id" uuid PRIMARY KEY NOT NULL,
-	"source_ticket_id" uuid NOT NULL,
-	"source_document_id" uuid,
-	"source_revision_id" uuid NOT NULL,
-	CONSTRAINT "ticket_follow_up_check" CHECK ("factory"."ticket_follow_up"."ticket_id" <> "factory"."ticket_follow_up"."source_ticket_id")
-);
-
-CREATE TABLE "factory"."ticket_responsibility" (
-	"ticket_id" uuid PRIMARY KEY NOT NULL,
-	"user_id" uuid,
-	"version" integer DEFAULT 1 NOT NULL,
-	CONSTRAINT "ticket_responsibility_version_check" CHECK ("factory"."ticket_responsibility"."version" > 0)
-);
-
-CREATE TABLE "factory"."ticket_responsibility_event" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"ticket_id" uuid NOT NULL,
-	"user_id" uuid,
-	"actor_id" uuid NOT NULL,
-	"expected_version" integer NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
 CREATE TABLE "factory"."usage_entry" (
 	"operation_id" text NOT NULL,
 	"event_id" text NOT NULL,
@@ -4812,34 +3090,6 @@ CREATE TABLE "factory"."usage_operation" (
 	CONSTRAINT "usage_operation_purpose_check" CHECK ("factory"."usage_operation"."purpose" = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text]))
 );
 
-CREATE TABLE "factory"."usage_rate_override" (
-	"provider" text NOT NULL,
-	"model" text NOT NULL,
-	"version" bigint NOT NULL,
-	"rate" jsonb,
-	"updated_by" uuid NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "usage_rate_override_pkey" PRIMARY KEY("provider","model"),
-	CONSTRAINT "usage_rate_override_version_check" CHECK ("factory"."usage_rate_override"."version" > 0)
-);
-
-CREATE TABLE "factory"."usage_replay_cursor" (
-	"operation_id" text NOT NULL,
-	"session_id" text NOT NULL,
-	"sequence" bigint NOT NULL,
-	"start_sequence" bigint DEFAULT 0 NOT NULL,
-	CONSTRAINT "usage_replay_cursor_pkey" PRIMARY KEY("operation_id","session_id"),
-	CONSTRAINT "usage_replay_cursor_sequence_check" CHECK ("factory"."usage_replay_cursor"."sequence" >= 0),
-	CONSTRAINT "usage_replay_cursor_start_sequence_check" CHECK ("factory"."usage_replay_cursor"."start_sequence" >= 0)
-);
-
-CREATE TABLE "factory"."user_ui_preference" (
-	"user_id" uuid PRIMARY KEY NOT NULL,
-	"desktop_background_key" text DEFAULT 'river-landscape' NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "user_ui_preference_desktop_background_key_check" CHECK ("factory"."user_ui_preference"."desktop_background_key" = ANY (ARRAY['river-landscape'::text, 'the-harvesters'::text, 'mountainous-landscape'::text, 'gulf-of-marseille'::text, 'scene-on-the-ice'::text, 'moonlit-landscape'::text]))
-);
-
 CREATE TABLE "factory"."verification" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"change_id" uuid NOT NULL,
@@ -4849,7 +3099,6 @@ CREATE TABLE "factory"."verification" (
 	"action_run_id" bigint,
 	"action_run_url" text,
 	"runtime_attempt_id" uuid,
-	"runner_name" text NOT NULL,
 	"runner_id" bigint,
 	"runner_uuid" uuid,
 	"runner_token" text,
@@ -4874,94 +3123,6 @@ CREATE TABLE "factory"."verification" (
 	CONSTRAINT "verification_summary_check" CHECK (("factory"."verification"."summary" IS NULL) OR (length("factory"."verification"."summary") <= 2000))
 );
 
-CREATE TABLE "factory"."wiki_source_update" (
-	"project_id" uuid PRIMARY KEY NOT NULL,
-	"target_url" text NOT NULL,
-	"hook_id" bigint,
-	"hook_state" text DEFAULT 'create-intended' NOT NULL,
-	"hook_lease" uuid,
-	"hook_lease_until" timestamp with time zone,
-	"event_version" bigint DEFAULT 0 NOT NULL,
-	"handled_version" bigint DEFAULT 0 NOT NULL,
-	"next_attempt_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"failure" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "wiki_source_update_check" CHECK (("factory"."wiki_source_update"."handled_version" >= 0) AND ("factory"."wiki_source_update"."handled_version" <= "factory"."wiki_source_update"."event_version")),
-	CONSTRAINT "wiki_source_update_event_version_check" CHECK ("factory"."wiki_source_update"."event_version" >= 0),
-	CONSTRAINT "wiki_source_update_hook_state_check" CHECK ("factory"."wiki_source_update"."hook_state" = ANY (ARRAY['create-intended'::text, 'ready'::text, 'failed'::text]))
-);
-
-CREATE TABLE "factory"."workspace_collaboration_decision" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE "factory"."workspace_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"kind" text DEFAULT 'shell' NOT NULL,
-	"input_digest" text NOT NULL,
-	"state" text DEFAULT 'start-intended' NOT NULL,
-	"dispatch_attempted_at" timestamp with time zone,
-	"result" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_command_input_digest_check" CHECK ("factory"."workspace_command"."input_digest" ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "workspace_command_kind_check" CHECK ("factory"."workspace_command"."kind" = ANY (ARRAY['shell'::text, 'terminal'::text])),
-	CONSTRAINT "workspace_command_state_check" CHECK ("factory"."workspace_command"."state" = ANY (ARRAY['start-intended'::text, 'dispatching'::text, 'starting'::text, 'running'::text, 'exited'::text, 'cancelled'::text, 'failed'::text, 'uncertain'::text, 'interrupted'::text]))
-);
-
-CREATE TABLE "factory"."workspace_file_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"action" text NOT NULL,
-	"input_digest" text NOT NULL,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_file_operation_action_check" CHECK ("factory"."workspace_file_operation"."action" = ANY (ARRAY['mkdir'::text, 'delete'::text, 'rename'::text])),
-	CONSTRAINT "workspace_file_operation_input_digest_check" CHECK ("factory"."workspace_file_operation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
-);
-
-CREATE TABLE "factory"."workspace_file_transfer" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"direction" text NOT NULL,
-	"input_digest" text NOT NULL,
-	"path" text NOT NULL,
-	"state" text NOT NULL,
-	"result" jsonb,
-	"commit_attempted_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"expires_at" timestamp with time zone DEFAULT (now() + '00:30:00'::interval) NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_file_transfer_direction_check" CHECK ("factory"."workspace_file_transfer"."direction" = ANY (ARRAY['upload'::text, 'download'::text])),
-	CONSTRAINT "workspace_file_transfer_input_digest_check" CHECK ("factory"."workspace_file_transfer"."input_digest" ~ '^[0-9a-f]{64}$'::text),
-	CONSTRAINT "workspace_file_transfer_state_check" CHECK ("factory"."workspace_file_transfer"."state" = ANY (ARRAY['preparing'::text, 'active'::text, 'committing'::text, 'committed'::text, 'releasing'::text, 'released'::text, 'uncertain'::text]))
-);
-
-CREATE TABLE "factory"."workspace_lifecycle_command" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"runtime_attempt_id" uuid,
-	"actor_id" uuid NOT NULL,
-	"action" text NOT NULL,
-	"dispatch_attempted_at" timestamp with time zone,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_lifecycle_command_action_check" CHECK ("factory"."workspace_lifecycle_command"."action" = ANY (ARRAY['start'::text, 'pause'::text, 'stop'::text]))
-);
-
 CREATE TABLE "factory"."workspace_share" (
 	"workspace_id" uuid NOT NULL,
 	"user_id" uuid NOT NULL,
@@ -4975,60 +3136,18 @@ CREATE TABLE "factory"."workspace_share" (
 	CONSTRAINT "workspace_share_version_check" CHECK ("factory"."workspace_share"."version" > 0)
 );
 
-CREATE TABLE "factory"."workspace_share_decision" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"user_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"permission" text,
-	"expected_version" bigint NOT NULL,
-	"result" jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"access_reconciled_at" timestamp with time zone,
-	CONSTRAINT "workspace_share_decision_expected_version_check" CHECK ("factory"."workspace_share_decision"."expected_version" >= 0),
-	CONSTRAINT "workspace_share_decision_permission_check" CHECK ("factory"."workspace_share_decision"."permission" = ANY (ARRAY['observe'::text, 'collaborate'::text]))
-);
-
 CREATE TABLE "factory"."workspace_shared_document" (
 	"workspace_id" uuid NOT NULL,
 	"path" text NOT NULL,
 	"y_state" "bytea" NOT NULL,
 	"disk_version" text NOT NULL,
-	"dirty" boolean DEFAULT false NOT NULL,
-	"conflict" boolean DEFAULT false NOT NULL,
+	"sync_state" text DEFAULT 'clean' NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "workspace_shared_document_pkey" PRIMARY KEY("workspace_id","path"),
+	CONSTRAINT "workspace_shared_document_sync_state_check" CHECK ("factory"."workspace_shared_document"."sync_state" = ANY (ARRAY['clean'::text, 'dirty'::text, 'conflict'::text])),
 	CONSTRAINT "workspace_shared_document_y_state_check" CHECK (octet_length("factory"."workspace_shared_document"."y_state") <= 8388608)
 );
 
-CREATE TABLE "factory"."workspace_submission" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"workspace_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"writer_epoch" bigint NOT NULL,
-	"remote_head" text NOT NULL,
-	"repository_url" text NOT NULL,
-	"prepare_attempted_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "workspace_submission_repository_url_check" CHECK ("factory"."workspace_submission"."repository_url" ~ '^https://[^/@?#]+/[^/?#]+/[^/?#]+$'::text),
-	CONSTRAINT "workspace_submission_remote_head_check" CHECK ("factory"."workspace_submission"."remote_head" ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text),
-	CONSTRAINT "workspace_submission_writer_epoch_check" CHECK ("factory"."workspace_submission"."writer_epoch" > 0)
-);
-
-CREATE TABLE "factory"."workspace_terminal_operation" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"command_id" uuid NOT NULL,
-	"actor_id" uuid NOT NULL,
-	"action" text NOT NULL,
-	"input_digest" text NOT NULL,
-	"result" jsonb,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone,
-	CONSTRAINT "workspace_terminal_operation_action_check" CHECK ("factory"."workspace_terminal_operation"."action" = ANY (ARRAY['input'::text, 'resize'::text])),
-	CONSTRAINT "workspace_terminal_operation_input_digest_check" CHECK ("factory"."workspace_terminal_operation"."input_digest" ~ '^[0-9a-f]{64}$'::text)
-);
-
-ALTER TABLE "factory"."access_revocation" ADD CONSTRAINT "access_revocation_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."account_access" ADD CONSTRAINT "account_access_disabled_by_fkey" FOREIGN KEY ("disabled_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."account_access" ADD CONSTRAINT "account_access_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."administrator" ADD CONSTRAINT "administrator_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
@@ -5037,21 +3156,12 @@ ALTER TABLE "factory"."agent_turn" ADD CONSTRAINT "agent_turn_conversation_id_fk
 ALTER TABLE "factory"."agent_turn" ADD CONSTRAINT "agent_turn_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."agent_turn" ADD CONSTRAINT "agent_turn_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."agent_turn" ADD CONSTRAINT "agent_turn_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."agent_turn_mcp" ADD CONSTRAINT "agent_turn_mcp_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."agent_turn_mcp" ADD CONSTRAINT "agent_turn_mcp_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."agent_turn_mcp" ADD CONSTRAINT "agent_turn_mcp_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."agent_turn_skill" ADD CONSTRAINT "agent_turn_skill_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."agent_turn_skill" ADD CONSTRAINT "agent_turn_skill_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."attachment" ADD CONSTRAINT "attachment_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."attachment" ADD CONSTRAINT "attachment_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."attachment_draft" ADD CONSTRAINT "attachment_draft_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."attachment_draft" ADD CONSTRAINT "attachment_draft_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."attachment_reference" ADD CONSTRAINT "attachment_reference_attachment_id_fkey" FOREIGN KEY ("attachment_id") REFERENCES "factory"."attachment"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."attachment_turn_context" ADD CONSTRAINT "attachment_turn_context_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."audit_event" ADD CONSTRAINT "audit_event_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."account" ADD CONSTRAINT "account_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "auth"."session" ADD CONSTRAINT "session_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."branch_create_operation" ADD CONSTRAINT "branch_create_operation_change_id_branch_name_start_sha_fkey" FOREIGN KEY ("change_id","branch_name","start_sha") REFERENCES "factory"."change"("id","branch_name","base_sha") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."branch_create_operation" ADD CONSTRAINT "branch_create_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."build_browser_session" ADD CONSTRAINT "build_browser_session_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."build_browser_session" ADD CONSTRAINT "build_browser_session_runtime_attempt_id_change_id_fkey" FOREIGN KEY ("runtime_attempt_id","change_id") REFERENCES "factory"."runtime_attempt"("id","change_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."build_browser_session" ADD CONSTRAINT "build_browser_session_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE cascade ON UPDATE no action;
@@ -5062,41 +3172,26 @@ ALTER TABLE "factory"."candidate_review" ADD CONSTRAINT "candidate_review_focus_
 ALTER TABLE "factory"."candidate_review" ADD CONSTRAINT "candidate_review_supersedes_id_fkey" FOREIGN KEY ("supersedes_id") REFERENCES "factory"."candidate_review"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."candidate_review" ADD CONSTRAINT "candidate_review_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."candidate_review" ADD CONSTRAINT "candidate_review_verification_id_change_id_commit_sha_fkey" FOREIGN KEY ("verification_id","change_id","commit_sha") REFERENCES "factory"."verification"("id","change_id","commit_sha") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."candidate_review" ADD CONSTRAINT "candidate_review_verification_id_fkey" FOREIGN KEY ("verification_id") REFERENCES "factory"."verification"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change" ADD CONSTRAINT "change_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change" ADD CONSTRAINT "change_delivery_waiting_policy_fk" FOREIGN KEY ("delivery_waiting_policy_id") REFERENCES "factory"."project_delivery_policy"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."change" ADD CONSTRAINT "change_delivery_waiting_policy_fk" FOREIGN KEY ("delivery_waiting_policy_id") REFERENCES "factory"."operation"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change" ADD CONSTRAINT "change_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change" ADD CONSTRAINT "change_requirement_approval_id_fkey" FOREIGN KEY ("requirement_approval_id") REFERENCES "factory"."requirement_approval"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change" ADD CONSTRAINT "change_requirement_approval_id_ticket_id_fkey" FOREIGN KEY ("requirement_approval_id","ticket_id") REFERENCES "factory"."requirement_approval"("id","ticket_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change" ADD CONSTRAINT "change_runtime_attempt_fk" FOREIGN KEY ("runtime_attempt_id","id") REFERENCES "factory"."runtime_attempt"("id","change_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change" ADD CONSTRAINT "change_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change" ADD CONSTRAINT "change_ticket_id_project_id_fkey" FOREIGN KEY ("ticket_id","project_id") REFERENCES "factory"."ticket"("id","project_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_session" ADD CONSTRAINT "change_agent_session_active_turn_id_fkey" FOREIGN KEY ("active_turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_session" ADD CONSTRAINT "change_agent_session_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_session" ADD CONSTRAINT "change_agent_session_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_agent_session" ADD CONSTRAINT "change_agent_session_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_session" ADD CONSTRAINT "change_agent_session_runtime_change_fk" FOREIGN KEY ("runtime_attempt_id","change_id") REFERENCES "factory"."runtime_attempt"("id","change_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_turn_intent" ADD CONSTRAINT "change_agent_turn_intent_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_turn_intent" ADD CONSTRAINT "change_agent_turn_intent_runtime_attempt_id_change_id_fkey" FOREIGN KEY ("runtime_attempt_id","change_id") REFERENCES "factory"."runtime_attempt"("id","change_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_agent_turn_intent" ADD CONSTRAINT "change_agent_turn_intent_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."change_commit_operation" ADD CONSTRAINT "change_commit_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_commit_operation" ADD CONSTRAINT "change_commit_operation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_commit_operation" ADD CONSTRAINT "change_commit_operation_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_commit_operation" ADD CONSTRAINT "change_commit_operation_runtime_change_fk" FOREIGN KEY ("runtime_attempt_id","change_id") REFERENCES "factory"."runtime_attempt"("id","change_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_decision" ADD CONSTRAINT "change_editing_decision_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_decision" ADD CONSTRAINT "change_editing_decision_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_decision" ADD CONSTRAINT "change_editing_decision_request_id_fkey" FOREIGN KEY ("request_id") REFERENCES "factory"."change_editing_request"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_decision" ADD CONSTRAINT "change_editing_decision_target_id_fkey" FOREIGN KEY ("target_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_request" ADD CONSTRAINT "change_editing_request_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_request" ADD CONSTRAINT "change_editing_request_decided_by_fkey" FOREIGN KEY ("decided_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_request" ADD CONSTRAINT "change_editing_request_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."change_editing_request" ADD CONSTRAINT "change_editing_request_requester_id_fkey" FOREIGN KEY ("requester_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_writer" ADD CONSTRAINT "change_writer_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."change_writer" ADD CONSTRAINT "change_writer_fence_attempt_id_fkey" FOREIGN KEY ("fence_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_writer" ADD CONSTRAINT "change_writer_requested_by_fkey" FOREIGN KEY ("requested_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."change_writer" ADD CONSTRAINT "change_writer_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."coding_pause" ADD CONSTRAINT "coding_pause_resumed_by_turn_id_fkey" FOREIGN KEY ("resumed_by_turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."coding_pause" ADD CONSTRAINT "coding_pause_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."conversation_context" ADD CONSTRAINT "conversation_context_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."conversation_context" ADD CONSTRAINT "conversation_context_conversation_id_fkey" FOREIGN KEY ("conversation_id") REFERENCES "factory"."ticket_conversation"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."conversation_context" ADD CONSTRAINT "conversation_context_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
@@ -5111,138 +3206,55 @@ ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_approval_chan
 ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_approval_monitoring_incident_id_fkey" FOREIGN KEY ("monitoring_incident_id") REFERENCES "factory"."monitoring_incident"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_approval_monitoring_policy_id_fkey" FOREIGN KEY ("monitoring_policy_id") REFERENCES "factory"."monitoring_policy"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_approval_verification_id_change_id_commit_sha_fkey" FOREIGN KEY ("verification_id","change_id","commit_sha") REFERENCES "factory"."verification"("id","change_id","commit_sha") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_policy_basis_fk" FOREIGN KEY ("delivery_policy_id") REFERENCES "factory"."project_delivery_policy"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."developer_ide" ADD CONSTRAINT "developer_ide_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."delivery_approval" ADD CONSTRAINT "delivery_policy_basis_fk" FOREIGN KEY ("delivery_policy_id") REFERENCES "factory"."operation"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_change_id_project_id_fkey" FOREIGN KEY ("change_id","project_id") REFERENCES "factory"."change"("id","project_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_change_id_ticket_id_fkey" FOREIGN KEY ("change_id","ticket_id") REFERENCES "factory"."change"("id","ticket_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_owner_user_id_fkey" FOREIGN KEY ("owner_user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."development_workspace" ADD CONSTRAINT "development_workspace_ticket_id_project_id_fkey" FOREIGN KEY ("ticket_id","project_id") REFERENCES "factory"."ticket"("id","project_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."environment_write" ADD CONSTRAINT "environment_write_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."environment_write" ADD CONSTRAINT "environment_write_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."epic" ADD CONSTRAINT "epic_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."epic" ADD CONSTRAINT "epic_parent_id_project_id_fkey" FOREIGN KEY ("parent_id","project_id") REFERENCES "factory"."epic"("id","project_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."epic" ADD CONSTRAINT "epic_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."epic_confirmation" ADD CONSTRAINT "epic_confirmation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."epic_confirmation" ADD CONSTRAINT "epic_confirmation_epic_id_fkey" FOREIGN KEY ("epic_id") REFERENCES "factory"."epic"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."epic_confirmation" ADD CONSTRAINT "epic_confirmation_origin_ticket_id_fkey" FOREIGN KEY ("origin_ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."epic_confirmation" ADD CONSTRAINT "epic_confirmation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."epic_confirmation" ADD CONSTRAINT "epic_confirmation_proposal_entry_id_fkey" FOREIGN KEY ("proposal_entry_id") REFERENCES "factory"."conversation_entry"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."execution_policy" ADD CONSTRAINT "execution_policy_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."execution_policy_command" ADD CONSTRAINT "execution_policy_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."external_identity" ADD CONSTRAINT "external_identity_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."forge_account_intent" ADD CONSTRAINT "forge_account_intent_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."forge_branch_intent" ADD CONSTRAINT "forge_branch_intent_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."forge_connection" ADD CONSTRAINT "forge_connection_intended_by_fkey" FOREIGN KEY ("intended_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."forge_grant_intent" ADD CONSTRAINT "forge_grant_intent_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."forge_grant_intent" ADD CONSTRAINT "forge_grant_intent_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."forge_identity_intent" ADD CONSTRAINT "forge_identity_intent_intended_by_fkey" FOREIGN KEY ("intended_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."identity_configuration" ADD CONSTRAINT "identity_configuration_activated_by_fkey" FOREIGN KEY ("activated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."identity_configuration" ADD CONSTRAINT "identity_configuration_setup_id_fkey" FOREIGN KEY ("setup_id") REFERENCES "factory"."identity_setup"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."identity_setup" ADD CONSTRAINT "identity_setup_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."identity_setup" ADD CONSTRAINT "identity_setup_tested_user_id_fkey" FOREIGN KEY ("tested_user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_cancelled_by_fkey" FOREIGN KEY ("cancelled_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_requirement_revision_id_fkey" FOREIGN KEY ("requirement_revision_id") REFERENCES "factory"."requirement_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_technical_design_revision_id_fkey" FOREIGN KEY ("technical_design_revision_id") REFERENCES "factory"."technical_design_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."implementation_order" ADD CONSTRAINT "implementation_order_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."inbox_receipt" ADD CONSTRAINT "inbox_receipt_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_generation" ADD CONSTRAINT "knowledge_generation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_generation" ADD CONSTRAINT "knowledge_generation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_generation" ADD CONSTRAINT "knowledge_model_connection" FOREIGN KEY ("model_connection_id","model_connection_version") REFERENCES "factory"."model_connection_version"("connection_id","version") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page" ADD CONSTRAINT "knowledge_page_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page" ADD CONSTRAINT "knowledge_page_current_revision_fk" FOREIGN KEY ("current_revision_id","id") REFERENCES "factory"."knowledge_revision"("id","page_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page" ADD CONSTRAINT "knowledge_page_parent_project" FOREIGN KEY ("project_id","parent_id") REFERENCES "factory"."knowledge_page"("project_id","id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page" ADD CONSTRAINT "knowledge_page_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_page_alias" ADD CONSTRAINT "knowledge_page_alias_page_id_project_id_fkey" FOREIGN KEY ("page_id","project_id") REFERENCES "factory"."knowledge_page"("id","project_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_page_alias" ADD CONSTRAINT "knowledge_page_alias_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page_outline" ADD CONSTRAINT "knowledge_page_outline_id_fkey" FOREIGN KEY ("id") REFERENCES "factory"."knowledge_page"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_page_outline" ADD CONSTRAINT "knowledge_page_outline_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_revision" ADD CONSTRAINT "knowledge_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."knowledge_revision" ADD CONSTRAINT "knowledge_revision_generation_id_fkey" FOREIGN KEY ("generation_id") REFERENCES "factory"."knowledge_generation"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."knowledge_revision" ADD CONSTRAINT "knowledge_revision_generation_id_fkey" FOREIGN KEY ("generation_id") REFERENCES "factory"."operation"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."knowledge_revision" ADD CONSTRAINT "knowledge_revision_page_id_fkey" FOREIGN KEY ("page_id") REFERENCES "factory"."knowledge_page"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_application" ADD CONSTRAINT "learning_application_applied_by_fkey" FOREIGN KEY ("applied_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_application" ADD CONSTRAINT "learning_application_comparison_id_fkey" FOREIGN KEY ("comparison_id") REFERENCES "factory"."learning_trial"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_application" ADD CONSTRAINT "learning_application_proposal_id_fkey" FOREIGN KEY ("proposal_id") REFERENCES "factory"."learning_proposal"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."learning_application" ADD CONSTRAINT "learning_application_reverted_by_fkey" FOREIGN KEY ("reverted_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_application" ADD CONSTRAINT "learning_application_reverted_comparison_id_fkey" FOREIGN KEY ("reverted_comparison_id") REFERENCES "factory"."learning_trial"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."learning_case" ADD CONSTRAINT "learning_case_batch_fk" FOREIGN KEY ("batch_id") REFERENCES "factory"."learning_review"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."learning_case" ADD CONSTRAINT "learning_case_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."learning_case" ADD CONSTRAINT "learning_case_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."learning_case" ADD CONSTRAINT "learning_case_reviewer_id_fkey" FOREIGN KEY ("reviewer_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_command" ADD CONSTRAINT "learning_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_policy" ADD CONSTRAINT "learning_policy_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."learning_policy" ADD CONSTRAINT "learning_policy_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."learning_policy" ADD CONSTRAINT "learning_policy_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."learning_proposal" ADD CONSTRAINT "learning_proposal_decided_by_fkey" FOREIGN KEY ("decided_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."learning_proposal" ADD CONSTRAINT "learning_proposal_review_id_fkey" FOREIGN KEY ("review_id") REFERENCES "factory"."learning_review"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."learning_proposal" ADD CONSTRAINT "learning_proposal_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."learning_review" ADD CONSTRAINT "learning_review_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."learning_review" ADD CONSTRAINT "learning_review_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."learning_review" ADD CONSTRAINT "learning_review_reviewer_id_fkey" FOREIGN KEY ("reviewer_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_source_artifact" ADD CONSTRAINT "learning_source_artifact_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."learning_trial" ADD CONSTRAINT "learning_trial_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."learning_trial" ADD CONSTRAINT "learning_trial_proposal_id_fkey" FOREIGN KEY ("proposal_id") REFERENCES "factory"."learning_proposal"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."learning_trial_step" ADD CONSTRAINT "learning_trial_step_trial_id_fkey" FOREIGN KEY ("trial_id") REFERENCES "factory"."learning_trial"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."mcp_access_decision" ADD CONSTRAINT "mcp_access_decision_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_access_decision" ADD CONSTRAINT "mcp_access_decision_decided_by_fkey" FOREIGN KEY ("decided_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_access_decision" ADD CONSTRAINT "mcp_access_decision_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_choice" ADD CONSTRAINT "mcp_choice_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."mcp_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_choice" ADD CONSTRAINT "mcp_choice_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_connect_intent" ADD CONSTRAINT "mcp_connect_intent_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_connect_intent" ADD CONSTRAINT "mcp_connect_intent_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_connect_intent" ADD CONSTRAINT "mcp_connect_intent_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_connection" ADD CONSTRAINT "mcp_connection_authorized_by_fkey" FOREIGN KEY ("authorized_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_connection" ADD CONSTRAINT "mcp_connection_id_fkey" FOREIGN KEY ("id") REFERENCES "factory"."mcp_library"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_connection" ADD CONSTRAINT "mcp_connection_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_library" ADD CONSTRAINT "mcp_library_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_library" ADD CONSTRAINT "mcp_library_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_library_cover" ADD CONSTRAINT "mcp_library_cover_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."mcp_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_library_cover" ADD CONSTRAINT "mcp_library_cover_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_oauth_flow" ADD CONSTRAINT "mcp_oauth_flow_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_oauth_flow" ADD CONSTRAINT "mcp_oauth_flow_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_observation" ADD CONSTRAINT "mcp_observation_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_observation" ADD CONSTRAINT "mcp_observation_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_policy_approval" ADD CONSTRAINT "mcp_policy_approval_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_policy_approval" ADD CONSTRAINT "mcp_policy_approval_reviewed_by_fkey" FOREIGN KEY ("reviewed_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_policy_approval" ADD CONSTRAINT "mcp_policy_approval_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_project_grant" ADD CONSTRAINT "mcp_project_grant_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_project_grant" ADD CONSTRAINT "mcp_project_grant_granted_by_fkey" FOREIGN KEY ("granted_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_project_grant" ADD CONSTRAINT "mcp_project_grant_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."mcp_library" ADD CONSTRAINT "mcp_library_cover_updated_by_fkey" FOREIGN KEY ("cover_updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_revision" ADD CONSTRAINT "mcp_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."mcp_revision" ADD CONSTRAINT "mcp_revision_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."mcp_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_secret_write" ADD CONSTRAINT "mcp_secret_write_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_share_proposal" ADD CONSTRAINT "mcp_share_proposal_accepted_by_fkey" FOREIGN KEY ("accepted_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_share_proposal" ADD CONSTRAINT "mcp_share_proposal_accepted_library_id_fkey" FOREIGN KEY ("accepted_library_id") REFERENCES "factory"."mcp_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_share_proposal" ADD CONSTRAINT "mcp_share_proposal_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_share_proposal" ADD CONSTRAINT "mcp_share_proposal_proposed_by_fkey" FOREIGN KEY ("proposed_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_share_proposal" ADD CONSTRAINT "mcp_share_proposal_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."mcp_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."mcp_token_refresh" ADD CONSTRAINT "mcp_token_refresh_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."merge_operation" ADD CONSTRAINT "merge_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."merge_operation" ADD CONSTRAINT "merge_operation_delivery_approval_id_fkey" FOREIGN KEY ("delivery_approval_id") REFERENCES "factory"."delivery_approval"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."model_connection_version" ADD CONSTRAINT "model_connection_version_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_connection_write" ADD CONSTRAINT "model_connection_write_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_defaults" ADD CONSTRAINT "model_defaults_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_role_connection" ADD CONSTRAINT "model_role_connection_connection_id_connection_version_fkey" FOREIGN KEY ("connection_id","connection_version") REFERENCES "factory"."model_connection_version"("connection_id","version") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_role_connection" ADD CONSTRAINT "model_role_connection_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_role_probe" ADD CONSTRAINT "model_role_probe_connection_id_connection_version_fkey" FOREIGN KEY ("connection_id","connection_version") REFERENCES "factory"."model_connection_version"("connection_id","version") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."model_role_probe" ADD CONSTRAINT "model_role_probe_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."monitoring_command" ADD CONSTRAINT "monitoring_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."monitoring_command" ADD CONSTRAINT "monitoring_command_hook_id_fkey" FOREIGN KEY ("hook_id") REFERENCES "factory"."monitoring_hook"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."monitoring_command" ADD CONSTRAINT "monitoring_command_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."monitoring_evidence" ADD CONSTRAINT "monitoring_evidence_incident_id_fkey" FOREIGN KEY ("incident_id") REFERENCES "factory"."monitoring_incident"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."model_settings" ADD CONSTRAINT "model_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "factory"."model_settings" ADD CONSTRAINT "model_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "factory"."model_settings" ADD CONSTRAINT "model_settings_connection_id_connection_version_fkey" FOREIGN KEY ("connection_id","connection_version") REFERENCES "factory"."model_connection_version"("connection_id","version") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."model_settings" ADD CONSTRAINT "model_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_hook" ADD CONSTRAINT "monitoring_current_policy" FOREIGN KEY ("policy_id") REFERENCES "factory"."monitoring_policy"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_hook" ADD CONSTRAINT "monitoring_hook_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_incident" ADD CONSTRAINT "monitoring_incident_hook_id_fkey" FOREIGN KEY ("hook_id") REFERENCES "factory"."monitoring_hook"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_incident" ADD CONSTRAINT "monitoring_incident_policy_id_fkey" FOREIGN KEY ("policy_id") REFERENCES "factory"."monitoring_policy"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_incident" ADD CONSTRAINT "monitoring_incident_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_incident" ADD CONSTRAINT "monitoring_incident_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."monitoring_policy" ADD CONSTRAINT "monitoring_policy_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "factory"."mcp_connection"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_policy" ADD CONSTRAINT "monitoring_policy_delegated_by_fkey" FOREIGN KEY ("delegated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."monitoring_policy" ADD CONSTRAINT "monitoring_policy_hook_id_fkey" FOREIGN KEY ("hook_id") REFERENCES "factory"."monitoring_hook"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."oauthAccessToken" ADD CONSTRAINT "oauthAccessToken_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "auth"."oauthClient"("clientId") ON DELETE no action ON UPDATE no action;
@@ -5257,53 +3269,14 @@ ALTER TABLE "auth"."oauthConsent" ADD CONSTRAINT "oauthConsent_userId_fkey" FORE
 ALTER TABLE "auth"."oauthRefreshToken" ADD CONSTRAINT "oauthRefreshToken_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "auth"."oauthClient"("clientId") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."oauthRefreshToken" ADD CONSTRAINT "oauthRefreshToken_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "auth"."session"("id") ON DELETE set null ON UPDATE no action;
 ALTER TABLE "auth"."oauthRefreshToken" ADD CONSTRAINT "oauthRefreshToken_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_operation_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_operation_runtime_attempt_id_workspace_id_fkey" FOREIGN KEY ("runtime_attempt_id","workspace_id") REFERENCES "factory"."runtime_attempt"("id","workspace_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_operation_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."personal_git_operation" ADD CONSTRAINT "personal_git_operation_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."personal_model_settings" ADD CONSTRAINT "personal_model_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."personal_model_settings" ADD CONSTRAINT "personal_model_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "factory"."operation" ADD CONSTRAINT "operation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project" ADD CONSTRAINT "project_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_delivery_policy" ADD CONSTRAINT "project_delivery_policy_delegated_by_fkey" FOREIGN KEY ("delegated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_delivery_policy" ADD CONSTRAINT "project_delivery_policy_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_delivery_policy" ADD CONSTRAINT "project_delivery_policy_revoked_by_fkey" FOREIGN KEY ("revoked_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_delivery_queue" ADD CONSTRAINT "project_delivery_queue_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_delivery_queue" ADD CONSTRAINT "project_delivery_queue_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_environment" ADD CONSTRAINT "project_environment_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_image_preparation" ADD CONSTRAINT "project_image_preparation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_image_preparation" ADD CONSTRAINT "project_image_preparation_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_membership" ADD CONSTRAINT "project_membership_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."project_membership" ADD CONSTRAINT "project_membership_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_membership" ADD CONSTRAINT "project_membership_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_model_settings" ADD CONSTRAINT "project_model_settings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_model_settings" ADD CONSTRAINT "project_model_settings_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_release" ADD CONSTRAINT "project_release_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."project_release" ADD CONSTRAINT "project_release_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_repository_intent" ADD CONSTRAINT "project_repository_intent_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_confirmation" ADD CONSTRAINT "project_setup_confirmation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_confirmation" ADD CONSTRAINT "project_setup_confirmation_inspection_id_fkey" FOREIGN KEY ("inspection_id") REFERENCES "factory"."project_setup_inspection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_draft" ADD CONSTRAINT "project_setup_draft_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_draft" ADD CONSTRAINT "project_setup_draft_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_inspection_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_inspection_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "factory"."project_setup_inspection"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_inspection" ADD CONSTRAINT "project_setup_inspection_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."project_setup_readiness" ADD CONSTRAINT "project_setup_readiness_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_previous_runtime_attempt_id_fkey" FOREIGN KEY ("previous_runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_replacement_runtime_attempt_id_fkey" FOREIGN KEY ("replacement_runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_retry_command_id_fkey" FOREIGN KEY ("retry_command_id") REFERENCES "factory"."execution_policy_command"("command_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."promotion_operation" ADD CONSTRAINT "promotion_operation_supersedes_id_fkey" FOREIGN KEY ("supersedes_id") REFERENCES "factory"."promotion_operation"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."pull_request_operation" ADD CONSTRAINT "pull_request_operation_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."read_version" ADD CONSTRAINT "read_version_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."release_access" ADD CONSTRAINT "release_access_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."release_access" ADD CONSTRAINT "release_access_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."release_access" ADD CONSTRAINT "release_access_release_id_fkey" FOREIGN KEY ("release_id") REFERENCES "factory"."project_release"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."release_access" ADD CONSTRAINT "release_access_replaces_id_fkey" FOREIGN KEY ("replaces_id") REFERENCES "factory"."release_access"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."release_attempt" ADD CONSTRAINT "release_attempt_release_id_fkey" FOREIGN KEY ("release_id") REFERENCES "factory"."project_release"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."release_attempt" ADD CONSTRAINT "release_attempt_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."repository_mirror_command" ADD CONSTRAINT "repository_mirror_command_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."repository_mirror_command" ADD CONSTRAINT "repository_mirror_command_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."requirement_approval" ADD CONSTRAINT "requirement_approval_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."requirement_approval" ADD CONSTRAINT "requirement_approval_monitoring_incident_id_fkey" FOREIGN KEY ("monitoring_incident_id") REFERENCES "factory"."monitoring_incident"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."requirement_approval" ADD CONSTRAINT "requirement_approval_monitoring_policy_id_fkey" FOREIGN KEY ("monitoring_policy_id") REFERENCES "factory"."monitoring_policy"("id") ON DELETE no action ON UPDATE no action;
@@ -5312,35 +3285,21 @@ ALTER TABLE "factory"."requirement_approval" ADD CONSTRAINT "requirement_approva
 ALTER TABLE "factory"."requirement_approval" ADD CONSTRAINT "requirement_approval_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."requirement_revision" ADD CONSTRAINT "requirement_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."requirement_revision" ADD CONSTRAINT "requirement_revision_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."requirements_entry_intent" ADD CONSTRAINT "requirements_entry_intent_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."requirements_entry_intent" ADD CONSTRAINT "requirements_entry_intent_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."review_feedback" ADD CONSTRAINT "review_feedback_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_feedback" ADD CONSTRAINT "review_feedback_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_feedback" ADD CONSTRAINT "review_feedback_media_id_fkey" FOREIGN KEY ("media_id") REFERENCES "factory"."review_media"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_feedback" ADD CONSTRAINT "review_feedback_resolved_by_fkey" FOREIGN KEY ("resolved_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_command" ADD CONSTRAINT "review_feedback_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_command" ADD CONSTRAINT "review_feedback_command_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_command" ADD CONSTRAINT "review_feedback_command_feedback_id_fkey" FOREIGN KEY ("feedback_id") REFERENCES "factory"."review_feedback"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_command" ADD CONSTRAINT "review_feedback_command_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_message" ADD CONSTRAINT "review_feedback_message_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_feedback_message" ADD CONSTRAINT "review_feedback_message_feedback_id_fkey" FOREIGN KEY ("feedback_id") REFERENCES "factory"."review_feedback"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_media" ADD CONSTRAINT "review_media_browser_session_id_fkey" FOREIGN KEY ("browser_session_id") REFERENCES "factory"."build_browser_session"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_media" ADD CONSTRAINT "review_media_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_media" ADD CONSTRAINT "review_media_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_media" ADD CONSTRAINT "review_media_review_id_fkey" FOREIGN KEY ("review_id") REFERENCES "factory"."candidate_review"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."review_media" ADD CONSTRAINT "review_media_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_scenario" ADD CONSTRAINT "review_scenario_media_session_id_fkey" FOREIGN KEY ("media_session_id") REFERENCES "factory"."build_browser_session"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."review_scenario" ADD CONSTRAINT "review_scenario_review_id_fkey" FOREIGN KEY ("review_id") REFERENCES "factory"."candidate_review"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_change_project_fk" FOREIGN KEY ("change_id","project_id") REFERENCES "factory"."change"("id","project_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_verification_id_fkey" FOREIGN KEY ("verification_id") REFERENCES "factory"."verification"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_workspace_change_fk" FOREIGN KEY ("workspace_id","change_id") REFERENCES "factory"."development_workspace"("id","change_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."runtime_attempt" ADD CONSTRAINT "runtime_attempt_workspace_project_fk" FOREIGN KEY ("workspace_id","project_id") REFERENCES "factory"."development_workspace"("id","project_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."runtime_compute_wait" ADD CONSTRAINT "runtime_compute_wait_attempt_id_fkey" FOREIGN KEY ("attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."runtime_environment_intent" ADD CONSTRAINT "runtime_environment_intent_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."scimGroupMember" ADD CONSTRAINT "scimGroupMember_groupId_fkey" FOREIGN KEY ("groupId") REFERENCES "auth"."scimGroup"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."scimGroupMember" ADD CONSTRAINT "scimGroupMember_scimUserId_fkey" FOREIGN KEY ("scimUserId") REFERENCES "auth"."scimUser"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."scimIdentityTombstone" ADD CONSTRAINT "scimIdentityTombstone_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
@@ -5348,41 +3307,16 @@ ALTER TABLE "auth"."scimProjectionGrant" ADD CONSTRAINT "scimProjectionGrant_sci
 ALTER TABLE "auth"."scimProjectionGrant" ADD CONSTRAINT "scimProjectionGrant_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."scimSubject" ADD CONSTRAINT "scimSubject_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."scimUser" ADD CONSTRAINT "scimUser_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."session_archive" ADD CONSTRAINT "session_archive_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."session_archive" ADD CONSTRAINT "session_archive_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."shared_document_resolution" ADD CONSTRAINT "shared_document_resolution_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."shared_document_resolution" ADD CONSTRAINT "shared_document_resolution_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."skill_library" ADD CONSTRAINT "skill_library_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."skill_library" ADD CONSTRAINT "skill_library_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_choice" ADD CONSTRAINT "skill_library_choice_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."skill_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_choice" ADD CONSTRAINT "skill_library_choice_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_cover" ADD CONSTRAINT "skill_library_cover_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."skill_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_cover" ADD CONSTRAINT "skill_library_cover_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_revision" ADD CONSTRAINT "skill_library_revision_copied_from_fkey" FOREIGN KEY ("copied_from") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_revision" ADD CONSTRAINT "skill_library_revision_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."skill_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_library_revision" ADD CONSTRAINT "skill_library_revision_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_publication" ADD CONSTRAINT "skill_publication_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_publication" ADD CONSTRAINT "skill_publication_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."skill_library" ADD CONSTRAINT "skill_library_cover_updated_by_fkey" FOREIGN KEY ("cover_updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."skill_revision" ADD CONSTRAINT "skill_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_share_proposal" ADD CONSTRAINT "skill_share_proposal_accepted_library_id_fkey" FOREIGN KEY ("accepted_library_id") REFERENCES "factory"."skill_library"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_share_proposal" ADD CONSTRAINT "skill_share_proposal_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_share_proposal" ADD CONSTRAINT "skill_share_proposal_proposed_by_fkey" FOREIGN KEY ("proposed_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."skill_share_proposal" ADD CONSTRAINT "skill_share_proposal_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."skill_revision" ADD CONSTRAINT "skill_revision_library_id_fkey" FOREIGN KEY ("library_id") REFERENCES "factory"."skill_library"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."skill_revision" ADD CONSTRAINT "skill_revision_copied_from_fkey" FOREIGN KEY ("copied_from") REFERENCES "factory"."skill_revision"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."skill_revision" ADD CONSTRAINT "skill_revision_published_updated_by_fkey" FOREIGN KEY ("published_updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "auth"."ssoProvider" ADD CONSTRAINT "ssoProvider_userId_fkey" FOREIGN KEY ("userId") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."staging_configuration" ADD CONSTRAINT "staging_configuration_attempt_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."staging_preview" ADD CONSTRAINT "staging_preview_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."staging_preview" ADD CONSTRAINT "staging_preview_runtime_attempt_id_project_id_fkey" FOREIGN KEY ("runtime_attempt_id","project_id") REFERENCES "factory"."runtime_attempt"("id","project_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_actor_rpc" ADD CONSTRAINT "substrate_actor_rpc_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_actor_rpc" ADD CONSTRAINT "substrate_actor_rpc_stop_id_fkey" FOREIGN KEY ("stop_id") REFERENCES "factory"."substrate_input_stop"("stop_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_binding" ADD CONSTRAINT "substrate_binding_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_input_stop" ADD CONSTRAINT "substrate_input_stop_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_input_stop" ADD CONSTRAINT "substrate_input_stop_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_input_stop" ADD CONSTRAINT "substrate_input_stop_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_isolated" ADD CONSTRAINT "substrate_isolated_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_prebuild" ADD CONSTRAINT "substrate_prebuild_preparation_id_fkey" FOREIGN KEY ("preparation_id") REFERENCES "factory"."project_image_preparation"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "factory"."substrate_provision" ADD CONSTRAINT "substrate_provision_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."substrate_source" ADD CONSTRAINT "substrate_source_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_verification" ADD CONSTRAINT "substrate_verification_verification_id_fkey" FOREIGN KEY ("verification_id") REFERENCES "factory"."verification"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."substrate_workspace" ADD CONSTRAINT "substrate_workspace_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_planning_turn_id_fkey" FOREIGN KEY ("planning_turn_id") REFERENCES "factory"."agent_turn"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."technical_design_revision" ADD CONSTRAINT "technical_design_revision_previous_revision_id_fkey" FOREIGN KEY ("previous_revision_id") REFERENCES "factory"."technical_design_revision"("id") ON DELETE no action ON UPDATE no action;
@@ -5397,7 +3331,7 @@ ALTER TABLE "factory"."ticket" ADD CONSTRAINT "ticket_trashed_by_fkey" FOREIGN K
 ALTER TABLE "factory"."ticket_conversation" ADD CONSTRAINT "ticket_conversation_active_coding_context_id_fkey" FOREIGN KEY ("active_coding_context_id") REFERENCES "factory"."conversation_context"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."ticket_conversation" ADD CONSTRAINT "ticket_conversation_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."ticket_conversation" ADD CONSTRAINT "ticket_conversation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."ticket_conversation" ADD CONSTRAINT "ticket_conversation_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE restrict ON UPDATE no action;
+ALTER TABLE "factory"."ticket_conversation" ADD CONSTRAINT "ticket_conversation_ticket_id_project_id_fkey" FOREIGN KEY ("ticket_id","project_id") REFERENCES "factory"."ticket"("id","project_id") ON DELETE restrict ON UPDATE no action;
 ALTER TABLE "factory"."ticket_dependency" ADD CONSTRAINT "ticket_dependency_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."ticket_dependency" ADD CONSTRAINT "ticket_dependency_prerequisite_id_project_id_fkey" FOREIGN KEY ("prerequisite_id","project_id") REFERENCES "factory"."ticket"("id","project_id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."ticket_dependency" ADD CONSTRAINT "ticket_dependency_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
@@ -5406,53 +3340,16 @@ ALTER TABLE "factory"."ticket_document_revision" ADD CONSTRAINT "ticket_document
 ALTER TABLE "factory"."ticket_document_revision" ADD CONSTRAINT "ticket_document_revision_proposal_entry_id_fkey" FOREIGN KEY ("proposal_entry_id") REFERENCES "factory"."conversation_entry"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."ticket_document_revision" ADD CONSTRAINT "ticket_document_revision_requirement_revision_id_ticket_id_fkey" FOREIGN KEY ("requirement_revision_id","ticket_id") REFERENCES "factory"."requirement_revision"("id","ticket_id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."ticket_document_revision" ADD CONSTRAINT "ticket_document_revision_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow" ADD CONSTRAINT "ticket_follow_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow" ADD CONSTRAINT "ticket_follow_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow_up" ADD CONSTRAINT "ticket_follow_up_source_document_id_fkey" FOREIGN KEY ("source_document_id") REFERENCES "factory"."ticket_document_revision"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow_up" ADD CONSTRAINT "ticket_follow_up_source_revision_id_source_ticket_id_fkey" FOREIGN KEY ("source_revision_id","source_ticket_id") REFERENCES "factory"."requirement_revision"("id","ticket_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow_up" ADD CONSTRAINT "ticket_follow_up_source_ticket_id_fkey" FOREIGN KEY ("source_ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_follow_up" ADD CONSTRAINT "ticket_follow_up_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_responsibility" ADD CONSTRAINT "ticket_responsibility_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."ticket_responsibility" ADD CONSTRAINT "ticket_responsibility_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_responsibility_event" ADD CONSTRAINT "ticket_responsibility_event_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."ticket_responsibility_event" ADD CONSTRAINT "ticket_responsibility_event_ticket_id_fkey" FOREIGN KEY ("ticket_id") REFERENCES "factory"."ticket"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."ticket_responsibility_event" ADD CONSTRAINT "ticket_responsibility_event_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."usage_entry" ADD CONSTRAINT "usage_entry_operation_id_fkey" FOREIGN KEY ("operation_id") REFERENCES "factory"."usage_operation"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."usage_operation" ADD CONSTRAINT "usage_operation_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."usage_operation" ADD CONSTRAINT "usage_operation_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."usage_rate_override" ADD CONSTRAINT "usage_rate_override_updated_by_fkey" FOREIGN KEY ("updated_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."usage_replay_cursor" ADD CONSTRAINT "usage_replay_cursor_operation_id_fkey" FOREIGN KEY ("operation_id") REFERENCES "factory"."usage_operation"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "factory"."user_ui_preference" ADD CONSTRAINT "user_ui_preference_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "factory"."verification" ADD CONSTRAINT "verification_change_id_fkey" FOREIGN KEY ("change_id") REFERENCES "factory"."change"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."verification" ADD CONSTRAINT "verification_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."verification" ADD CONSTRAINT "verification_runtime_fk" FOREIGN KEY ("runtime_attempt_id","id") REFERENCES "factory"."runtime_attempt"("id","verification_id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."wiki_source_update" ADD CONSTRAINT "wiki_source_update_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "factory"."project"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_collaboration_decision" ADD CONSTRAINT "workspace_collaboration_decision_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_collaboration_decision" ADD CONSTRAINT "workspace_collaboration_decision_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_command" ADD CONSTRAINT "workspace_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_command" ADD CONSTRAINT "workspace_command_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_command" ADD CONSTRAINT "workspace_command_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_operation" ADD CONSTRAINT "workspace_file_operation_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_operation" ADD CONSTRAINT "workspace_file_operation_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_operation" ADD CONSTRAINT "workspace_file_operation_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_transfer" ADD CONSTRAINT "workspace_file_transfer_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_transfer" ADD CONSTRAINT "workspace_file_transfer_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_file_transfer" ADD CONSTRAINT "workspace_file_transfer_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_lifecycle_command" ADD CONSTRAINT "workspace_lifecycle_command_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_lifecycle_command" ADD CONSTRAINT "workspace_lifecycle_command_runtime_attempt_id_fkey" FOREIGN KEY ("runtime_attempt_id") REFERENCES "factory"."runtime_attempt"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_lifecycle_command" ADD CONSTRAINT "workspace_lifecycle_command_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."workspace_share" ADD CONSTRAINT "workspace_share_granted_by_fkey" FOREIGN KEY ("granted_by") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."workspace_share" ADD CONSTRAINT "workspace_share_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."workspace_share" ADD CONSTRAINT "workspace_share_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_share_decision" ADD CONSTRAINT "workspace_share_decision_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_share_decision" ADD CONSTRAINT "workspace_share_decision_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_share_decision" ADD CONSTRAINT "workspace_share_decision_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "factory"."workspace_shared_document" ADD CONSTRAINT "workspace_shared_document_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_submission" ADD CONSTRAINT "workspace_submission_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_submission" ADD CONSTRAINT "workspace_submission_id_fkey" FOREIGN KEY ("id") REFERENCES "factory"."change_commit_operation"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_submission" ADD CONSTRAINT "workspace_submission_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "factory"."development_workspace"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_terminal_operation" ADD CONSTRAINT "workspace_terminal_operation_actor_id_fkey" FOREIGN KEY ("actor_id") REFERENCES "auth"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "factory"."workspace_terminal_operation" ADD CONSTRAINT "workspace_terminal_operation_command_id_fkey" FOREIGN KEY ("command_id") REFERENCES "factory"."workspace_command"("id") ON DELETE no action ON UPDATE no action;
 CREATE UNIQUE INDEX "agent_turn_active_boundary_uidx" ON "factory"."agent_turn" USING btree ("project_id",(
 CASE
     WHEN "change_id" IS NULL AND ("input" ->> 'contextId'::text) IS NOT NULL THEN 'context:'::text || ("input" ->> 'contextId'::text)
@@ -5462,10 +3359,11 @@ CREATE INDEX "agent_turn_recovery_idx" ON "factory"."agent_turn" USING btree ("s
 CREATE UNIQUE INDEX "agent_turn_unresolved_change_boundary_uidx" ON "factory"."agent_turn" USING btree ("project_id","ticket_id") WHERE (("factory"."agent_turn"."change_id" IS NOT NULL) AND ("factory"."agent_turn"."state" = ANY (ARRAY['pending'::agent_turn_state, 'dispatching'::agent_turn_state, 'running'::agent_turn_state, 'uncertain'::agent_turn_state])));
 CREATE INDEX "attachment_project_storage" ON "factory"."attachment" USING btree ("project_id","state");
 CREATE INDEX "attachment_reference_target" ON "factory"."attachment_reference" USING btree ("kind","reference_id");
+CREATE INDEX "audit_event_scope_idx" ON "factory"."audit_event" USING btree ("kind","scope_type","scope_id","created_at" DESC NULLS FIRST);
+CREATE INDEX "audit_event_actor_idx" ON "factory"."audit_event" USING btree ("actor_id","created_at" DESC NULLS FIRST);
 CREATE INDEX "auth_account_user_idx" ON "auth"."account" USING btree ("user_id");
 CREATE INDEX "auth_session_user_idx" ON "auth"."session" USING btree ("user_id");
 CREATE INDEX "auth_verification_identifier_idx" ON "auth"."verification" USING btree ("identifier");
-CREATE INDEX "branch_create_operation_due_idx" ON "factory"."branch_create_operation" USING btree ("state","reconcile_after","lease_expires_at");
 CREATE UNIQUE INDEX "build_browser_one_unclosed_session" ON "factory"."build_browser_session" USING btree ("turn_id","owner_id") WHERE ("factory"."build_browser_session"."state" <> 'closed'::text);
 CREATE INDEX "build_browser_session_cleanup_idx" ON "factory"."build_browser_session" USING btree ("runtime_attempt_id") WHERE ("factory"."build_browser_session"."state" <> 'closed'::text);
 CREATE INDEX "candidate_review_change_idx" ON "factory"."candidate_review" USING btree ("change_id");
@@ -5473,18 +3371,14 @@ CREATE UNIQUE INDEX "candidate_review_finding_source_idx" ON "factory"."candidat
 CREATE UNIQUE INDEX "change_one_active_per_ticket" ON "factory"."change" USING btree ("ticket_id") WHERE ("factory"."change"."state" = ANY (ARRAY['branch-pending'::change_state, 'starting'::change_state, 'active'::change_state, 'cancelling'::change_state]));
 CREATE UNIQUE INDEX "change_agent_opencode_session_uidx" ON "factory"."change_agent_session" USING btree ("opencode_session_id") WHERE ("factory"."change_agent_session"."opencode_session_id" IS NOT NULL);
 CREATE UNIQUE INDEX "change_commit_one_active_uidx" ON "factory"."change_commit_operation" USING btree ("change_id") WHERE ("factory"."change_commit_operation"."state" <> ALL (ARRAY['succeeded'::change_commit_state, 'failed'::change_commit_state]));
-CREATE UNIQUE INDEX "change_editing_request_pending" ON "factory"."change_editing_request" USING btree ("change_id","requester_id","writer_epoch") WHERE ("factory"."change_editing_request"."state" = 'requested'::text);
 CREATE UNIQUE INDEX "conversation_context_original" ON "factory"."conversation_context" USING btree ("conversation_id") WHERE "factory"."conversation_context"."original";
 CREATE UNIQUE INDEX "conversation_entry_question_answer_uidx" ON "factory"."conversation_entry" USING btree ("in_reply_to_entry_id") WHERE (("factory"."conversation_entry"."kind" = 'answer'::conversation_entry_kind) AND ("factory"."conversation_entry"."in_reply_to_entry_id" IS NOT NULL));
 CREATE UNIQUE INDEX "conversation_entry_requirement_uidx" ON "factory"."conversation_entry" USING btree ("requirement_revision_id") WHERE ("factory"."conversation_entry"."requirement_revision_id" IS NOT NULL);
 CREATE UNIQUE INDEX "development_workspace_one_per_ticket" ON "factory"."development_workspace" USING btree ("ticket_id") WHERE ("factory"."development_workspace"."kind" = 'ticket'::development_workspace_kind);
 CREATE UNIQUE INDEX "development_workspace_one_personal_per_user_project" ON "factory"."development_workspace" USING btree ("project_id","owner_user_id") WHERE ("factory"."development_workspace"."kind" = 'personal'::development_workspace_kind);
-CREATE UNIQUE INDEX "environment_one_pending" ON "factory"."environment_write" USING btree ("project_id","environment") WHERE ("factory"."environment_write"."state" = 'write-intended'::text);
 CREATE INDEX "epic_project_parent_idx" ON "factory"."epic" USING btree ("project_id","parent_id");
 CREATE INDEX "epic_research_idx" ON "factory"."epic" USING gin (research_vector(title, description) tsvector_ops);
 CREATE INDEX "epic_title_trgm_idx" ON "factory"."epic" USING gin (lower(title) gin_trgm_ops);
-CREATE UNIQUE INDEX "implementation_order_one_waiting" ON "factory"."implementation_order" USING btree ("ticket_id") WHERE ("factory"."implementation_order"."state" = 'waiting'::text);
-CREATE UNIQUE INDEX "knowledge_generation_one_active_per_project" ON "factory"."knowledge_generation" USING btree ("project_id") WHERE ("factory"."knowledge_generation"."state" = ANY (ARRAY['pending'::knowledge_generation_state, 'running'::knowledge_generation_state]));
 CREATE INDEX "knowledge_page_parent_order" ON "factory"."knowledge_page" USING btree ("project_id","parent_id","sort_order","id");
 CREATE INDEX "knowledge_page_search_idx" ON "factory"."knowledge_page" USING gin (to_tsvector('simple'::regconfig, (title || ' '::text) || current_body) tsvector_ops);
 CREATE INDEX "knowledge_research_idx" ON "factory"."knowledge_page" USING gin (research_vector(title, current_body) tsvector_ops);
@@ -5493,13 +3387,6 @@ CREATE INDEX "knowledge_page_outline_project" ON "factory"."knowledge_page_outli
 CREATE INDEX "learning_case_observed" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE "factory"."learning_case"."selected";
 CREATE INDEX "learning_case_pending" ON "factory"."learning_case" USING btree ("project_id","owner_id","developer_only","settled_at") WHERE ("factory"."learning_case"."selected" AND ("factory"."learning_case"."batch_id" IS NULL));
 CREATE INDEX "learning_review_judge" ON "factory"."learning_review" USING btree ("judge_key","kind","state");
-CREATE INDEX "learning_trial_running" ON "factory"."learning_trial" USING btree ("owner_expires_at") WHERE ("factory"."learning_trial"."state" = 'running'::text);
-CREATE UNIQUE INDEX "mcp_connect_running" ON "factory"."mcp_connect_intent" USING btree ("connection_id") WHERE ("factory"."mcp_connect_intent"."state" = 'running'::text);
-CREATE UNIQUE INDEX "mcp_secret_pending" ON "factory"."mcp_secret_write" USING btree ("connection_id") WHERE ("factory"."mcp_secret_write"."state" = 'intended'::text);
-CREATE UNIQUE INDEX "mcp_refresh_pending" ON "factory"."mcp_token_refresh" USING btree ("connection_id") WHERE ("factory"."mcp_token_refresh"."state" = 'intended'::text);
-CREATE UNIQUE INDEX "merge_operation_one_success" ON "factory"."merge_operation" USING btree ("change_id") WHERE ("factory"."merge_operation"."state" = 'succeeded'::merge_operation_state);
-CREATE UNIQUE INDEX "merge_operation_one_unfinished" ON "factory"."merge_operation" USING btree ("change_id") WHERE ("factory"."merge_operation"."state" <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]));
-CREATE UNIQUE INDEX "model_connection_pending" ON "factory"."model_connection_write" USING btree ("connection_id") WHERE ("factory"."model_connection_write"."state" = 'write-intended'::text);
 CREATE INDEX "monitoring_pending" ON "factory"."monitoring_incident" USING btree ("project_id","received_at","id") WHERE ("factory"."monitoring_incident"."state" = ANY (ARRAY['queued'::text, 'diagnosing'::text, 'implementing'::text]));
 CREATE UNIQUE INDEX "monitoring_ticket" ON "factory"."monitoring_incident" USING btree ("ticket_id") WHERE ("factory"."monitoring_incident"."ticket_id" IS NOT NULL);
 CREATE INDEX "oauthAccessToken_authorizationCodeId_idx" ON "auth"."oauthAccessToken" USING btree ("authorizationCodeId");
@@ -5517,14 +3404,11 @@ CREATE INDEX "oauthRefreshToken_authorizationCodeId_idx" ON "auth"."oauthRefresh
 CREATE INDEX "oauthRefreshToken_clientId_idx" ON "auth"."oauthRefreshToken" USING btree ("clientId");
 CREATE INDEX "oauthRefreshToken_sessionId_idx" ON "auth"."oauthRefreshToken" USING btree ("sessionId");
 CREATE INDEX "oauthRefreshToken_userId_idx" ON "auth"."oauthRefreshToken" USING btree ("userId");
-CREATE INDEX "personal_git_operation_workspace" ON "factory"."personal_git_operation" USING btree ("workspace_id","created_at");
-CREATE UNIQUE INDEX "project_delivery_one_active_policy" ON "factory"."project_delivery_policy" USING btree ("project_id") WHERE ("factory"."project_delivery_policy"."revoked_at" IS NULL);
+CREATE INDEX "operation_scope_idx" ON "factory"."operation" USING btree ("kind","scope_type","scope_id","created_at" DESC NULLS FIRST);
+CREATE INDEX "operation_active_lease_idx" ON "factory"."operation" USING btree ("kind","state","lease_expires_at") WHERE "factory"."operation"."completed_at" IS NULL;
 CREATE INDEX "project_membership_user_idx" ON "factory"."project_membership" USING btree ("user_id","project_id");
 CREATE UNIQUE INDEX "project_release_one_active" ON "factory"."project_release" USING btree ("project_id") WHERE (("factory"."project_release"."state" = ANY (ARRAY['pending'::text, 'dispatching'::text, 'running'::text, 'checking'::text, 'publishing'::text, 'uncertain'::text])) AND ("factory"."project_release"."ended_at" IS NULL));
-CREATE UNIQUE INDEX "project_setup_one_inspection" ON "factory"."project_setup_inspection" USING btree ("project_id") WHERE ("factory"."project_setup_inspection"."state" = ANY (ARRAY['inspecting'::text, 'proposal'::text, 'confirming'::text]));
 CREATE INDEX "read_version_scope" ON "factory"."read_version" USING btree ("scope","project_id");
-CREATE UNIQUE INDEX "release_access_publish_attempt" ON "factory"."release_access" USING btree ("release_id") WHERE (("factory"."release_access"."scope" = 'publish'::text) AND ("factory"."release_access"."state" = ANY (ARRAY['pending'::text, 'active'::text, 'uncertain'::text])));
-CREATE INDEX "repository_mirror_unconfirmed" ON "factory"."repository_mirror_command" USING btree ("project_id") WHERE ("factory"."repository_mirror_command"."state" = ANY (ARRAY['executing'::text, 'uncertain'::text]));
 CREATE INDEX "requirement_research_idx" ON "factory"."requirement_revision" USING gin (research_vector(''::text, canonical_content) tsvector_ops);
 CREATE INDEX "review_feedback_delivery" ON "factory"."review_feedback" USING btree ("change_id") WHERE (("factory"."review_feedback"."kind" = 'thread'::text) AND ("factory"."review_feedback"."state" <> 'resolved'::text));
 CREATE INDEX "review_media_retention" ON "factory"."review_media" USING btree ("change_id","kind","state");
@@ -5550,7 +3434,6 @@ CREATE INDEX "scimSubject_profileSourceId_idx" ON "auth"."scimSubject" USING btr
 CREATE INDEX "scimUser_connectionId_idx" ON "auth"."scimUser" USING btree ("connectionId");
 CREATE INDEX "scimUser_provisioningDomainId_idx" ON "auth"."scimUser" USING btree ("provisioningDomainId");
 CREATE INDEX "scimUser_userId_idx" ON "auth"."scimUser" USING btree ("userId");
-CREATE INDEX "session_archive_pending" ON "factory"."session_archive" USING btree ("retry_after") WHERE ("factory"."session_archive"."state" <> 'saved'::text);
 CREATE INDEX "ticket_epic_idx" ON "factory"."ticket" USING btree ("project_id","epic_id");
 CREATE INDEX "ticket_project_updated_idx" ON "factory"."ticket" USING btree ("project_id","updated_at" DESC NULLS FIRST,"id" DESC NULLS FIRST);
 CREATE INDEX "ticket_research_idx" ON "factory"."ticket" USING gin (research_vector(title, description) tsvector_ops);
@@ -5559,12 +3442,9 @@ CREATE UNIQUE INDEX "ticket_conversation_project_draft_uidx" ON "factory"."ticke
 CREATE UNIQUE INDEX "ticket_conversation_ticket_uidx" ON "factory"."ticket_conversation" USING btree ("ticket_id") WHERE ("factory"."ticket_conversation"."ticket_id" IS NOT NULL);
 CREATE INDEX "ticket_dependency_prerequisite_idx" ON "factory"."ticket_dependency" USING btree ("project_id","prerequisite_id");
 CREATE INDEX "ticket_document_research_idx" ON "factory"."ticket_document_revision" USING gin (research_vector(title, canonical_content) tsvector_ops);
-CREATE INDEX "ticket_responsibility_event_recipient" ON "factory"."ticket_responsibility_event" USING btree ("user_id","created_at");
 CREATE INDEX "usage_entry_time_idx" ON "factory"."usage_entry" USING btree ("occurred_at");
 CREATE INDEX "usage_operation_scope_time_idx" ON "factory"."usage_operation" USING btree ("project_id","created_at");
 CREATE UNIQUE INDEX "verification_one_active_per_change" ON "factory"."verification" USING btree ("change_id") WHERE ("factory"."verification"."state" = ANY (ARRAY['pending'::verification_state, 'runner-starting'::verification_state, 'running'::verification_state]));
-CREATE INDEX "workspace_command_runtime_idx" ON "factory"."workspace_command" USING btree ("runtime_attempt_id","state");
-CREATE INDEX "workspace_file_transfer_runtime_idx" ON "factory"."workspace_file_transfer" USING btree ("runtime_attempt_id");
 -- Native 40-deferred-foreign-keys.sql.
 -- Run after Drizzle creates these named FKs. Change attributes without duplicating definitions.
 
@@ -5574,21 +3454,16 @@ ALTER TABLE ONLY factory.knowledge_page
 ALTER TABLE ONLY factory.monitoring_hook
     ALTER CONSTRAINT monitoring_current_policy DEFERRABLE INITIALLY DEFERRED;
 
-ALTER TABLE ONLY factory.runtime_compute_wait
-    ALTER CONSTRAINT runtime_compute_wait_attempt_id_fkey DEFERRABLE INITIALLY DEFERRED;
-
 -- Native 50-common-triggers.sql.
 -- Common triggers. Run after all Drizzle tables, indexes and foreign keys.
 
 CREATE TRIGGER agent_untrashed_ticket BEFORE INSERT ON factory.agent_turn FOR EACH ROW EXECUTE FUNCTION factory.require_untrashed_ticket();
 
+CREATE TRIGGER audit_event_immutable BEFORE UPDATE OR DELETE ON factory.audit_event FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
+
+CREATE TRIGGER guard_operation BEFORE INSERT OR DELETE OR UPDATE ON factory.operation FOR EACH ROW EXECUTE FUNCTION factory.guard_operation();
+
 CREATE TRIGGER installation_admission BEFORE INSERT ON factory.agent_turn FOR EACH ROW EXECUTE FUNCTION factory.require_installation_admission();
-
-CREATE TRIGGER installation_admission BEFORE INSERT ON factory.knowledge_generation FOR EACH ROW EXECUTE FUNCTION factory.require_installation_admission();
-
-CREATE TRIGGER installation_admission BEFORE INSERT ON factory.model_role_probe FOR EACH ROW EXECUTE FUNCTION factory.require_installation_admission();
-
-CREATE TRIGGER installation_admission BEFORE INSERT ON factory.project_setup_inspection FOR EACH ROW EXECUTE FUNCTION factory.require_installation_admission();
 
 CREATE TRIGGER runtime_untrashed_ticket BEFORE INSERT ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.require_untrashed_ticket();
 
@@ -5603,7 +3478,7 @@ CREATE TRIGGER enqueue_account_revocation AFTER UPDATE ON factory.account_access
 
 CREATE TRIGGER enqueue_membership_revocation AFTER INSERT OR DELETE OR UPDATE ON factory.project_membership FOR EACH ROW EXECUTE FUNCTION factory.enqueue_access_revocation();
 
-CREATE TRIGGER enqueue_project_access AFTER INSERT ON factory.project FOR EACH ROW EXECUTE FUNCTION factory.enqueue_project_access();
+CREATE TRIGGER enqueue_project_access AFTER INSERT ON factory.project FOR EACH ROW EXECUTE FUNCTION factory.enqueue_access_revocation();
 
 -- Native 52-attachments-triggers.sql.
 -- Attachments triggers. Run after all Drizzle tables, indexes and foreign keys.
@@ -5612,13 +3487,9 @@ CREATE TRIGGER attachment_identity BEFORE UPDATE ON factory.attachment FOR EACH 
 
 CREATE TRIGGER attachment_reference_immutable BEFORE DELETE OR UPDATE ON factory.attachment_reference FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER attachment_storage_immutable BEFORE DELETE OR UPDATE ON factory.attachment_storage FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER attachment_turn_context_immutable BEFORE DELETE OR UPDATE ON factory.attachment_turn_context FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
 CREATE TRIGGER conversation_attachments AFTER INSERT ON factory.conversation_entry FOR EACH ROW EXECUTE FUNCTION factory.bind_authored_attachments();
 
-CREATE TRIGGER feedback_attachments AFTER INSERT ON factory.review_feedback_message FOR EACH ROW EXECUTE FUNCTION factory.bind_authored_attachments();
+CREATE TRIGGER feedback_attachments AFTER INSERT ON factory.audit_event FOR EACH ROW WHEN (NEW.kind = 'review.feedback_message') EXECUTE FUNCTION factory.bind_authored_attachments();
 
 CREATE TRIGGER knowledge_attachments AFTER INSERT ON factory.knowledge_revision FOR EACH ROW EXECUTE FUNCTION factory.bind_authored_attachments();
 
@@ -5631,23 +3502,15 @@ CREATE TRIGGER ticket_document_attachments AFTER INSERT ON factory.ticket_docume
 -- Native 53-planning-triggers.sql.
 -- Planning triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER epic_confirmation_immutable BEFORE DELETE OR UPDATE ON factory.epic_confirmation FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
+CREATE TRIGGER epic_hierarchy_guard BEFORE INSERT OR UPDATE OF id, project_id, parent_id ON factory.epic FOR EACH ROW EXECUTE FUNCTION factory.guard_tree_hierarchy('Epic', 'Epic hierarchy');
 
-CREATE TRIGGER epic_hierarchy_guard BEFORE INSERT OR UPDATE ON factory.epic FOR EACH ROW EXECUTE FUNCTION factory.guard_epic_hierarchy();
-
-CREATE TRIGGER knowledge_hierarchy_guard BEFORE INSERT OR UPDATE OF id, project_id, parent_id ON factory.knowledge_page FOR EACH ROW EXECUTE FUNCTION factory.guard_knowledge_hierarchy();
+CREATE TRIGGER knowledge_hierarchy_guard BEFORE INSERT OR UPDATE OF id, project_id, parent_id ON factory.knowledge_page FOR EACH ROW EXECUTE FUNCTION factory.guard_tree_hierarchy('Wiki page', 'Wiki pages');
 
 CREATE TRIGGER knowledge_revision_immutable BEFORE DELETE OR UPDATE ON factory.knowledge_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER project_repository_intent_guard BEFORE UPDATE ON factory.project_repository_intent FOR EACH ROW EXECUTE FUNCTION factory.guard_project_repository_intent();
 
 CREATE TRIGGER requirement_approval_immutable BEFORE DELETE OR UPDATE ON factory.requirement_approval FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
 CREATE TRIGGER requirement_revision_immutable BEFORE DELETE OR UPDATE ON factory.requirement_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER setup_confirmation_immutable BEFORE DELETE OR UPDATE ON factory.project_setup_confirmation FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER setup_inspection_guard BEFORE UPDATE ON factory.project_setup_inspection FOR EACH ROW EXECUTE FUNCTION factory.guard_setup_inspection();
 
 CREATE TRIGGER technical_design_revision_immutable BEFORE DELETE OR UPDATE ON factory.technical_design_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
@@ -5655,107 +3518,58 @@ CREATE TRIGGER ticket_dependency_guard BEFORE INSERT OR UPDATE ON factory.ticket
 
 CREATE TRIGGER ticket_document_revision_immutable BEFORE DELETE OR UPDATE ON factory.ticket_document_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER ticket_follow_up_immutable BEFORE DELETE OR UPDATE ON factory.ticket_follow_up FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
 -- Native 54-conversation-triggers.sql.
 -- Conversation triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER conversation_context_identity BEFORE UPDATE ON factory.conversation_context FOR EACH ROW EXECUTE FUNCTION factory.guard_conversation_context();
+CREATE TRIGGER conversation_context_identity BEFORE UPDATE ON factory.conversation_context FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('Conversation identity and archived history are immutable', 'lock-on:archived_session', 'archived_session', 'transcript');
 
 CREATE TRIGGER conversation_entry_no_update BEFORE DELETE OR UPDATE ON factory.conversation_entry FOR EACH ROW EXECUTE FUNCTION factory.prevent_conversation_entry_mutation();
-
-CREATE TRIGGER ticket_conversation_coding_context BEFORE INSERT OR UPDATE OF active_coding_context_id ON factory.ticket_conversation FOR EACH ROW EXECUTE FUNCTION factory.guard_active_coding_context();
-
-CREATE TRIGGER ticket_conversation_project_guard BEFORE INSERT OR UPDATE OF project_id, ticket_id ON factory.ticket_conversation FOR EACH ROW EXECUTE FUNCTION factory.validate_ticket_conversation_project();
 
 -- Native 55-coding-triggers.sql.
 -- Coding triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER workspace_submission_intent BEFORE INSERT OR UPDATE ON factory.workspace_submission
-    FOR EACH ROW EXECUTE FUNCTION factory.protect_workspace_submission();
-
 CREATE TRIGGER agent_turn_guard BEFORE INSERT OR UPDATE ON factory.agent_turn FOR EACH ROW EXECUTE FUNCTION factory.guard_agent_turn();
-
-CREATE TRIGGER agent_turn_mcp_immutable BEFORE DELETE OR UPDATE ON factory.agent_turn_mcp FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER branch_operation_immutable BEFORE UPDATE ON factory.branch_create_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_branch_operation();
-
-CREATE TRIGGER build_browser_ordinal_guard BEFORE INSERT OR UPDATE ON factory.build_browser_session FOR EACH ROW EXECUTE FUNCTION factory.guard_build_browser_ordinal();
 
 CREATE TRIGGER build_browser_session_guard BEFORE INSERT OR UPDATE ON factory.build_browser_session FOR EACH ROW EXECUTE FUNCTION factory.guard_build_browser_session();
 
 CREATE TRIGGER change_agent_turn_intent_guard BEFORE INSERT OR UPDATE ON factory.change_agent_turn_intent FOR EACH ROW EXECUTE FUNCTION factory.guard_change_agent_turn_intent();
 
-CREATE TRIGGER change_editing_decision_immutable BEFORE DELETE OR UPDATE ON factory.change_editing_decision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER change_identity_immutable BEFORE UPDATE ON factory.change FOR EACH ROW EXECUTE FUNCTION factory.protect_change_identity();
+CREATE TRIGGER change_identity_immutable BEFORE UPDATE ON factory.change FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('Change identity and source intent are immutable', 'update-only', 'state', 'version', 'cancel_requested_at', 'cancelled_at', 'failure', 'runtime_attempt_id', 'delivery_waiting_sha', 'delivery_waiting_policy_id');
 
 CREATE TRIGGER change_prerequisites_guard BEFORE INSERT ON factory.change FOR EACH ROW EXECUTE FUNCTION factory.guard_change_prerequisites();
 
-CREATE TRIGGER implementation_scope BEFORE UPDATE ON factory.implementation_order FOR EACH ROW EXECUTE FUNCTION factory.protect_implementation_order();
-
 CREATE TRIGGER initialize_change_writer AFTER INSERT ON factory.change FOR EACH ROW EXECUTE FUNCTION factory.initialize_change_writer();
 
-CREATE TRIGGER integration_intent BEFORE UPDATE ON factory.change_commit_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_integration_intent();
-
-CREATE TRIGGER personal_git_operation_immutable BEFORE DELETE OR UPDATE ON factory.personal_git_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_personal_git_operation();
-
-CREATE TRIGGER session_archive_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.session_archive FOR EACH ROW EXECUTE FUNCTION factory.protect_session_archive();
+CREATE TRIGGER integration_intent BEFORE UPDATE ON factory.change_commit_operation FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('Commit intent and integrated source are immutable', 'update-only', 'commit_sha', 'observed_remote_sha', 'state', 'last_error', 'updated_at', 'completed_at');
 
 CREATE TRIGGER ticket_execution_revision BEFORE INSERT ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.require_ticket_execution_revision();
 
 -- Native 56-inputs-triggers.sql.
 -- Inputs triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER agent_turn_skill_guard BEFORE INSERT OR DELETE OR UPDATE ON factory.agent_turn_skill FOR EACH ROW EXECUTE FUNCTION factory.guard_loaded_skill();
+CREATE TRIGGER agent_turn_skill_cascade_delete AFTER DELETE ON factory.agent_turn FOR EACH ROW EXECUTE FUNCTION factory.cascade_deleted_agent_turn_skills();
 
-CREATE TRIGGER mcp_access_decision_immutable BEFORE DELETE OR UPDATE ON factory.mcp_access_decision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER mcp_library_identity_immutable BEFORE DELETE OR UPDATE ON factory.mcp_library FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER mcp_observation_immutable BEFORE DELETE OR UPDATE ON factory.mcp_observation FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER mcp_policy_approval_immutable BEFORE DELETE OR UPDATE ON factory.mcp_policy_approval FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
+CREATE TRIGGER mcp_library_identity_immutable BEFORE DELETE OR UPDATE ON factory.mcp_library FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('mcp_library identity is immutable', 'no-delete', 'cover_key', 'cover_version', 'cover_updated_by');
 
 CREATE TRIGGER mcp_revision_immutable BEFORE DELETE OR UPDATE ON factory.mcp_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
 CREATE TRIGGER model_connection_version_immutable BEFORE INSERT OR DELETE OR UPDATE ON factory.model_connection_version FOR EACH ROW EXECUTE FUNCTION factory.protect_model_connection_version();
 
-CREATE TRIGGER model_connection_write_guard BEFORE DELETE OR UPDATE ON factory.model_connection_write FOR EACH ROW EXECUTE FUNCTION factory.protect_model_connection_write();
+CREATE TRIGGER skill_library_identity_immutable BEFORE DELETE OR UPDATE ON factory.skill_library FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('skill_library identity is immutable', 'no-delete', 'cover_key', 'cover_version', 'cover_updated_by');
 
-CREATE TRIGGER model_role_probe_guard BEFORE DELETE OR UPDATE ON factory.model_role_probe FOR EACH ROW EXECUTE FUNCTION factory.protect_model_role_probe();
-
-CREATE TRIGGER native_skill_intent_guard BEFORE INSERT OR UPDATE ON factory.change_agent_turn_intent FOR EACH ROW EXECUTE FUNCTION factory.guard_native_skill_intent();
-
-CREATE TRIGGER skill_library_identity_immutable BEFORE DELETE OR UPDATE ON factory.skill_library FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER skill_library_revision_immutable BEFORE DELETE OR UPDATE ON factory.skill_library_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER skill_revision_immutable BEFORE DELETE OR UPDATE ON factory.skill_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
+CREATE TRIGGER skill_revision_immutable BEFORE DELETE OR UPDATE ON factory.skill_revision FOR EACH ROW EXECUTE FUNCTION factory.guard_immutable_columns('skill_revision content is immutable', 'no-delete', 'published', 'published_updated_by', 'published_updated_at');
 
 -- Native 57-learning-triggers.sql.
 -- Learning triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER learning_application_guard BEFORE UPDATE ON factory.learning_application FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
-
 CREATE TRIGGER learning_case_guard BEFORE UPDATE ON factory.learning_case FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
-
-CREATE TRIGGER learning_command_guard BEFORE UPDATE ON factory.learning_command FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
 
 CREATE TRIGGER learning_proposal_guard BEFORE UPDATE ON factory.learning_proposal FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
 
 CREATE TRIGGER learning_review_guard BEFORE UPDATE ON factory.learning_review FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
 
-CREATE TRIGGER learning_source_artifact_guard BEFORE UPDATE ON factory.learning_source_artifact FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
-
-CREATE TRIGGER learning_trial_guard BEFORE UPDATE ON factory.learning_trial FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
-
-CREATE TRIGGER learning_trial_step_guard BEFORE UPDATE ON factory.learning_trial_step FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
-
 -- Native 58-usage-triggers.sql.
 -- Usage triggers. Run after all Drizzle tables, indexes and foreign keys.
-
-CREATE TRIGGER execution_policy_command_immutable BEFORE UPDATE ON factory.execution_policy_command FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
 CREATE TRIGGER guard_usage_entry BEFORE UPDATE ON factory.usage_entry FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
@@ -5764,39 +3578,11 @@ CREATE TRIGGER guard_usage_operation BEFORE UPDATE ON factory.usage_operation FO
 -- Native 59-runtime-triggers.sql.
 -- Runtime triggers. Run after all Drizzle tables, indexes and foreign keys.
 
-CREATE TRIGGER developer_ide_intent_immutable BEFORE UPDATE ON factory.developer_ide FOR EACH ROW EXECUTE FUNCTION factory.protect_developer_ide_intent();
-
-CREATE TRIGGER development_workspace_identity_immutable BEFORE UPDATE ON factory.development_workspace FOR EACH ROW EXECUTE FUNCTION factory.protect_development_workspace_identity();
-
-CREATE TRIGGER project_image_preparation_immutable BEFORE UPDATE ON factory.project_image_preparation FOR EACH ROW EXECUTE FUNCTION factory.protect_project_image_preparation();
-
-CREATE TRIGGER repository_mirror_command_identity BEFORE UPDATE ON factory.repository_mirror_command FOR EACH ROW EXECUTE FUNCTION factory.protect_repository_mirror_command();
-
-CREATE TRIGGER runtime_attempt_identity_immutable BEFORE UPDATE ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.protect_runtime_attempt_identity();
-
-CREATE TRIGGER runtime_environment_intent_immutable BEFORE INSERT OR UPDATE ON factory.runtime_environment_intent FOR EACH ROW EXECUTE FUNCTION factory.protect_runtime_environment_intent();
-
-CREATE CONSTRAINT TRIGGER substrate_attempt_binding AFTER INSERT OR UPDATE ON factory.runtime_attempt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.require_substrate_binding();
-
-CREATE TRIGGER substrate_binding_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_binding FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_binding();
-
-CREATE TRIGGER substrate_prebuild_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_prebuild FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_prebuild();
+CREATE TRIGGER runtime_attempt_identity_immutable BEFORE INSERT OR DELETE OR UPDATE ON factory.runtime_attempt FOR EACH ROW EXECUTE FUNCTION factory.protect_runtime_attempt_identity();
 
 CREATE TRIGGER substrate_source_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_source FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_source();
 
-CREATE TRIGGER substrate_worker_capacity_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_worker_capacity FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_worker_capacity();
-
-CREATE TRIGGER substrate_workspace_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_workspace FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_workspace();
-
-CREATE TRIGGER substrate_input_stop_identity BEFORE INSERT OR UPDATE OR DELETE
-ON factory.substrate_input_stop FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_input_stop();
-
-CREATE TRIGGER substrate_actor_rpc_identity BEFORE INSERT OR UPDATE OR DELETE
-ON factory.substrate_actor_rpc FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_actor_rpc();
-
-CREATE TRIGGER substrate_capacity_installation_identity BEFORE INSERT OR UPDATE OR DELETE
-ON factory.substrate_capacity_installation
-FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_capacity_installation();
+CREATE TRIGGER substrate_provision_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_provision FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_provision();
 
 -- Native 60-delivery-triggers.sql.
 -- Delivery triggers. Run after all Drizzle tables, indexes and foreign keys.
@@ -5805,34 +3591,12 @@ CREATE TRIGGER candidate_review_guard BEFORE UPDATE ON factory.candidate_review 
 
 CREATE TRIGGER delivery_approval_immutable BEFORE DELETE OR UPDATE ON factory.delivery_approval FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
-CREATE TRIGGER delivery_policy_identity BEFORE UPDATE ON factory.project_delivery_policy FOR EACH ROW EXECUTE FUNCTION factory.protect_delivery_policy();
-
-CREATE TRIGGER monitoring_command_immutable BEFORE DELETE OR UPDATE ON factory.monitoring_command FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
-CREATE TRIGGER monitoring_evidence_immutable BEFORE DELETE OR UPDATE ON factory.monitoring_evidence FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
-
 CREATE TRIGGER monitoring_policy_immutable BEFORE DELETE OR UPDATE ON factory.monitoring_policy FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
 
 CREATE TRIGGER project_release_identity BEFORE UPDATE ON factory.project_release FOR EACH ROW EXECUTE FUNCTION factory.protect_project_release_identity();
 
-CREATE TRIGGER promotion_operation_protection BEFORE INSERT OR UPDATE ON factory.promotion_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_promotion_operation();
-
-CREATE TRIGGER pull_request_operation_immutable BEFORE UPDATE ON factory.pull_request_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_pull_request_operation();
-
-CREATE TRIGGER release_attempt_identity BEFORE UPDATE ON factory.release_attempt FOR EACH ROW EXECUTE FUNCTION factory.protect_release_attempt_identity();
-
-CREATE TRIGGER review_media_guard BEFORE UPDATE ON factory.review_media FOR EACH ROW EXECUTE FUNCTION factory.guard_review_media();
-
-CREATE TRIGGER review_scenario_guard BEFORE INSERT OR UPDATE ON factory.review_scenario FOR EACH ROW EXECUTE FUNCTION factory.guard_review_scenario();
-
-CREATE TRIGGER staging_configuration_immutable BEFORE INSERT OR DELETE OR UPDATE ON factory.staging_configuration FOR EACH ROW EXECUTE FUNCTION factory.protect_staging_configuration();
-
-CREATE TRIGGER substrate_isolated_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_isolated FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_isolated();
-
 -- Native 61-verification-triggers.sql.
 -- Verification triggers. Run after all Drizzle tables, indexes and foreign keys.
-
-CREATE TRIGGER substrate_verification_identity BEFORE INSERT OR DELETE OR UPDATE ON factory.substrate_verification FOR EACH ROW EXECUTE FUNCTION factory.protect_substrate_verification();
 
 CREATE TRIGGER verification_job_binding BEFORE UPDATE ON factory.verification FOR EACH ROW EXECUTE FUNCTION factory.protect_verification_job_binding();
 
@@ -5847,19 +3611,15 @@ CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON facto
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.agent_turn DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
+CREATE CONSTRAINT TRIGGER read_version AFTER INSERT ON factory.audit_event DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((NEW.kind = 'tickets.responsibility_event' AND NEW.scope_type = 'ticket') OR (NEW.kind = 'access.change_editing_decision' AND NEW.scope_type = 'change') OR (NEW.kind = 'review.feedback_message' AND NEW.scope_type = 'review_feedback')) EXECUTE FUNCTION factory.invalidate_factory_reads();
+
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.candidate_review DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.change DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.change_agent_session DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.change_editing_decision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.change_editing_request DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.change_writer DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.coding_pause DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.conversation_context DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
@@ -5867,29 +3627,17 @@ CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON facto
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.delivery_approval DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.implementation_order DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.inbox_receipt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.knowledge_generation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.knowledge_page DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.merge_operation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.monitoring_hook DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.monitoring_incident DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
+CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.operation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
+
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.project DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.project_delivery_queue DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.project_membership DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.promotion_operation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.pull_request_operation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.requirement_approval DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
@@ -5897,17 +3645,9 @@ CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON facto
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.review_feedback DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.review_feedback_message DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.review_media DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.review_scenario DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.runtime_attempt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.runtime_compute_wait DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.staging_preview DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.technical_design_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
@@ -5917,23 +3657,11 @@ CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON facto
 
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.ticket_document_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.ticket_follow DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.ticket_responsibility DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.ticket_responsibility_event DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR DELETE OR UPDATE ON factory.verification DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
-
-CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_choice DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_connection DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_library DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
-
-CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_library_cover DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
-
-CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_project_grant DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.mcp_revision DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
@@ -5941,34 +3669,33 @@ CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE
 
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.monitoring_incident DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
+CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.operation DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
+
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.project_membership DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
 CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.project_release DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
-
-CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.release_access DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
-
-CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR DELETE OR UPDATE ON factory.release_attempt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads();
 
 -- Native 70-delivery-view.sql.
 -- Run after all Drizzle tables. Retain the current-promotion projection and invoker security.
 
 CREATE VIEW factory.current_promotion WITH (security_invoker='true') AS
- SELECT DISTINCT ON (change_id) id,
-    change_id,
-    project_id,
-    commit_sha,
-    previous_runtime_attempt_id,
-    replacement_runtime_attempt_id,
+ SELECT DISTINCT ON (scope_id) id,
+    scope_id::uuid AS change_id,
+    (payload->>'projectId')::uuid AS project_id,
+    payload->>'commitSha' AS commit_sha,
+    NULLIF(payload->>'previousRuntimeAttemptId', '')::uuid AS previous_runtime_attempt_id,
+    NULLIF(payload->>'replacementRuntimeAttemptId', '')::uuid AS replacement_runtime_attempt_id,
     state,
-    last_error,
-    requested_at,
+    error AS last_error,
+    created_at AS requested_at,
     updated_at,
     completed_at,
-    ordinal,
-    supersedes_id,
-    retry_command_id
-   FROM factory.promotion_operation
-  ORDER BY change_id, ordinal DESC;
+    (payload->>'ordinal')::integer AS ordinal,
+    NULLIF(payload->>'supersedesId', '')::uuid AS supersedes_id,
+    NULLIF(payload->>'retryCommandId', '')::uuid AS retry_command_id
+   FROM factory.operation
+  WHERE kind = 'delivery.promotion' AND scope_type = 'change'
+  ORDER BY scope_id, (payload->>'ordinal')::integer DESC;
 
 -- Native 71-zero-publication.sql.
 -- Run after all Drizzle tables. Only these eight relations belong to Zero replication.
@@ -5995,10 +3722,12 @@ ALTER PUBLICATION factory_zero_publication ADD TABLE ONLY factory.ticket_depende
 -- Seed the two installation singletons after tables and native guards.
 -- schema_migration registration belongs to the composer and its final source digest.
 
-INSERT INTO factory.installation_maintenance(singleton) VALUES(true);
+INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload)
+VALUES(gen_random_uuid(),'installation.maintenance','installation','00000000-0000-0000-0000-000000000000','installation.maintenance:singleton',NULL,'disabled','{"singleton":true,"enabled":false,"requestedAt":null}'::jsonb);
 
-INSERT INTO factory.attachment_storage(singleton,id) VALUES(true,gen_random_uuid());
+INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+VALUES(gen_random_uuid(),'attachment.storage','installation','00000000-0000-0000-0000-000000000000','attachment.storage:singleton','ready','{}'::jsonb);
 
 -- Baseline registration.
-INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'bed7dc59968249829ed7efb97acab961f0de7d19486e92cdd1deb1c8be4722e2');
+INSERT INTO factory.schema_migration(version,source_digest) VALUES(1,'11b6090c2fd96a55537d4bf1ef8d81a27859f6ade214a365ade3255a5ce1efc4');
 COMMIT;

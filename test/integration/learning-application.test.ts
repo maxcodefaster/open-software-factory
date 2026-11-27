@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import type { LearningCase, LearningEdit } from "#conversation-domain/learning";
+import type { createDatabase } from "#db/client";
 import { editKnowledgeIn } from "../../apps/factory/src/knowledge/edit";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
 import { createWorkReviewOutput } from "../../apps/factory/src/learning/judge-output";
@@ -6,8 +8,6 @@ import { createLearningService } from "../../apps/factory/src/learning/service";
 import { learningEditDigest } from "../../apps/factory/src/learning/targets";
 import { createLearningWorker } from "../../apps/factory/src/learning/worker";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { LearningCase, LearningEdit } from "../../packages/conversation-domain/src/learning";
-import type { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { calibratedResult } from "../fixtures/learning";
@@ -82,9 +82,9 @@ test("personal guidance adoption changes only its Project activation and stays p
       editDigest: learningEditDigest(edit),
     })) as { revisionId: string };
     const [own] =
-      await database.client`SELECT revision_id FROM factory.skill_library_choice WHERE library_id=${libraryId} AND scope='personal' AND context_id=${first.projectID}`;
+      await database.client`SELECT payload->>'revisionId' AS revision_id FROM factory.operation WHERE kind='skills.choice' AND payload->>'libraryId'=${libraryId} AND scope_type='personal' AND scope_id=${first.projectID}`;
     const [other] =
-      await database.client`SELECT revision_id,version FROM factory.skill_library_choice WHERE library_id=${libraryId} AND scope='personal' AND context_id=${second.projectID}`;
+      await database.client`SELECT payload->>'revisionId' AS revision_id,payload->>'version' AS version FROM factory.operation WHERE kind='skills.choice' AND payload->>'libraryId'=${libraryId} AND scope_type='personal' AND scope_id=${second.projectID}`;
     expect(own?.["revision_id"]).toBe(applied.revisionId);
     expect(other).toMatchObject({ revision_id: revisionId, version: "1" });
     expect(
@@ -117,7 +117,8 @@ test("Monitoring refuses a result whose development permission was revoked durin
         if (property !== "unsafe") return Reflect.get(target, property, receiver);
         return (...args: Parameters<typeof target.unsafe>) => {
           const result = target.unsafe(...args);
-          if (!args[0].includes('from "factory"."learning_application"')) return result;
+          if (!args[0].includes('"factory"."learning_proposal"."application" is not null'))
+            return result;
           // Drizzle consumes row arrays through Postgres.js values(), not the tagged-call path.
           const values = result.values.bind(result);
           result.values = () =>
@@ -182,7 +183,7 @@ test("a private owner can release an exact edit request without publishing its c
       await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${result.ticketId}`,
     ).toHaveLength(0);
     expect(
-      await database.client`SELECT id FROM factory.learning_application WHERE proposal_id=${proposal.id}`,
+      await database.client`SELECT id FROM factory.learning_proposal WHERE id=${proposal.id} AND application IS NOT NULL`,
     ).toHaveLength(0);
   } finally {
     await database.client.end({ timeout: 2 });
@@ -456,15 +457,18 @@ test("concurrent Learning policy saves retain one version and exact immutable co
     const [policy] = await database.client<
       { enabled: boolean; automatic: boolean; version: number }[]
     >`
-      SELECT enabled,automatic_skills AS automatic,version FROM factory.learning_policy
-      WHERE scope_key=${`${owned.projectID}:project`}`;
+      SELECT (payload->>'enabled')::boolean AS enabled,(payload->>'automaticSkills')::boolean AS automatic,(payload->>'version')::int AS version
+      FROM factory.operation
+      WHERE kind='learning.policy' AND idempotency_key=${`learning.policy:${owned.projectID}:project`}`;
     expect(policy).toEqual({
       enabled: winner.enabled,
       automatic: winner.automaticSkills,
       version: 1,
     });
     const saved = await database.client<{ input: unknown; result: unknown }[]>`
-      SELECT input,result FROM factory.learning_command WHERE id=ANY(${commands.map((command) => command.commandId)}::uuid[])`;
+      SELECT payload->'input' AS input,payload->'result' AS result
+      FROM factory.audit_event
+      WHERE kind='learning.command' AND id=ANY(${commands.map((command) => command.commandId)}::uuid[])`;
     expect([...saved]).toEqual([{ input: winner, result: { version: 1 } }]);
     expect(
       await database.client`SELECT id FROM factory.usage_operation WHERE purpose='learning'`,
@@ -513,13 +517,13 @@ test("contended Drizzle decisions replay one exact command without duplicating t
     expect(results.every((result) => result.status === "fulfilled")).toBe(true);
     expect(results[1]).toEqual(results[0]);
     expect(
-      await database.client`SELECT id FROM factory.learning_command WHERE id=${value.apply.commandId}`,
+      await database.client`SELECT id FROM factory.audit_event WHERE dedupe_key=${`learning.command:${value.apply.commandId}`}`,
     ).toHaveLength(1);
     expect(
-      await database.client`SELECT id FROM factory.learning_application WHERE proposal_id=${value.proposal.id}`,
+      await database.client`SELECT id FROM factory.learning_proposal WHERE id=${value.proposal.id} AND application IS NOT NULL`,
     ).toHaveLength(1);
     expect(
-      await database.client`SELECT revision_id FROM factory.skill_library_revision WHERE library_id=${value.libraryId}`,
+      await database.client`SELECT id FROM factory.skill_revision WHERE library_id=${value.libraryId}`,
     ).toHaveLength(2);
     const [original] = await database.client<{ content: unknown }[]>`
       SELECT content FROM factory.learning_proposal WHERE id=${value.proposal.id}`;
@@ -604,11 +608,14 @@ test("a confirmed Skill edit atomically publishes, adopts for new work, and roll
         .every((choice) => choice.revisionId === reverted.revisionId),
     ).toBe(true);
     const [application] =
-      await database.client`SELECT state,reverted_revision_id FROM factory.learning_application WHERE id=${applied.applicationId}`;
+      await database.client`SELECT application->>'state' AS state,application->>'revertedRevisionId' AS reverted_revision_id
+        FROM factory.learning_proposal WHERE application->>'id'=${applied.applicationId}`;
     expect(application?.["state"]).toBe("reverted");
     await expect(
       (async () => {
-        await database.client`UPDATE factory.learning_application SET applied_by=${crypto.randomUUID()} WHERE id=${applied.applicationId}`;
+        await database.client`UPDATE factory.learning_proposal
+          SET application = jsonb_set(application, '{appliedBy}', ${JSON.stringify(crypto.randomUUID())}::jsonb)
+          WHERE application->>'id'=${applied.applicationId}`;
       })(),
     ).rejects.toThrow("immutable");
     const repeatEdit = {

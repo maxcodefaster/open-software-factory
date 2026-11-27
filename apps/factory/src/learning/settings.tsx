@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
-import type { LearningView } from "../../../../packages/conversation-domain/src/learning";
+import type { LearningView } from "#conversation-domain/learning";
 import { APIRequestError } from "../api-client";
 import { plainErrorMessage } from "../command-error";
 import {
@@ -176,6 +176,8 @@ export function LearningSettings(props: {
           <LearningDashboard
             view={current()}
             busy={busy() || Boolean(error())}
+            refreshBusy={busy()}
+            onRefresh={() => setRevision((value) => value + 1)}
             onOpenTicket={props.onOpenTicket}
             onToggle={() => {
               const projectId = props.projectID;
@@ -284,14 +286,6 @@ export function LearningSettings(props: {
           />
         )}
       </Show>
-      <button
-        type="button"
-        class="text-button work-refresh"
-        disabled={busy()}
-        onClick={() => setRevision((value) => value + 1)}
-      >
-        Refresh observations
-      </button>
     </div>
   );
 }

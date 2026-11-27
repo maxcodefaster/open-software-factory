@@ -1,77 +1,43 @@
 -- Planning routines. Run before Drizzle tables, with check_function_bodies disabled.
 
-CREATE FUNCTION factory.guard_epic_hierarchy() RETURNS trigger
+CREATE FUNCTION factory.guard_tree_hierarchy() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+DECLARE
+  has_cycle boolean;
 BEGIN
   IF TG_OP = 'UPDATE' AND (NEW.id <> OLD.id OR NEW.project_id <> OLD.project_id) THEN
-    RAISE EXCEPTION 'Epic identity and Project are immutable' USING ERRCODE = '23514';
+    RAISE EXCEPTION '% identity and Project are immutable', TG_ARGV[0] USING ERRCODE = '23514';
   END IF;
   PERFORM id FROM factory.project WHERE id = NEW.project_id FOR UPDATE;
-  IF EXISTS (
-    WITH RECURSIVE ancestors AS (
-      SELECT id, parent_id FROM factory.epic WHERE id = NEW.parent_id AND project_id = NEW.project_id
-      UNION
-      SELECT parent.id, parent.parent_id FROM factory.epic parent
-      JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
-    )
-    -- During a multi-row INSERT the closing Epic might not exist yet.
-    SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
-  ) THEN
-    RAISE EXCEPTION 'Epic hierarchy cannot contain a cycle' USING ERRCODE = '23514';
+  IF TG_TABLE_NAME = 'epic' THEN
+    SELECT EXISTS (
+      WITH RECURSIVE ancestors AS (
+        SELECT id, parent_id FROM factory.epic WHERE id = NEW.parent_id AND project_id = NEW.project_id
+        UNION
+        SELECT parent.id, parent.parent_id FROM factory.epic parent
+        JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
+      )
+      -- During a multi-row INSERT the closing Epic might not exist yet.
+      SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
+    ) INTO has_cycle;
+  ELSE
+    SELECT EXISTS (
+      WITH RECURSIVE ancestors AS (
+        SELECT id, parent_id FROM factory.knowledge_page WHERE id = NEW.parent_id AND project_id = NEW.project_id
+        UNION
+        SELECT parent.id, parent.parent_id FROM factory.knowledge_page parent
+        JOIN ancestors child ON parent.id = child.parent_id WHERE parent.project_id = NEW.project_id
+      )
+      SELECT 1 FROM ancestors WHERE id = NEW.id OR parent_id = NEW.id
+    ) INTO has_cycle;
+  END IF;
+  IF has_cycle THEN
+    RAISE EXCEPTION '% cannot contain a cycle', TG_ARGV[1] USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
 $$;
-
-CREATE FUNCTION factory.guard_knowledge_hierarchy() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP='UPDATE' AND (NEW.id<>OLD.id OR NEW.project_id<>OLD.project_id) THEN
-    RAISE EXCEPTION 'Wiki page identity and Project are immutable' USING ERRCODE='23514';
-  END IF;
-  PERFORM id FROM factory.project WHERE id=NEW.project_id FOR UPDATE;
-  IF EXISTS (
-    WITH RECURSIVE ancestors AS (
-      SELECT id,parent_id FROM factory.knowledge_page WHERE id=NEW.parent_id AND project_id=NEW.project_id
-      UNION
-      SELECT parent.id,parent.parent_id FROM factory.knowledge_page parent
-      JOIN ancestors child ON parent.id=child.parent_id WHERE parent.project_id=NEW.project_id
-    ) SELECT 1 FROM ancestors WHERE id=NEW.id OR parent_id=NEW.id
-  ) THEN
-    RAISE EXCEPTION 'Wiki pages cannot contain a cycle' USING ERRCODE='23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION factory.guard_project_repository_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.command_id,NEW.setup_id,NEW.user_id,NEW.project_id,NEW.name,NEW.slug,NEW.kind,
-      NEW.source_url,NEW.credential_key,NEW.fingerprint,NEW.created_at)
-    IS DISTINCT FROM (OLD.command_id,OLD.setup_id,OLD.user_id,OLD.project_id,OLD.name,OLD.slug,OLD.kind,
-      OLD.source_url,OLD.credential_key,OLD.fingerprint,OLD.created_at)
-    OR (OLD.state='committed' AND (NEW.state,NEW.default_branch,NEW.completed_at)
-      IS DISTINCT FROM (OLD.state,OLD.default_branch,OLD.completed_at))
-    OR (OLD.credential_removed_at IS NOT NULL AND NEW.credential_removed_at IS DISTINCT FROM OLD.credential_removed_at)
-  THEN RAISE EXCEPTION 'Project repository intent is immutable'; END IF;
-  RETURN NEW;
-END $$;
-
-CREATE FUNCTION factory.guard_setup_inspection() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF (NEW.id,NEW.project_id,NEW.source_commit,NEW.model_id,NEW.connection_id,NEW.connection_version,NEW.created_by,NEW.created_at,NEW.parent_id,NEW.answers)
-    IS DISTINCT FROM (OLD.id,OLD.project_id,OLD.source_commit,OLD.model_id,OLD.connection_id,OLD.connection_version,OLD.created_by,OLD.created_at,OLD.parent_id,OLD.answers)
-    OR (OLD.output IS NOT NULL AND NEW.output IS DISTINCT FROM OLD.output)
-    OR (OLD.state IN ('confirmed','complete') AND NEW.state<>OLD.state)
-  THEN RAISE EXCEPTION 'Setup inspection intent and published proposal are immutable'; END IF;
-  RETURN NEW;
-END $$;
 
 CREATE FUNCTION factory.guard_ticket_dependency() RETURNS trigger
     LANGUAGE plpgsql
@@ -116,15 +82,19 @@ CREATE FUNCTION factory.ticket_prerequisites(project uuid, dependent uuid) RETUR
   SELECT prerequisite.id, prerequisite.title, prerequisite.state,
     prerequisite.state = 'done' AND EXISTS (
       SELECT 1 FROM factory.change change
-      JOIN factory.merge_operation merge ON merge.change_id = change.id
-        AND merge.state = 'succeeded' AND merge.observed_default_sha = merge.commit_sha
-      JOIN factory.delivery_approval approval ON approval.id = merge.delivery_approval_id
-        AND approval.change_id = change.id AND approval.commit_sha = merge.commit_sha
+      JOIN factory.operation merge ON merge.kind = 'delivery.merge'
+        AND merge.scope_type = 'change' AND merge.scope_id = change.id::text
+        AND merge.state = 'succeeded'
+        AND merge.result->>'mergeSha' = merge.payload->>'commitSha'
+      JOIN factory.delivery_approval approval ON approval.id::text = merge.payload->>'approvalId'
+        AND approval.change_id = change.id AND approval.commit_sha = merge.payload->>'commitSha'
       JOIN factory.verification verification ON verification.id = approval.verification_id
-        AND verification.change_id = change.id AND verification.commit_sha = merge.commit_sha
+        AND verification.change_id = change.id AND verification.commit_sha = merge.payload->>'commitSha'
         AND verification.state = 'succeeded'
-      JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
-        AND promotion.project_id = edge.project_id AND promotion.commit_sha = merge.commit_sha
+      JOIN factory.operation promotion ON promotion.kind = 'delivery.promotion'
+        AND promotion.scope_type = 'change' AND promotion.scope_id = change.id::text
+        AND promotion.payload->>'projectId' = edge.project_id::text
+        AND promotion.payload->>'commitSha' = merge.payload->>'commitSha'
         AND promotion.state = 'succeeded'
       WHERE change.ticket_id = prerequisite.id AND change.project_id = edge.project_id
         AND change.state = 'delivered'

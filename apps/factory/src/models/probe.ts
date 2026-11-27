@@ -1,4 +1,4 @@
-import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
 import type { ModelProbeInput } from "./probe-contracts";
 
 export async function probeModel(input: ModelProbeInput): Promise<ModelProbeResult> {

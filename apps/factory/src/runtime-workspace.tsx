@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
+import { workspacePresence } from "#interface-domain/workspace-presence";
 import { plainErrorMessage } from "./command-error";
 import {
   appProcessCause,
@@ -10,7 +10,7 @@ import {
   restoreUnknownHeadline,
 } from "./preview-status";
 import { PreviewReview } from "./review/preview";
-import { type AppPreview, type RuntimeAttempt } from "./runtime/contracts";
+import type { AppPreview, RuntimeAttempt } from "./runtime/contracts";
 import { appRuntimeOrigin } from "./runtime-origins";
 import {
   retryableMainPreview,
@@ -70,11 +70,9 @@ export function RuntimeWorkspaceTabs(props: {
           !url() && !reconnecting() ? (attempt()?.state ?? "pending") : undefined,
         );
         const startingPreview = () =>
-          tab().view === "preview" &&
           ["create-intended", "starting", "pausing", "paused", "resuming"].includes(
             attempt()?.state ?? "",
-          ) &&
-          !attempt()?.computeWait;
+          ) && !attempt()?.computeWait;
         const review = createMemo(() => {
           const changeID = attempt()?.changeId;
           if (!changeID) return undefined;
@@ -105,14 +103,12 @@ export function RuntimeWorkspaceTabs(props: {
             }).headline;
           if (current) return workspacePresence({ runtimeState: current.state });
           if (props.pending) return "Opening the Workspace…";
-          return tab().view === "ide"
-            ? "The Workspace is not running. Open IDE to retry."
-            : "The Preview is not running. Open Preview to retry.";
+          return "The Preview is not running. Open Preview to retry.";
         };
         return (
           <div class="runtime-workspace-tab" hidden={!active()} inert={!active()}>
             <RuntimeWorkspace
-              title={tab().view === "ide" ? "IDE" : "Preview"}
+              title="Preview"
               attemptID={tab().attemptID}
               appChannel={tab().appChannel}
               url={url()}
@@ -150,7 +146,7 @@ export function RuntimeWorkspaceTabs(props: {
 }
 
 export function RuntimeWorkspace(props: {
-  title: "IDE" | "Preview";
+  title: "Preview";
   attemptID?: string | undefined;
   appChannel?: string | undefined;
   url?: string | undefined;
@@ -231,8 +227,13 @@ export function RuntimeWorkspace(props: {
   );
 }
 
+type FrameState =
+  | { kind: "loading"; delayed: boolean; reloadGeneration: number }
+  | { kind: "loaded"; appStatus?: number | undefined; reloadGeneration: number }
+  | { kind: "failed"; retryable: boolean; documentFailed: boolean; reloadGeneration: number };
+
 function AttachedRuntimeFrame(props: {
-  title: "IDE" | "Preview";
+  title: "Preview";
   attemptID: string | undefined;
   appChannel?: string | undefined;
   attempt?: Pick<RuntimeAttempt, "state" | "failure" | "computeWait"> | undefined;
@@ -250,28 +251,44 @@ function AttachedRuntimeFrame(props: {
       }
     | undefined;
 }) {
-  const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
-  const [delayed, setDelayed] = createSignal(false);
-  const [documentFailed, setDocumentFailed] = createSignal(false);
-  const [retryable, setRetryable] = createSignal(false);
-  const [appStatus, setAppStatus] = createSignal<number>();
-  const [manualReloads, setManualReloads] = createSignal(0);
-  const waited = createWaitElapsed(() =>
-    phase() === "loaded" ? undefined : `${props.url}:${manualReloads()}`,
-  );
-  const status = () =>
-    previewStatus({
+  const [frameState, setFrameState] = createSignal<FrameState>({
+    kind: "loading",
+    delayed: false,
+    reloadGeneration: 0,
+  });
+  const isDelayed = () => {
+    const current = frameState();
+    return current.kind === "loading" && current.delayed;
+  };
+  const isRetryable = () => {
+    const current = frameState();
+    return current.kind === "failed" && current.retryable;
+  };
+  const appStatus = () => {
+    const current = frameState();
+    return current.kind === "loaded" ? current.appStatus : undefined;
+  };
+  const waited = createWaitElapsed(() => {
+    const current = frameState();
+    return current.kind === "loaded" ? undefined : `${props.url}:${current.reloadGeneration}`;
+  });
+  const status = () => {
+    const current = frameState();
+    return previewStatus({
       attempt: props.attempt,
       app: props.app,
-      waited: delayed() ? Math.max(waited(), 30_000) : Math.min(waited(), 29_999),
-      phase: phase() === "failed" ? "failed" : "loading",
-      unreachable: retryable(),
+      waited:
+        current.kind === "loading" && current.delayed
+          ? Math.max(waited(), 30_000)
+          : Math.min(waited(), 29_999),
+      phase: current.kind === "failed" ? "failed" : "loading",
+      unreachable: current.kind === "failed" && current.retryable,
     });
+  };
   let attached = false;
   let retryDelay = 1000;
   let frame: HTMLIFrameElement | undefined;
-  const activePreviewID = () =>
-    props.title === "Preview" && props.active !== false ? props.attemptID : undefined;
+  const activePreviewID = () => (props.active !== false ? props.attemptID : undefined);
   function usePreview(attemptID: string | undefined) {
     if (!attemptID) return;
     frame?.contentWindow?.postMessage(
@@ -285,39 +302,42 @@ function AttachedRuntimeFrame(props: {
     () => {
       attached = false;
       retryDelay = 1000;
-      setRetryable(false);
-      setDocumentFailed(false);
-      setDelayed(false);
-      setAppStatus(undefined);
-      setPhase("loading");
+      setFrameState((previous) => ({
+        kind: "loading",
+        delayed: false,
+        reloadGeneration: previous.reloadGeneration,
+      }));
     },
   );
   createEffect(
-    () => ({ phase: phase(), delayed: delayed(), url: props.url }),
-    (current) => {
-      if (current.phase !== "loading") return;
-      if (current.delayed) return;
+    () => {
+      const current = frameState();
+      return current.kind === "loading" && !current.delayed
+        ? `${props.url}:${current.reloadGeneration}`
+        : undefined;
+    },
+    (waitingKey) => {
+      if (!waitingKey) return;
       // Silence is not a failed navigation. Keep waiting on the same document;
       // offer a local reload without replaying App work or starting compute.
-      const timer = setTimeout(() => setDelayed(true), 30_000);
+      const timer = setTimeout(
+        () =>
+          setFrameState((previous) =>
+            previous.kind === "loading" ? { ...previous, delayed: true } : previous,
+          ),
+        30_000,
+      );
       return () => clearTimeout(timer);
     },
   );
   createEffect(
     () => ({
-      phase: phase(),
-      retryable: retryable(),
+      retryable: isRetryable(),
       active: props.active !== false,
       reconnecting: props.reconnecting,
     }),
     (current) => {
-      if (
-        current.phase !== "failed" ||
-        !current.retryable ||
-        !current.active ||
-        current.reconnecting
-      )
-        return;
+      if (!current.retryable || !current.active || current.reconnecting) return;
       // Only Factory-confirmed initial document unavailability can retry.
       // Reconnect the same GET attachment, never Start, App writes or an
       // already attached document that may contain unsaved human input.
@@ -330,12 +350,11 @@ function AttachedRuntimeFrame(props: {
   );
   createEffect(
     () => ({
-      preview: props.title === "Preview",
       attemptID: props.attemptID,
       appChannel: props.appChannel,
     }),
     (current) => {
-      if (!current.preview || !current.attemptID) return;
+      if (!current.attemptID) return;
       const origin = appRuntimeOrigin(
         location.origin,
         current.attemptID,
@@ -353,19 +372,23 @@ function AttachedRuntimeFrame(props: {
         )
           return;
         if (event.data.type === "factory-preview-document-failed") {
-          setRetryable(!attached && event.data.retryable === true);
-          setDocumentFailed(true);
-          setPhase("failed");
+          setFrameState((previous) => ({
+            kind: "failed",
+            retryable: !attached && event.data.retryable === true,
+            documentFailed: true,
+            reloadGeneration: previous.reloadGeneration,
+          }));
           return;
         }
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
         attached = true;
-        setAppStatus(typeof event.data.status === "number" ? event.data.status : undefined);
-        setRetryable(false);
-        setDocumentFailed(false);
-        setDelayed(false);
-        setPhase("loaded");
+        const status = typeof event.data.status === "number" ? event.data.status : undefined;
+        setFrameState((previous) => ({
+          kind: "loaded",
+          appStatus: status,
+          reloadGeneration: previous.reloadGeneration,
+        }));
         usePreview(activePreviewID());
       };
       window.addEventListener("message", ready);
@@ -378,28 +401,27 @@ function AttachedRuntimeFrame(props: {
     if (resetBackoff) {
       attached = false;
       retryDelay = 1000;
-      setManualReloads((value) => value + 1);
     }
-    setRetryable(false);
-    setDocumentFailed(false);
-    setDelayed(false);
-    setAppStatus(undefined);
-    setPhase("loading");
+    setFrameState((previous) => ({
+      kind: "loading",
+      delayed: false,
+      reloadGeneration: resetBackoff ? previous.reloadGeneration + 1 : previous.reloadGeneration,
+    }));
     frame.src = props.url;
   }
 
   return (
     <div
       class="runtime-frame"
-      aria-busy={phase() === "loading" || props.reconnecting ? "true" : "false"}
+      aria-busy={frameState().kind === "loading" || props.reconnecting ? "true" : "false"}
     >
       <iframe
         ref={frame}
         title={`Factory ${props.title}`}
         data-runtime-attempt-id={props.attemptID}
         src={props.url}
-        inert={phase() !== "loaded" || props.reconnecting}
-        aria-hidden={phase() !== "loaded" || props.reconnecting ? "true" : undefined}
+        inert={frameState().kind !== "loaded" || props.reconnecting}
+        aria-hidden={frameState().kind !== "loaded" || props.reconnecting ? "true" : undefined}
         onLoad={(event) => {
           // The initial same-origin blank document is not an attachment. A routed document
           // may be cross-origin; contentDocument is null there. Load proves document delivery,
@@ -407,25 +429,42 @@ function AttachedRuntimeFrame(props: {
           const document = event.currentTarget.contentDocument;
           if (document?.URL === "about:blank") return;
           // Access rejection returns Factory JSON rather than redirecting to the runtime.
-          // Browsers still fire load for that HTTP error. Do not expose it as an attached IDE.
+          // Browsers still fire load for that HTTP error. Do not expose it as an attached Preview.
           const accessRejected =
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
-          const rejected = accessRejected || documentFailed();
+          const current = frameState();
           // A failed cross-origin document also fires load. Only the Preview
           // bridge can confirm attachment and suppress retries over human work.
-          setDelayed(false);
-          setPhase(rejected ? "failed" : "loaded");
-          if (!rejected) usePreview(activePreviewID());
+          if (accessRejected) {
+            setFrameState((previous) => ({
+              kind: "failed",
+              retryable: false,
+              documentFailed: false,
+              reloadGeneration: previous.reloadGeneration,
+            }));
+            return;
+          }
+          if (current.kind === "failed" && current.documentFailed) return;
+          setFrameState((previous) => ({
+            kind: "loaded",
+            appStatus: previous.kind === "loaded" ? previous.appStatus : undefined,
+            reloadGeneration: previous.reloadGeneration,
+          }));
+          usePreview(activePreviewID());
         }}
         onError={() => {
-          setDelayed(false);
-          setPhase("failed");
+          setFrameState((previous) => ({
+            kind: "failed",
+            retryable: false,
+            documentFailed: false,
+            reloadGeneration: previous.reloadGeneration,
+          }));
         }}
       />
       <Show
         when={
-          props.title === "Preview" && props.review && props.attemptID && phase() === "loaded"
+          props.review && props.attemptID && frameState().kind === "loaded"
             ? { review: props.review, attemptID: props.attemptID }
             : undefined
         }
@@ -448,52 +487,51 @@ function AttachedRuntimeFrame(props: {
           />
         )}
       </Show>
-      <Show when={phase() === "loaded" ? appResponseNotice(appStatus(), props.app) : undefined}>
+      <Show
+        when={
+          frameState().kind === "loaded" ? appResponseNotice(appStatus(), props.app) : undefined
+        }
+      >
         {(notice) => (
           <div class="runtime-app-notice" role="status">
             {notice()}
           </div>
         )}
       </Show>
-      <Show when={phase() !== "loaded" || props.reconnecting}>
+      <Show when={frameState().kind !== "loaded" || props.reconnecting}>
         <div
           class="runtime-frame-state empty-workspace"
           role="status"
           aria-label={`${props.title} connection`}
         >
           <Show
-            when={props.title === "Preview" && !props.reconnecting}
-            fallback={
-              <p>
-                {props.reconnecting
-                  ? "Connection interrupted. Reconnecting to the same Workspace…"
-                  : phase() === "failed"
-                    ? "Could not open IDE. Reload this view to retry."
-                    : delayed()
-                      ? "IDE is taking longer to open. You can keep waiting."
-                      : "Workspace is running. Opening IDE…"}
-              </p>
-            }
+            when={!props.reconnecting}
+            fallback={<p>Connection interrupted. Reconnecting to the same Workspace…</p>}
           >
             <p>
-              {phase() === "failed" && retryable() && !appProcessCause(props.app?.process)
+              {frameState().kind === "failed" &&
+              isRetryable() &&
+              !appProcessCause(props.app?.process)
                 ? "Preview could not be reached. Reconnecting…"
                 : status().headline}
             </p>
             <Show when={status().cause}>{(cause) => <p role="note">{cause()}</p>}</Show>
-            <Show when={phase() === "failed" || delayed() ? status().detail : undefined}>
+            <Show
+              when={frameState().kind === "failed" || isDelayed() ? status().detail : undefined}
+            >
               {(detail) => <p>{detail()}</p>}
             </Show>
             <Show when={waited() >= 5_000}>
               <p aria-live="off">
-                {phase() === "failed" ? "Trying for" : "Waiting for"} {waitLabel(waited())}.
+                {frameState().kind === "failed" ? "Trying for" : "Waiting for"}{" "}
+                {waitLabel(waited())}.
               </p>
             </Show>
           </Show>
-          <Show when={!props.reconnecting && (phase() === "failed" || delayed())}>
+          <Show when={!props.reconnecting && (frameState().kind === "failed" || isDelayed())}>
             <button
               type="button"
-              class={phase() === "failed" ? "primary-button" : "quiet-button"}
+              class={frameState().kind === "failed" ? "primary-button" : "quiet-button"}
               onClick={() => reload()}
             >
               Reload view

@@ -1,5 +1,6 @@
-import { and, eq, inArray, isNotNull, notInArray, or, sql as query } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { and, eq, inArray, isNotNull, ne, notInArray, sql as query } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
@@ -7,8 +8,9 @@ import {
   changeWriter,
   developmentWorkspace,
   runtimeAttempt,
+  ticket,
   workspaceSharedDocument,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./authority";
 import { workspaceAuthorityIn } from "./workspace";
@@ -17,30 +19,36 @@ import { writerActivity } from "./writer-activity";
 export async function lockChangeWriterIn(sql: DatabaseTransaction, changeID: string) {
   // Admission already orders Change before membership. Source and handoff use
   // the same order, including when a save waits for an admitted Agent turn.
-  const [change] = await sql<{ projectID: string; available: boolean }[]>`
-    SELECT change.project_id AS "projectID",change.state IN ('starting','active','failed')
-      AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL AS available
-    FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-    WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
-  if (!change) throw new CommandError("not-found", "Change not found");
-  const [writer] = await sql<
-    {
-      state: "unassigned" | "agent-preparing" | "agent" | "handoff" | "human";
-      epoch: string;
-      userID: string | null;
-      turnID: string | null;
-      fenceAttemptID: string | null;
-      fenceRequired: boolean;
-      requestedBy: string | null;
-      requestID: string | null;
-      handoffKind: "takeover" | "release";
-    }[]
-  >`SELECT state,epoch::text, user_id AS "userID",turn_id AS "turnID"
-    ,fence_attempt_id AS "fenceAttemptID",fence_required AS "fenceRequired",
-    requested_by AS "requestedBy",request_id AS "requestID",handoff_kind AS "handoffKind"
-    FROM factory.change_writer WHERE change_id=${changeID} FOR UPDATE`;
+  const db = drizzleTransaction(sql);
+  const lockedChange = alias(change, "change");
+  const lockedTicket = alias(ticket, "ticket");
+  const [locked] = await db
+    .select({
+      projectID: lockedChange.projectId,
+      available: query<boolean>`${lockedChange.state} IN ('starting','active','failed') AND ${lockedChange.cancelRequestedAt} IS NULL AND ${lockedTicket.trashedAt} IS NULL`,
+    })
+    .from(lockedChange)
+    .innerJoin(lockedTicket, eq(lockedTicket.id, lockedChange.ticketId))
+    .where(eq(lockedChange.id, changeID))
+    .for("update", { of: [lockedChange, lockedTicket] });
+  if (!locked) throw new CommandError("not-found", "Change not found");
+  const [writer] = await db
+    .select({
+      state: changeWriter.state,
+      epoch: query<string>`${changeWriter.epoch}::text`,
+      userID: changeWriter.userId,
+      turnID: changeWriter.turnId,
+      fenceAttemptID: changeWriter.fenceAttemptId,
+      fenceRequired: changeWriter.fenceRequired,
+      requestedBy: changeWriter.requestedBy,
+      requestID: changeWriter.requestId,
+      handoffKind: changeWriter.handoffKind,
+    })
+    .from(changeWriter)
+    .where(eq(changeWriter.changeId, changeID))
+    .for("update");
   if (!writer) throw new CommandError("unavailable", "Change writing authority is unavailable");
-  return { ...writer, ...change };
+  return { ...writer, ...locked };
 }
 
 export async function claimAgentWriterIn(
@@ -61,7 +69,7 @@ export async function claimAgentWriterIn(
     .where(
       and(
         eq(developmentWorkspace.changeId, changeID),
-        or(workspaceSharedDocument.dirty, workspaceSharedDocument.conflict),
+        ne(workspaceSharedDocument.syncState, "clean"),
       ),
     )
     .limit(1);
@@ -109,7 +117,12 @@ export async function claimAgentWriterIn(
   if (["agent", "agent-preparing"].includes(writer.state) && writer.turnID !== turnID) {
     const [settled] = await sql<{ requiresFence: boolean | null }[]>`SELECT previous.id,
         ((session.state='failed' AND previous.state='failed' AND NOT EXISTS(
-          SELECT 1 FROM factory.coding_pause pause WHERE pause.turn_id=previous.id AND pause.resumed_by_turn_id IS NULL))
+          SELECT 1 FROM factory.operation pause
+          WHERE pause.kind='usage.coding_pause'
+            AND pause.scope_type='agent_turn'
+            AND pause.scope_id=previous.id::text
+            AND pause.state='paused'
+            AND pause.payload->>'resumedByTurnId' IS NULL))
           OR (session.change_id IS NOT NULL AND intent.runtime_attempt_id IS NULL
             AND previous.state IN ('failed','stopped'))
           OR (session.state='waiting' AND previous.state='completed')) AS "requiresFence"

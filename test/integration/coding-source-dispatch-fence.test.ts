@@ -1,5 +1,5 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
+import type { DatabaseTransaction } from "#db/client";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -210,7 +210,7 @@ async function dispatchFixture(bootstrap: boolean, starting = false, failure?: E
         if (!turn?.ownerToken) throw new Error("Owned pending execution lease required");
         const intent = await createChangeAdmission(owned.database, buildModelID).intent(turn.id);
         expect(turn.state).toBe("pending");
-        expect(intent.skillLoading).toBe("native");
+        expect(intent.skillManifest).not.toBeNull();
         expect(intent.bootstrap).toBe(bootstrap);
         expect(intent.sessionID).toBe(
           bootstrap ? `ses_factory_${owned.changeID.replaceAll("-", "")}` : owned.sessionID,

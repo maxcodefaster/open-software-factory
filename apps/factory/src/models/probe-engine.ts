@@ -3,7 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
 import { createMastraUsage } from "../usage/model-api";
 import { nativeAgentPolicy, nativeStepGuard } from "./execution-policy";
 import { modelProviderOptions, nativeModel } from "./native";

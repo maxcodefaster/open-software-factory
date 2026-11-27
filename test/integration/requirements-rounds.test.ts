@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
+import { zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
@@ -93,11 +93,6 @@ test("Requirements entry is planning only; explicit Interview and round advancem
       zero.transaction((tx) => zeroServerMutators.tickets.create.fn({ tx, ctx, args }));
     await Promise.all([create(), create()]);
     expect((await db.client`SELECT id FROM factory.ticket WHERE id=${ticketID}`).length).toBe(1);
-    expect(
-      (
-        await db.client`SELECT command_id FROM factory.requirements_entry_intent WHERE ticket_id=${ticketID}`
-      ).length,
-    ).toBe(0);
     await expect(
       zero.transaction((tx) =>
         zeroServerMutators.tickets.create.fn({

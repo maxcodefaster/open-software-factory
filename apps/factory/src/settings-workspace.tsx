@@ -47,7 +47,6 @@ type Category =
   | "monitoring"
   | "people"
   | "environment"
-  | "setup"
   | "security"
   | "usage"
   | "limits"
@@ -178,12 +177,6 @@ export function SettingsWorkspace(props: {
         ]
       : []),
   ];
-  const currentGroup = () => {
-    const current = navigationSelection();
-    return groups().find(
-      (group) => group.scope === current.scope && group.categories.includes(current.category),
-    );
-  };
   const label = (value: Category, scope: Scope = selection().scope) =>
     ({
       models: scope === "personal" ? "Model overrides" : "Models",
@@ -193,7 +186,6 @@ export function SettingsWorkspace(props: {
       releases: "Releases",
       people: "People & access",
       environment: "Environments",
-      setup: "Project setup",
       usage: "Monitoring",
       limits: "Usage & limits",
       repositories: "Repository mirrors",
@@ -226,41 +218,14 @@ export function SettingsWorkspace(props: {
           aria-label="Settings navigation"
         >
           <h2>Settings</h2>
-          <label class="settings-scope-picker">
-            <span>Settings for</span>
-            <select
-              aria-label="Settings scope"
-              value={currentGroup()?.id}
-              onChange={(event) => {
-                const group = groups().find((item) => item.id === event.currentTarget.value);
-                const first = group?.categories[0];
-                if (group && first) {
-                  setSelection({ scope: group.scope, category: first });
-                  navigation.close(true);
-                }
-              }}
-            >
-              <For each={groups()}>
-                {(group) => <option value={group.id}>{group.label}</option>}
-              </For>
-            </select>
-          </label>
           <div class="settings-navigation-groups">
-            <For
-              each={[
-                ...groups().filter(
-                  (group) => group.id === currentGroup()?.id && group.id !== "libraries",
-                ),
-                ...groups().filter((group) => group.id === "libraries"),
-              ]}
-              keyed={(group) => group.id}
-            >
+            <For each={groups()} keyed={(group) => group.id}>
               {(group) => (
                 <section
                   class={group().scope === "system" ? "settings-admin-group" : undefined}
                   data-settings-scope={group().id}
                 >
-                  <h3 class="sr-only">{group().label}</h3>
+                  <h3>{group().label}</h3>
                   <For each={group().categories}>
                     {(value) => (
                       <button
@@ -324,21 +289,9 @@ export function SettingsWorkspace(props: {
                 />
               </div>
             </Show>
-            <Show
-              when={category() === "setup" && (props.developer || canManage()) && props.project}
-            >
-              {(project) => (
-                <ProjectSetupSettings
-                  projectID={project().id}
-                  userID={props.userID}
-                  canManage={canManage()}
-                />
-              )}
-            </Show>
             <Show when={visited().has("models")}>
               <div class="settings-configuration-host" hidden={category() !== "models"}>
                 <ModelSettings
-                  navigation={navigationTitle()}
                   active={props.active !== false && category() === "models"}
                   project={props.project}
                   systemManager={props.systemManager}

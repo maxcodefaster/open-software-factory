@@ -40,8 +40,10 @@ test.each(["Build", "Staging"] as const)(
       ownedFixture = owned;
       if (target === "Staging") {
         // Use an independent Staging attempt; the Ticket runtime remains untouched.
-        await database.client`INSERT INTO factory.staging_preview(project_id,revision)
-          VALUES(${owned.projectID},${"a".repeat(40)})`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+          VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${owned.projectID},
+            ${`delivery.staging_preview:${owned.projectID}`},'pending',
+            ${JSON.stringify({ projectId: owned.projectID, revision: "a".repeat(40), runtimeAttemptId: null })}::jsonb)`;
         await peer.startStaging(owned.projectID, owned.userID, {
           version: 1,
           primaryApp: "web",
@@ -183,6 +185,15 @@ test.each(["Build", "Staging"] as const)(
               data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
             } else if (path === "/api/info") {
               data = { version: upstream.openCode.version };
+            } else if (path === "/api/location") {
+              data = {
+                directory: "/workspace/project",
+                project: {
+                  id: "owned-controlled-project",
+                  directory: "/workspace/project",
+                  canonical: "/workspace/project",
+                },
+              };
             } else if (path === "/api/skill") {
               data = installedSkills.map((id) => ({
                 id,
@@ -250,7 +261,9 @@ test.each(["Build", "Staging"] as const)(
                 JSON.stringify({
                   type: "stream-data",
                   streamId: frame.streamId,
-                  data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
+                  data: Buffer.from(
+                    JSON.stringify(path === "/api/location" ? data : { data, cursor: {} }),
+                  ).toString("base64"),
                 }),
               );
             socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
@@ -267,14 +280,14 @@ test.each(["Build", "Staging"] as const)(
       const identity = async () => [
         ...(await database.client`
         SELECT attempt.id,attempt.generation,attempt.revision,attempt.workspace_id,
-          binding.atespace,binding.actor_name,binding.actor_uid,binding.intent,
-          attempt.parent_connector_token_hash,attempt.child_connector_token_hash,
-          COALESCE(workspace.atespace,isolated.atespace)#>>'{metadata,uid}' AS atespace_uid,
-          COALESCE(workspace.template,isolated.template)#>>'{metadata,uid}' AS template_uid
-        FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-        LEFT JOIN factory.substrate_workspace workspace ON workspace.workspace_id=attempt.workspace_id AND workspace.generation=attempt.generation
-        LEFT JOIN factory.substrate_isolated isolated ON isolated.runtime_attempt_id=attempt.id
-        WHERE attempt.project_id=${owned.projectID} ORDER BY attempt.id`),
+          attempt.atespace,attempt.actor_name,attempt.actor_uid,attempt.binding_intent AS intent,
+          attempt.parent_connector_token_hash,
+          COALESCE(workspace.resources,isolated.resources)#>>'{atespace,value,metadata,uid}' AS atespace_uid,
+          COALESCE(workspace.resources,isolated.resources)#>>'{template,value,metadata,uid}' AS template_uid
+        FROM factory.runtime_attempt attempt
+        LEFT JOIN factory.substrate_provision workspace ON workspace.owner_id=attempt.workspace_id AND workspace.kind='workspace' AND workspace.generation=attempt.generation
+        LEFT JOIN factory.substrate_provision isolated ON isolated.runtime_attempt_id=attempt.id AND isolated.kind IN ('staging','publication')
+        WHERE attempt.project_id=${owned.projectID} AND attempt.atespace IS NOT NULL ORDER BY attempt.id`),
       ];
       const before = await identity();
       expect(
@@ -283,7 +296,7 @@ test.each(["Build", "Staging"] as const)(
             row["actor_uid"] &&
             row["atespace_uid"] &&
             row["template_uid"] &&
-            row["parent_connector_token_hash"] !== row["child_connector_token_hash"],
+            row["parent_connector_token_hash"],
         ),
       ).toBe(true);
       const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
@@ -407,7 +420,7 @@ test.each(["Build", "Staging"] as const)(
       } else {
         const [preview] = await database.client<
           { id: string }[]
-        >`SELECT runtime_attempt_id AS id FROM factory.staging_preview WHERE project_id = ${owned.projectID}`;
+        >`SELECT payload->>'runtimeAttemptId' AS id FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id = ${owned.projectID}`;
         expect(preview?.id).toBe(attempt.id);
       }
       expect(promptCalls).toBe(target === "Build" ? 1 : 0);

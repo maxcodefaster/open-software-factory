@@ -3,7 +3,7 @@ import {
   checkPasswordChange,
   passwordChangeMessage,
   passwordPolicy,
-} from "../../../../packages/identity-domain/src/password-policy";
+} from "#identity-domain/password-policy";
 import { plainErrorMessage } from "../command-error";
 import { changeOwnPassword } from "../server-functions/access";
 import { serverCall } from "../server-functions/result";

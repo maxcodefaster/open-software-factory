@@ -29,6 +29,7 @@ export async function runtimeAccessCookie(
   return redeemed.headers
     .getSetCookie()
     .map((value) => value.split(";")[0])
+    .filter((value) => value !== "factory_runtime_access=")
     .join("; ");
 }
 
@@ -39,10 +40,9 @@ export async function ownedRuntimeTerminal(
   terminalID = "owned-browser-proof",
 ) {
   const runtimeCookie = await runtimeAccessCookie(base, cookie, attemptID, "ide");
-  const socket = new ClientSocket(
-    `${base.replace("http:", "ws:")}/runtime/${attemptID}/ide/__factory/terminal/${terminalID}`,
-    { headers: { cookie: runtimeCookie } },
-  );
+  const socket = new ClientSocket(ownedRuntimeTerminalURL(base, attemptID, terminalID), {
+    headers: { cookie: runtimeCookie },
+  });
   socket.binaryType = "arraybuffer";
   let output = "";
   socket.addEventListener("message", (event) => {
@@ -72,6 +72,7 @@ export async function ownedRuntimeTerminal(
       "error",
       () => {
         clearTimeout(timeout);
+        socket.close();
         reject(new Error("Owned terminal attach failed"));
       },
       { once: true },
@@ -105,4 +106,15 @@ export async function ownedRuntimeTerminal(
       return result.value;
     },
   };
+}
+
+export function ownedRuntimeTerminalURL(
+  base: string,
+  attemptID: string,
+  terminalID = "owned-browser-proof",
+) {
+  appRuntimeOrigin(base, attemptID, "ide");
+  const url = new URL(`/runtime/${attemptID}/ide/__factory/terminal/${terminalID}`, base);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
 }

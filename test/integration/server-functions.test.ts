@@ -103,7 +103,8 @@ test("production Server Functions use real sessions, durable exact saves and no 
       FROM factory.execution_policy WHERE scope='factory'`;
     expect(saved).toEqual({ version: 1, amount: 7 });
     expect(
-      (await database.client`SELECT command_id FROM factory.execution_policy_command`).length,
+      (await database.client`SELECT id FROM factory.audit_event WHERE kind='usage.policy_command'`)
+        .length,
     ).toBe(1);
     expect(
       (
@@ -146,7 +147,8 @@ test("production Server Functions use real sessions, durable exact saves and no 
     await owned.start();
     expect(await decodeResponse(await repeat())).toMatchObject({ ok: true });
     expect(
-      (await database.client`SELECT command_id FROM factory.execution_policy_command`).length,
+      (await database.client`SELECT id FROM factory.audit_event WHERE kind='usage.policy_command'`)
+        .length,
     ).toBe(1);
     expect(errors).toEqual([]);
     expect(assets.some((path) => path.includes("/document-engine-"))).toBe(false);

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { ForgeMirrorWriteError } from "#forge/mirrors";
+import type { RepositoryMirror } from "#project-domain/repository-mirror";
 import { createRepositoryMirrorController } from "../../apps/factory/src/repository-mirrors/controller";
-import { ForgeMirrorWriteError } from "../../packages/forge/src/mirrors";
-import type { RepositoryMirror } from "../../packages/project-domain/src/repository-mirror";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("repository mirrors retain secret-free command intent, admin authority, exact retries and observed native recovery", async () => {
@@ -39,8 +39,8 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
           return mirrors.map((value) => ({ ...value }));
         },
         async create(_repo, value) {
-          const [intent] =
-            await database.client`SELECT id FROM factory.repository_mirror_command WHERE id=${input.commandID}`;
+          const [intent] = await database.client`SELECT id FROM factory.operation
+              WHERE kind='releases.mirror_command' AND id=${input.commandID}`;
           expect(intent).toBeDefined();
           expect(value.token).toBe(input.token);
           creates++;
@@ -81,10 +81,10 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
     for (const id of [actor, outsider])
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Owned mirror user',${`${id}@mirror.invalid`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${actor})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
-      VALUES(${projectID},'owned-mirror','Owned mirror Project','https://forge.factory.test/factory/source','main','.devcontainer/devcontainer.json',${actor},'river-landscape')`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${otherProjectID},'other-owned-mirror','Other mirror Project','https://forge.factory.test/factory/other','main','.devcontainer/devcontainer.json',${actor})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
+      VALUES(${projectID},'owned-mirror','Owned mirror Project','https://forge.factory.test/factory/source','main','.factory/actor-template.json',${actor},'river-landscape')`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${otherProjectID},'other-owned-mirror','Other mirror Project','https://forge.factory.test/factory/other','main','.factory/actor-template.json',${actor})`;
     expect(await controller.projects(actor)).toEqual([
       { id: otherProjectID, name: "Other mirror Project" },
       { id: projectID, name: "Owned mirror Project" },
@@ -160,8 +160,8 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
     }
     await controller.acknowledge(actor, otherProjectID, unconfirmed.commandID);
     const [retained] =
-      await database.client`SELECT state,completed_at,before_state='[]'::jsonb AS empty
-      FROM factory.repository_mirror_command WHERE id=${unconfirmed.commandID}`;
+      await database.client`SELECT state,completed_at,(payload->'beforeState')='[]'::jsonb AS empty
+      FROM factory.operation WHERE id=${unconfirmed.commandID} AND kind='releases.mirror_command'`;
     expect(retained).toEqual({ state: "uncertain", completed_at: null, empty: true });
     expect((await controller.create(actor, projectID, unconfirmed)).pending).toEqual(
       pending.pending,
@@ -189,24 +189,14 @@ test("repository mirrors retain secret-free command intent, admin authority, exa
     expect(concurrent.filter((item) => item.status === "fulfilled")).toHaveLength(1);
     expect(creates).toBe(3);
     expect((await controller.get(actor, projectID)).mirrors).toHaveLength(1);
-    const rows =
-      await database.client`SELECT row_to_json(command) FROM factory.repository_mirror_command command`;
+    const rows = await database.client`SELECT row_to_json(command) FROM factory.operation command
+        WHERE kind='releases.mirror_command'`;
     expect(JSON.stringify(rows)).not.toContain(input.token);
     expect(JSON.stringify(rows)).not.toContain(input.username);
     expect(
-      await database.client`SELECT id FROM factory.repository_mirror_command
-        WHERE jsonb_typeof(before_state)<>'array'`,
+      await database.client`SELECT id FROM factory.operation
+        WHERE kind='releases.mirror_command' AND jsonb_typeof(payload->'beforeState')<>'array'`,
     ).toHaveLength(0);
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.repository_mirror_command SET target_url='changed' WHERE id=${input.commandID}`;
-      })(),
-    ).rejects.toThrow("immutable");
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.repository_mirror_command SET state='uncertain' WHERE id=${input.commandID}`;
-      })(),
-    ).rejects.toThrow("immutable");
   } finally {
     await database.client.end({ timeout: 2 });
     await process.dispose();

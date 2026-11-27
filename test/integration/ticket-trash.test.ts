@@ -29,11 +29,10 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
             intent: unknown;
           }>
         >`SELECT workspace.id,workspace.source_branch AS branch,workspace.source_revision AS revision,
-        binding.atespace,binding.actor_name AS actor,binding.intent
+        attempt.atespace,attempt.actor_name AS actor,attempt.binding_intent AS intent
         FROM factory.development_workspace workspace
         JOIN factory.runtime_attempt attempt ON attempt.workspace_id=workspace.id AND attempt.id=${owned.attemptID}
-        JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-        WHERE workspace.id=${owned.workspaceID}`
+        WHERE workspace.id=${owned.workspaceID} AND attempt.atespace IS NOT NULL`
       )[0];
     }
     const originalWorkspace = await readSource();
@@ -46,9 +45,9 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
     });
     const verificationID = crypto.randomUUID();
     await db.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,
+      id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,
       runner_token,runner_job_handle,created_by)
-      VALUES(${verificationID},${owned.changeID},${"d".repeat(40)},1,'owned-trash-verification',
+      VALUES(${verificationID},${owned.changeID},${"d".repeat(40)},1,
         1,${crypto.randomUUID()},'owned-token','owned-trash-job',${owned.userID})`;
     native = await nativeJobsFixture(db, owned.projectID);
     const jobs = native;
@@ -111,7 +110,7 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
     );
     expect(stopped.toSorted()).toEqual([owned.attemptID, verificationAttemptID].toSorted());
     const [deleted] = await db.client`SELECT deleted_at IS NOT NULL AS confirmed
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${verificationAttemptID}`;
+      FROM factory.runtime_attempt WHERE id=${verificationAttemptID}`;
     expect(deleted).toEqual({ confirmed: true });
     const afterStop = jobs.calls.length;
     await controller.restore(owned.ticketID, owned.userID, 2);

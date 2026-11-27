@@ -5,6 +5,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import {
+  buildBrowserCallInput,
+  buildBrowserToolCatalogue,
+} from "#conversation-domain/browser-tools";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import {
   confirmSettledOpenCodeInput,
@@ -15,10 +19,6 @@ import {
   connectOpenCodeBrowser,
   connectOpenCodeSources,
 } from "../../apps/factory/src/agent/opencode-browser";
-import {
-  buildBrowserCallInput,
-  buildBrowserToolCatalogue,
-} from "../../packages/conversation-domain/src/browser-tools";
 import upstream from "../../upstream.json";
 import { ownedBrowserJPEG } from "../fixtures/browser-image";
 import { buildModelID } from "../fixtures/change-agent-turns";

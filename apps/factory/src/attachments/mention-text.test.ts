@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { markdownHTML } from "../markdown";
+import { markdownHTML } from "../editor/client";
 import { attachmentText, readAttachmentContent, restoreAttachmentContent } from "./composer";
 import {
   chooseMention,

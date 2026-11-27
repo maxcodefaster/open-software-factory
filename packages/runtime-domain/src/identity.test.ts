@@ -5,6 +5,8 @@ import {
   runtimeConnectorTokens,
   runtimeIdentity,
   runtimeModelToken,
+  runtimeProjectEntryToken,
+  runtimePublicationToken,
 } from "./identity";
 
 describe("Runtime Attempt identity", () => {
@@ -14,7 +16,7 @@ describe("Runtime Attempt identity", () => {
     expect(identity.attemptID).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    expect(Object.keys(identity).sort()).toEqual(["attemptID", "composeProjectName"]);
+    expect(Object.keys(identity)).toEqual(["attemptID"]);
   });
 
   test("changes with the generation", () => {
@@ -52,5 +54,51 @@ describe("Runtime Attempt identity", () => {
     expect(Object.values(runtimeConnectorTokens("factory-secret", "attempt-id", 2))).not.toContain(
       token,
     );
+  });
+
+  test("native Project entry is bound to the secret, Attempt, generation and container", () => {
+    const token = runtimeProjectEntryToken("factory-secret", "attempt-id", 2, "work");
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(token).toBe(runtimeProjectEntryToken("factory-secret", "attempt-id", 2, "work"));
+    for (const other of [
+      runtimeProjectEntryToken("other-secret", "attempt-id", 2, "work"),
+      runtimeProjectEntryToken("factory-secret", "other-attempt", 2, "work"),
+      runtimeProjectEntryToken("factory-secret", "attempt-id", 3, "work"),
+      runtimeProjectEntryToken("factory-secret", "attempt-id", 2, "database"),
+      ...Object.values(runtimeConnectorTokens("factory-secret", "attempt-id", 2)),
+      runtimeModelToken("factory-secret", "attempt-id", 2),
+      runtimeBuildBrowserToken("factory-secret", "attempt-id", 2),
+      runtimePublicationToken("factory-secret", "attempt-id"),
+    ])
+      expect(token).not.toBe(other);
+    const derived = runtimeConnectorTokens(token, "attempt-id", 2);
+    const connector = runtimeConnectorTokens("factory-secret", "attempt-id", 2);
+    expect(derived.parent).not.toBe(connector.parent);
+    expect(derived.child).not.toBe(connector.child);
+    expect(token).not.toContain("factory-secret");
+  });
+
+  test("native Project entry rejects invalid generations, container names and missing secrets", () => {
+    for (const generation of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])
+      expect(() => runtimeProjectEntryToken("secret", "attempt", generation, "work")).toThrow(
+        "Generation",
+      );
+    for (const container of [
+      "",
+      "Work",
+      "0work",
+      "-work",
+      "work_other",
+      "work:parent",
+      "work/child",
+      "work\n",
+      "a".repeat(64),
+    ])
+      expect(() => runtimeProjectEntryToken("secret", "attempt", 1, container)).toThrow(
+        "container",
+      );
+    for (const container of ["a", "work-1", "work-", "a".repeat(63)])
+      expect(runtimeProjectEntryToken("secret", "attempt", 1, container)).toHaveLength(43);
+    expect(() => runtimeProjectEntryToken("", "attempt", 1, "work")).toThrow("secret");
   });
 });

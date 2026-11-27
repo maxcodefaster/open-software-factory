@@ -1,8 +1,7 @@
-import { createMemo, createSignal, Errored, Loading, refresh, Show } from "solid-js";
 import { createAuthClient } from "better-auth/client";
-import { getSession } from "./server-functions/session.ts";
-
+import { createMemo, createSignal, Errored, Loading, refresh, Show } from "solid-js";
 import { applicationBase } from "./base.ts";
+import { getSession } from "./server-functions/session.ts";
 
 let auth: ReturnType<typeof createAuthClient> | undefined;
 function authClient() {

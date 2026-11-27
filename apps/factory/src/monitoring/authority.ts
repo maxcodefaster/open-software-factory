@@ -1,16 +1,9 @@
 import { and, eq, inArray, sql as query } from "drizzle-orm";
 import type { z } from "zod";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
-import { resolveMCPChoice } from "../../../../packages/conversation-domain/src/mcp-library";
-import {
-  defaultAutofixInstructions,
-  type inputDelegation,
-} from "../../../../packages/conversation-domain/src/monitoring";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
+import { resolveMCPChoice } from "#conversation-domain/mcp-library";
+import { defaultAutofixInstructions, type inputDelegation } from "#conversation-domain/monitoring";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   change,
   mcpLibrary,
@@ -18,7 +11,7 @@ import {
   monitoringIncident,
   monitoringPolicy,
   requirementApproval,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { createMCPLibrary } from "../mcp/library-api";
@@ -116,12 +109,8 @@ export async function inputAssignmentsIn(
   return assignments;
 }
 
-export function retainedInputAssignments(value: {
-  sourceAssignments: MCPAssignment[] | null;
-  assignment: MCPAssignment | null;
-}) {
-  // Old immutable Autofix policies retain their original single-source snapshot.
-  return value.sourceAssignments ?? (value.assignment ? [value.assignment] : []);
+export function retainedInputAssignments(value: { sourceAssignments: MCPAssignment[] | null }) {
+  return value.sourceAssignments ?? [];
 }
 
 export async function validateInputAssignmentsIn(
@@ -160,7 +149,6 @@ export async function inputTicketAssignmentsIn(
   const [policy] = await drizzleTransaction(sql)
     .select({
       sourceAssignments: monitoringPolicy.sourceAssignments,
-      assignment: monitoringPolicy.assignment,
     })
     .from(monitoringIncident)
     .innerJoin(monitoringPolicy, eq(monitoringPolicy.id, monitoringIncident.policyId))
@@ -169,8 +157,7 @@ export async function inputTicketAssignmentsIn(
     );
   const assignments = policy
     ? retainedInputAssignments({
-        sourceAssignments: policy.sourceAssignments as MCPAssignment[] | null,
-        assignment: policy.assignment as MCPAssignment | null,
+        sourceAssignments: policy.sourceAssignments,
       })
     : [];
   await validateInputAssignmentsIn(database, sql, assignments, projectId, userId);
@@ -191,7 +178,6 @@ export async function monitoringAuthorityIn(
       hookId: monitoringIncident.hookId,
       hookVersion: monitoringIncident.hookVersion,
       userId: monitoringPolicy.delegatedBy,
-      assignment: monitoringPolicy.assignment,
       sourceAssignments: monitoringPolicy.sourceAssignments,
       sourceIds: monitoringPolicy.sourceIds,
       instructions: query<string>`coalesce(${monitoringPolicy.instructions},${defaultAutofixInstructions})`,
@@ -223,8 +209,7 @@ export async function monitoringAuthorityIn(
   const delegation = incident.delegation as MonitoringAuthority["delegation"];
   await manageMonitoringIn(sql, incident.userId, incident.projectId, delegation);
   const assignments = retainedInputAssignments({
-    sourceAssignments: incident.sourceAssignments as MCPAssignment[] | null,
-    assignment: incident.assignment as MCPAssignment | null,
+    sourceAssignments: incident.sourceAssignments,
   });
   await validateInputAssignmentsIn(database, sql, assignments, incident.projectId, incident.userId);
   if (incident.delegation === "application-fix-and-delivery" && !assignments.length)

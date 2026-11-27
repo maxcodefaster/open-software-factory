@@ -1,9 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import type {
-  monitoringChange,
-  monitoringSave,
-} from "../../../../packages/conversation-domain/src/monitoring";
+import type { monitoringChange, monitoringSave } from "#conversation-domain/monitoring";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

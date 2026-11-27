@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { type AgentMessage } from "../../apps/factory/src/agent/contracts";
+import type { AgentMessage } from "../../apps/factory/src/agent/contracts";
 import { composerKeyDown } from "../../apps/factory/src/assistant-interaction";
 import { groupConversationActivities } from "../../apps/factory/src/conversation-activity";
 import {

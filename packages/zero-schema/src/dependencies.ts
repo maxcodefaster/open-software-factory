@@ -1,6 +1,6 @@
 import { defineMutatorWithType, type ReadonlyJSONObject } from "@rocicorp/zero";
 import type { z } from "zod";
-import { dependencyWouldCycle, ticketDependencyInput } from "../../ticket-domain/src/dependency";
+import { dependencyWouldCycle, ticketDependencyInput } from "#ticket-domain/dependency";
 import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
 import { validator } from "./validation";
 

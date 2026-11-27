@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createDatabase } from "#db/client";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
-import { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import {

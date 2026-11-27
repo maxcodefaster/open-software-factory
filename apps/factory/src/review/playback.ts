@@ -1,4 +1,4 @@
-import type { VisualReview } from "../../../../packages/conversation-domain/src/visual-review";
+import type { VisualReview } from "#conversation-domain/visual-review";
 
 type Scenario = VisualReview["scenarios"][number];
 

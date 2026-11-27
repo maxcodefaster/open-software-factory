@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { agentTurnStates } from "./agent-turn";
 import { conversationModeInput } from "./conversation";
-import { turnUsageInput, unavailableTurnUsage } from "./turn-usage";
 import { codingReasoningInput } from "./model-settings";
+import { turnUsageInput, unavailableTurnUsage } from "./turn-usage";
 
 export const projectAgentProgressInput = z.object({
   phase: z.enum(["guidance", "thinking", "searching", "reading", "validating"]),

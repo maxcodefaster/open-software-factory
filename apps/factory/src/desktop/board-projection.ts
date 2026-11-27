@@ -4,15 +4,15 @@ import {
   type BoardStage,
   ticketBoardStage,
   ticketBoardStatus,
-} from "../../../../packages/interface-domain/src/ticket-board";
+} from "#interface-domain/ticket-board";
 import {
   dependencyWouldCycle,
   type PrerequisiteView,
   prerequisiteIsDelivered,
-} from "../../../../packages/ticket-domain/src/dependency";
-import { type Change, type Ticket } from "../change/contracts";
+} from "#ticket-domain/dependency";
+import type { Change, Ticket } from "../change/contracts";
 import type { createProjectPlanning } from "../projects/planning";
-import { type RuntimeAttempt } from "../runtime/contracts";
+import type { RuntimeAttempt } from "../runtime/contracts";
 import type { TicketDetail } from "./contracts";
 
 interface BoardProjectionDependencies {

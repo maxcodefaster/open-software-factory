@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { hashPassword } from "better-auth/crypto";
-import { emergencyAdministratorID } from "../../packages/auth/src/policy";
-import { createFactoryAuth } from "../../packages/auth/src/server";
+import { emergencyAdministratorID } from "#auth/policy";
+import { createFactoryAuth } from "#auth/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 const development = "factory-local-password";

@@ -1,4 +1,17 @@
-import type { InterviewQuestion } from "../../../packages/conversation-domain/src/conversation";
+import type { InterviewQuestion } from "#conversation-domain/conversation";
+
+export function splitInlineCode(text: string): Array<{ code: boolean; text: string }> {
+  const parts: Array<{ code: boolean; text: string }> = [];
+  let last = 0;
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const start = match.index ?? 0;
+    if (start > last) parts.push({ code: false, text: text.slice(last, start) });
+    parts.push({ code: true, text: match[1] ?? "" });
+    last = start + match[0].length;
+  }
+  if (last < text.length) parts.push({ code: false, text: text.slice(last) });
+  return parts;
+}
 
 export function interviewOptions(question: InterviewQuestion) {
   if (question.type === "free-text")

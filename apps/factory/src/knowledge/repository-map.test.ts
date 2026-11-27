@@ -31,6 +31,34 @@ test("the map orients without listing every file", () => {
   expect(JSON.stringify(map)).not.toContain("model.ts");
 });
 
+test("the map names native ActorTemplate and App contracts before general manifests", () => {
+  expect(
+    repositoryMap([
+      { path: "package.json", size: 200 },
+      { path: ".factory/system.json", size: 300 },
+      { path: ".factory/actor-template.json", size: 500 },
+    ]).manifests,
+  ).toEqual([".factory/actor-template.json", ".factory/system.json", "package.json"]);
+});
+
+test("the configured native ActorTemplate survives the bounded monorepo map without inventing files", () => {
+  const actorTemplatePath = "ops/native/project-runtime.json";
+  const inventory = [
+    ...Array.from({ length: 60 }, (_, index) => ({
+      path: `packages/package-${index}/package.json`,
+      size: 200,
+    })),
+    { path: ".factory/system.json", size: 300 },
+    { path: actorTemplatePath, size: 500 },
+  ];
+  const map = repositoryMap(inventory, actorTemplatePath);
+  expect(map.manifests.slice(0, 2)).toEqual([actorTemplatePath, ".factory/system.json"]);
+  expect(map.manifests).toHaveLength(40);
+  expect(repositoryMap(inventory, "missing/actor.json").manifests).not.toContain(
+    "missing/actor.json",
+  );
+});
+
 test("the map stays small for a large repository", () => {
   const large = Array.from({ length: 5000 }, (_, index) => ({
     path: `apps/app-${index % 50}/src/feature-${index % 40}/file-${index}.ts`,

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { developerIDEIdentity } from "../../workspace-domain/src/developer-ide";
+import { developerIDEIdentity } from "#workspace-domain/developer-ide";
 import {
   createDeveloperIDEKubernetesClient,
   DeveloperIDEObservationUnavailableError,

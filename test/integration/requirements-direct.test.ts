@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { createChangeController } from "../../apps/factory/src/change/controller";
-import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createChangeController } from "../../apps/factory/src/change/controller";
+import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
@@ -83,9 +83,6 @@ test.each([false, true])(
       expect(await planning.get(owned.projectID, ticketID, owned.userID)).toBeNull();
       expect(
         await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${ticketID}`,
-      ).toHaveLength(0);
-      expect(
-        await database.client`SELECT ticket_id FROM factory.requirements_entry_intent WHERE ticket_id=${ticketID}`,
       ).toHaveLength(0);
 
       const documentID = crypto.randomUUID();
@@ -184,19 +181,17 @@ test.each([false, true])(
   60_000,
 );
 
-test("an unadmitted Requirements entry cannot commission work or alter an explicitly admitted turn", async () => {
+test("reading a ready Ticket cannot commission work or alter an explicitly admitted turn", async () => {
   const host = await factoryProcess();
   const database = host.connect();
   try {
     const owned = await fixture(undefined, undefined, database);
     const tickets = [crypto.randomUUID(), crypto.randomUUID()];
-    const commands = [crypto.randomUUID(), crypto.randomUUID()];
+    const commandID = crypto.randomUUID();
     const conversationID = crypto.randomUUID();
     for (let i = 0; i < 2; i++) {
       await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
         VALUES(${fixtureValue(tickets[i], "tickets[i]")},${owned.projectID},${`Retained requirements ${i}`},'ready',${owned.userID})`;
-      await database.client`INSERT INTO factory.requirements_entry_intent(ticket_id,command_id,created_by)
-        VALUES(${fixtureValue(tickets[i], "tickets[i]")},${fixtureValue(commands[i], "commands[i]")},${owned.userID})`;
     }
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
       VALUES(${conversationID},${owned.projectID},${fixtureValue(tickets[1], "tickets[1]")},'plan',${owned.userID})`;
@@ -204,7 +199,7 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
     const admitted = await turns.admit(
       {
         kind: "project-message",
-        commandId: fixtureValue(commands[1], "commands[1]"),
+        commandId: commandID,
         conversationId: conversationID,
         projectId: owned.projectID,
         ticketId: fixtureValue(tickets[1], "tickets[1]"),
@@ -220,25 +215,10 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
       },
     );
     const before = await turns.get(admitted.turn.id);
-    await database.client`UPDATE factory.requirements_entry_intent SET admitted_at=now()
-      WHERE ticket_id=${fixtureValue(tickets[1], "tickets[1]")}`;
-    expect(await turns.get(admitted.turn.id)).toEqual(before);
-    const entries = await database.client<
-      { ticketID: string; admitted: boolean; failure: string | null }[]
-    >`
-      SELECT ticket_id AS "ticketID",admitted_at IS NOT NULL AS admitted,failure
-      FROM factory.requirements_entry_intent WHERE ticket_id=ANY(${tickets}::uuid[])`;
-    expect(entries.find((row) => row.ticketID === tickets[0])).toMatchObject({
-      admitted: false,
-      failure: null,
-    });
-    expect(entries.find((row) => row.ticketID === tickets[1])).toMatchObject({
-      admitted: true,
-      failure: null,
-    });
-    // Reads cannot convert unadmitted intent into a conversation or model request.
+    // Reads cannot convert a ready Ticket into a conversation or model request.
     const planning = createProjectAgentController(database);
     expect(await planning.get(owned.projectID, tickets[0], owned.userID)).toBeNull();
+    expect(await turns.get(admitted.turn.id)).toEqual(before);
     expect(
       await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${fixtureValue(tickets[0], "tickets[0]")}`,
     ).toHaveLength(0);

@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "dependencies": {
     "pyright": "1.1.414",
+    "typescript": "6.0.3",
     "typescript-language-server": "6.1.0"
   }
 }

@@ -75,6 +75,25 @@ function codingContextFixture() {
     },
     ({ text, parameters }) => {
       if (text.startsWith('select "ticket_id" from "factory"."change"')) return [[ticketID]];
+      if (
+        text.includes('from "factory"."change" "change"') &&
+        text.includes('for update of "change", "ticket"')
+      )
+        return [[projectID, state.writer.available]];
+      if (text.includes('from "factory"."change_writer"'))
+        return [
+          [
+            state.writer.state,
+            state.writer.epoch,
+            state.writer.userID,
+            state.writer.turnID,
+            null,
+            false,
+            null,
+            null,
+            "takeover",
+          ],
+        ];
       if (text.includes('from "factory"."ticket_conversation" "conversation"')) {
         expect(text).toContain('for update of "conversation"');
         expect(parameters).toEqual([changeID, "build"]);

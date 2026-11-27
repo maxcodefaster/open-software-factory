@@ -98,39 +98,6 @@ func TestFailedAppPublishesStartupOutputAndFailsWithoutWaitingForHealthTimeout(t
 	}
 }
 
-func TestStartupFailureRedactsProcessCredentialsBeforeTheShorterRuntimeValue(t *testing.T) {
-	assignment := validAssignment()
-	assignment.RuntimeEnvironment = map[string]string{"SHORT_SECRET": "owned-overlap"}
-	assignment.Processes = []Process{{
-		Name: "app", Env: map[string]string{"OPENCODE_PASSWORD": "owned-overlap-native-password"},
-	}}
-	manager := newProcessManager(context.Background(), assignment, io.Discard)
-	code := 9
-	manager.processes["app"].state = "failed"
-	manager.processes["app"].exitCode = &code
-	manager.recent["app"] = []byte("error: native=owned-overlap-native-password runtime=owned-overlap\n")
-	err := manager.startupFailure(assignment)
-	if err == nil || !strings.Contains(err.Error(), "code 9") ||
-		strings.Contains(err.Error(), "owned-overlap") || strings.Contains(err.Error(), "native-password") ||
-		!strings.Contains(err.Error(), "[REDACTED]") {
-		t.Fatalf("startup cause leaked a process-local or overlapping credential: %v", err)
-	}
-}
-
-func TestStartupFailureNeverPublishesThePartialLeadingLineOfItsRollingTail(t *testing.T) {
-	assignment := validAssignment()
-	assignment.Processes = []Process{{Name: "app"}}
-	manager := newProcessManager(context.Background(), assignment, io.Discard)
-	manager.processes["app"].state = "failed"
-	tail := "error: partial-sensitive-value" + strings.Repeat("x", 32<<10) + "\nerror: missing configuration\n"
-	manager.recent["app"] = []byte(tail[len(tail)-(32<<10):])
-	err := manager.startupFailure(assignment)
-	if err == nil || !strings.Contains(err.Error(), "missing configuration") ||
-		strings.Contains(err.Error(), "partial-sensitive-value") || strings.Contains(err.Error(), "xxxx") {
-		t.Fatalf("startup cause included an unverifiable partial line: %v", err)
-	}
-}
-
 func TestChannelTimeoutKeepsHTTPStatusButNeverTheHealthResponseBody(t *testing.T) {
 	application := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -142,8 +109,9 @@ func TestChannelTimeoutKeepsHTTPStatusButNeverTheHealthResponseBody(t *testing.T
 	assignment.Processes = []Process{{Name: "app"}}
 	assignment.RuntimeEnvironment = map[string]string{"APP_SECRET": "owned-startup-private-value"}
 	manager := newProcessManager(context.Background(), assignment, io.Discard)
-	manager.processes["app"].state = "running"
-	manager.recent["app"] = []byte("Error: missing Content configuration; APP_SECRET=owned-startup-private-value\n")
+	if err := manager.WriteOutput("app", []byte("Error: missing Content configuration; APP_SECRET=owned-startup-private-value\n")); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	err := waitForChannels(ctx, assignment, manager)

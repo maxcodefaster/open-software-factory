@@ -15,26 +15,27 @@ import {
   sql,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
   changeAgentSession,
   changeAgentTurnIntent,
   conversationContext,
+  operation,
   requirementApproval,
   runtimeAttempt,
-  runtimeEnvironmentIntent,
-  sessionArchive,
-  substrateBinding,
+  substrateProvision,
   substrateSource,
-  substrateWorkspace,
   ticketConversation,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { projectMessages } from "./message-projection";
 import type { createOpenCodeClient } from "./opencode-adapter";
 import { readNativeSessionArchive, saveNativeSessionArchive } from "./session-archive";
+
+const SESSION_ARCHIVE_KIND = "coding.session_archive";
+const sessionArchiveKey = (turnID: string) => `${SESSION_ARCHIVE_KIND}:${turnID}`;
 
 type Database = ReturnType<typeof createDatabase>;
 type Pending = {
@@ -60,46 +61,61 @@ export function createSessionArchives(
   async function enqueue() {
     // Derive identity and approved Source references from authoritative storage,
     // not caller supplied values. This is read-only with respect to execution.
-    const archive = alias(sessionArchive, "archive");
+    const archive = alias(operation, "archive");
+    const environmentIntent = alias(operation, "environment_intent");
     await database.db
-      .insert(sessionArchive)
+      .insert(operation)
       .select(
         database.db
           .select({
-            turnId: agentTurn.id,
-            runtimeAttemptId: sql<string>`${changeAgentTurnIntent.runtimeAttemptId}`.as(
-              "runtime_attempt_id",
+            id: sql<string>`gen_random_uuid()`.as("id"),
+            kind: sql<string>`'coding.session_archive'::text`.as("kind"),
+            scopeType: sql<string>`'agent_turn'::text`.as("scope_type"),
+            scopeId: sql<string>`${agentTurn.id}::text`.as("scope_id"),
+            idempotencyKey: sql<string>`'coding.session_archive:' || ${agentTurn.id}::text`.as(
+              "idempotency_key",
             ),
-            sessionId: changeAgentTurnIntent.sessionId,
-            promptId: changeAgentTurnIntent.promptId,
-            sourceRefs: sql<Record<string, unknown>>`
-        jsonb_build_object('projectID',${agentTurn.projectId},'workspaceID',${runtimeAttempt.workspaceId},
-          'revision',${runtimeAttempt.revision},'requirementApprovalID',${change.requirementApprovalId},
-          'branch',${change.branchName},
-          'runtimeArtifacts',${substrateWorkspace.intent}#>>'{configuration,workloadImage}',
-          'environment',${runtimeEnvironmentIntent.environment},'environmentVersion',${runtimeEnvironmentIntent.version},
-          'requirementRevisionID',${requirementApproval.requirementRevisionId})
-        || jsonb_build_object(
-          'nativeRuntime',jsonb_build_object('engine','substrate','profile',${substrateBinding.intent}->'profile',
-            'runtime',${substrateBinding.intent}->'runtime','actorUID',${substrateBinding.actorUid},
-            'templateUID',${substrateBinding.intent}->'templateUID','templateSHA256',${substrateBinding.intent}->'templateSHA256'),
-          'lastConfirmedSource',CASE WHEN ${substrateSource.checkpoint} IS NOT NULL THEN jsonb_build_object(
-            'id',${substrateSource.checkpoint}->'id','generation',${substrateSource.checkpoint}->'generation',
-            'writerEpoch',${substrateSource.checkpoint}->'writerEpoch','bundleSHA256',${substrateSource.checkpoint}#>'{bundle,sha256}',
-            'manifestKey','workspace-source/v1/'||${runtimeAttempt.workspaceId}::text||'/'||(${substrateSource.checkpoint}->>'id')||'/manifest.json',
-            'relationship','last-confirmed-generation-not-turn-atomic') ELSE NULL END)
-      `.as("source_refs"),
+            activeKey: sql<null>`NULL::text`.as("active_key"),
             state: sql<string>`'pending'::text`.as("state"),
-            attempts: sql<number>`0::integer`.as("attempts"),
-            manifestKey: sql<null>`NULL::text`.as("manifest_key"),
-            manifestSha256: sql<null>`NULL::text`.as("manifest_sha256"),
-            throughMessageId: sql<null>`NULL::text`.as("through_message_id"),
-            producerVersion: sql<null>`NULL::text`.as("producer_version"),
-            summary: sql<null>`NULL::jsonb`.as("summary"),
-            lastError: sql<null>`NULL::text`.as("last_error"),
-            retryAfter: sql<Date>`now()`.as("retry_after"),
-            savedAt: sql<null>`NULL::timestamptz`.as("saved_at"),
+            payload: sql<Record<string, unknown>>`
+        jsonb_build_object(
+          'turnId', ${agentTurn.id}::text,
+          'runtimeAttemptId', ${changeAgentTurnIntent.runtimeAttemptId}::text,
+          'sessionId', ${changeAgentTurnIntent.sessionId},
+          'promptId', ${changeAgentTurnIntent.promptId},
+          'sourceRefs',
+            jsonb_build_object('projectID',${agentTurn.projectId},'workspaceID',${runtimeAttempt.workspaceId},
+              'revision',${runtimeAttempt.revision},'requirementApprovalID',${change.requirementApprovalId},
+              'branch',${change.branchName},
+              'runtimeArtifacts',${substrateProvision.intent}#>>'{configuration,workloadImage}',
+              'environment',${environmentIntent.payload}->>'environment','environmentVersion',${environmentIntent.payload}->'version',
+              'requirementRevisionID',${requirementApproval.requirementRevisionId})
+            || jsonb_build_object(
+              'nativeRuntime',jsonb_build_object('engine','substrate','profile',${runtimeAttempt.bindingIntent}->'profile',
+                'runtime',${runtimeAttempt.bindingIntent}->'runtime','actorUID',${runtimeAttempt.actorUid},
+                'templateUID',${runtimeAttempt.bindingIntent}->'templateUID','templateSHA256',${runtimeAttempt.bindingIntent}->'templateSHA256'),
+              'lastConfirmedSource',CASE WHEN ${substrateSource.checkpoint} IS NOT NULL THEN jsonb_build_object(
+                'id',${substrateSource.checkpoint}->'id','generation',${substrateSource.checkpoint}->'generation',
+                'writerEpoch',${substrateSource.checkpoint}->'writerEpoch','bundleSHA256',${substrateSource.checkpoint}#>'{bundle,sha256}',
+                'manifestKey','workspace-source/v1/'||${runtimeAttempt.workspaceId}::text||'/'||(${substrateSource.checkpoint}->>'id')||'/manifest.json',
+                'relationship','last-confirmed-generation-not-turn-atomic') ELSE NULL END),
+          'attempts', 0,
+          'manifestKey', NULL::text,
+          'manifestSha256', NULL::text,
+          'throughMessageId', NULL::text,
+          'producerVersion', NULL::text,
+          'summary', NULL::jsonb,
+          'retryAfter', now()
+        )
+      `.as("payload"),
+            result: sql<null>`NULL::jsonb`.as("result"),
+            error: sql<null>`NULL::text`.as("error"),
+            createdBy: sql<null>`NULL::uuid`.as("created_by"),
+            leaseOwner: sql<null>`NULL::text`.as("lease_owner"),
+            leaseExpiresAt: sql<null>`NULL::timestamptz`.as("lease_expires_at"),
             createdAt: sql<Date>`now()`.as("created_at"),
+            updatedAt: sql<Date>`now()`.as("updated_at"),
+            completedAt: sql<null>`NULL::timestamptz`.as("completed_at"),
           })
           .from(agentTurn)
           .innerJoin(changeAgentTurnIntent, eq(changeAgentTurnIntent.turnId, agentTurn.id))
@@ -110,33 +126,46 @@ export function createSessionArchives(
           )
           .innerJoin(requirementApproval, eq(requirementApproval.id, change.requirementApprovalId))
           .leftJoin(
-            runtimeEnvironmentIntent,
-            eq(runtimeEnvironmentIntent.runtimeAttemptId, runtimeAttempt.id),
-          )
-          .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
-          .leftJoin(
-            substrateWorkspace,
+            environmentIntent,
             and(
-              eq(substrateWorkspace.workspaceId, runtimeAttempt.workspaceId),
-              eq(substrateWorkspace.generation, runtimeAttempt.generation),
+              eq(environmentIntent.kind, "runtime.environment_intent"),
+              eq(environmentIntent.scopeType, "runtime_attempt"),
+              eq(
+                environmentIntent.idempotencyKey,
+                sql`'runtime.environment_intent:' || ${runtimeAttempt.id}::text`,
+              ),
+            ),
+          )
+          .leftJoin(
+            substrateProvision,
+            and(
+              eq(substrateProvision.ownerId, runtimeAttempt.workspaceId),
+              eq(substrateProvision.kind, "workspace"),
+              eq(substrateProvision.generation, runtimeAttempt.generation),
             ),
           )
           .leftJoin(substrateSource, eq(substrateSource.workspaceId, runtimeAttempt.workspaceId))
           .where(
             and(
               eq(agentTurn.state, "completed"),
+              isNotNull(runtimeAttempt.atespace),
               notExists(
                 database.db
-                  .select({ turnId: archive.turnId })
+                  .select({ id: archive.id })
                   .from(archive)
-                  .where(eq(archive.turnId, agentTurn.id)),
+                  .where(
+                    eq(
+                      archive.idempotencyKey,
+                      sql`'coding.session_archive:' || ${agentTurn.id}::text`,
+                    ),
+                  ),
               ),
             ),
           )
           .orderBy(asc(agentTurn.createdAt), asc(agentTurn.id))
           .limit(16),
       )
-      .onConflictDoNothing();
+      .onConflictDoNothing({ target: operation.idempotencyKey });
   }
   async function save() {
     const connection = database.coordination();
@@ -149,33 +178,40 @@ export function createSessionArchives(
       const db = drizzleTransaction(connection);
       const pending: Pending[] = await db
         .select({
-          turnID: sessionArchive.turnId,
-          runtimeAttemptID: sessionArchive.runtimeAttemptId,
-          sessionID: sessionArchive.sessionId,
-          promptID: sessionArchive.promptId,
-          source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+          turnID: operation.scopeId,
+          runtimeAttemptID: sql<string>`${operation.payload}->>'runtimeAttemptId'`,
+          sessionID: sql<string>`${operation.payload}->>'sessionId'`,
+          promptID: sql<string>`${operation.payload}->>'promptId'`,
+          source: sql<Record<string, unknown>>`${operation.payload}->'sourceRefs'`,
         })
-        .from(sessionArchive)
-        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, sessionArchive.runtimeAttemptId))
+        .from(operation)
+        .innerJoin(
+          runtimeAttempt,
+          eq(runtimeAttempt.id, sql`(${operation.payload}->>'runtimeAttemptId')::uuid`),
+        )
         .where(
           and(
-            ne(sessionArchive.state, "saved"),
-            lte(sessionArchive.retryAfter, sql`now()`),
+            eq(operation.kind, SESSION_ARCHIVE_KIND),
+            eq(operation.scopeType, "agent_turn"),
+            ne(operation.state, "saved"),
+            lte(sql`(${operation.payload}->>'retryAfter')::timestamptz`, sql`now()`),
             eq(runtimeAttempt.state, "ready"),
           ),
         )
-        .orderBy(asc(sessionArchive.createdAt), asc(sessionArchive.turnId))
+        .orderBy(asc(operation.createdAt), asc(operation.scopeId))
         .limit(4);
       for (const checkpoint of pending) {
+        const key = sessionArchiveKey(checkpoint.turnID);
         await db
-          .update(sessionArchive)
+          .update(operation)
           .set({
-            attempts: sql`${sessionArchive.attempts}+1`,
-            retryAfter: sql`now()+interval '1 minute'`,
+            payload: sql`${operation.payload} || jsonb_build_object(
+              'attempts', COALESCE((${operation.payload}->>'attempts')::integer, 0) + 1,
+              'retryAfter', now() + interval '1 minute'
+            )`,
+            updatedAt: sql`now()`,
           })
-          .where(
-            and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
-          );
+          .where(and(eq(operation.idempotencyKey, key), ne(operation.state, "saved")));
         try {
           const saved = await saveNativeSessionArchive(
             client(checkpoint.runtimeAttemptID),
@@ -184,34 +220,34 @@ export function createSessionArchives(
             checkpoint.source,
           );
           await db
-            .update(sessionArchive)
+            .update(operation)
             .set({
               state: "saved",
-              manifestKey: saved.key,
-              manifestSha256: saved.manifestSHA256,
-              throughMessageId: saved.manifest.checkpoint.throughMessageID,
-              producerVersion: saved.manifest.producer.version,
-              summary: saved.summary,
-              lastError: null,
-              savedAt: sql`now()`,
+              error: null,
+              completedAt: sql`now()`,
+              updatedAt: sql`now()`,
+              payload: sql`${operation.payload} || ${JSON.stringify({
+                manifestKey: saved.key,
+                manifestSha256: saved.manifestSHA256,
+                throughMessageId: saved.manifest.checkpoint.throughMessageID,
+                producerVersion: saved.manifest.producer.version,
+                summary: saved.summary,
+              })}::jsonb`,
             })
-            .where(
-              and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
-            );
+            .where(and(eq(operation.idempotencyKey, key), ne(operation.state, "saved")));
         } catch {
           // Neither native errors nor object-store errors may leak transcript
           // bytes, credentials or signed URLs into product diagnostics.
           await db
-            .update(sessionArchive)
+            .update(operation)
             .set({
               state: "failed",
-              retryAfter: sql`now()+interval '1 minute'`,
-              lastError:
+              error:
                 "Transcript archive save could not be confirmed; retry pending. Recovery uses the last successfully saved checkpoint.",
+              updatedAt: sql`now()`,
+              payload: sql`${operation.payload} || jsonb_build_object('retryAfter', now() + interval '1 minute')`,
             })
-            .where(
-              and(eq(sessionArchive.turnId, checkpoint.turnID), ne(sessionArchive.state, "saved")),
-            );
+            .where(and(eq(operation.idempotencyKey, key), ne(operation.state, "saved")));
           console.warn("[factory] native transcript archive save failed", {
             turnID: checkpoint.turnID,
           });
@@ -231,22 +267,27 @@ export function createSessionArchives(
       const checkpoint = async () => {
         const query = database.db
           .select({
-            turnID: sessionArchive.turnId,
-            runtimeAttemptID: sessionArchive.runtimeAttemptId,
-            sessionID: sessionArchive.sessionId,
-            promptID: sessionArchive.promptId,
-            source: sql<Record<string, unknown>>`${sessionArchive.sourceRefs}`,
+            turnID: operation.scopeId,
+            runtimeAttemptID: sql<string>`${operation.payload}->>'runtimeAttemptId'`,
+            sessionID: sql<string>`${operation.payload}->>'sessionId'`,
+            promptID: sql<string>`${operation.payload}->>'promptId'`,
+            source: sql<Record<string, unknown>>`${operation.payload}->'sourceRefs'`,
             // Saved archive/context invariants require these checkpoint fields.
-            key: sql<string>`${sessionArchive.manifestKey}`,
-            sha256: sql<string>`${sessionArchive.manifestSha256}`,
-            throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
+            key: sql<string>`${operation.payload}->>'manifestKey'`,
+            sha256: sql<string>`${operation.payload}->>'manifestSha256'`,
+            throughMessageID: sql<string>`${operation.payload}->>'throughMessageId'`,
             changeID: sql<string>`${agentTurn.changeId}`,
             contextID: sql<string | null>`${agentTurn.input}->>'contextId'`,
           })
-          .from(sessionArchive)
+          .from(operation)
           .innerJoin(
             agentTurn,
-            and(eq(agentTurn.id, sessionArchive.turnId), eq(agentTurn.state, "completed")),
+            and(
+              eq(operation.kind, SESSION_ARCHIVE_KIND),
+              eq(operation.scopeType, "agent_turn"),
+              sql`${agentTurn.id}::text = ${operation.scopeId}`,
+              eq(agentTurn.state, "completed"),
+            ),
           );
         if (typeof target === "string")
           return (
@@ -258,14 +299,16 @@ export function createSessionArchives(
                   sql`${agentTurn.id}=(${conversationContext.archivedSession}->>'active_turn_id')::uuid`,
                   sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM CASE WHEN ${conversationContext.original}
               THEN NULL ELSE ${conversationContext.id}::text END`,
-                  eq(sessionArchive.sessionId, conversationContext.nativeSessionId),
-                  sql`${sessionArchive.sessionId}=${conversationContext.archivedSession}->>'opencode_session_id'`,
-                  sql`${sessionArchive.runtimeAttemptId}=(${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
+                  sql`${operation.payload}->>'sessionId' = ${conversationContext.nativeSessionId}`,
+                  sql`${operation.payload}->>'sessionId' = ${conversationContext.archivedSession}->>'opencode_session_id'`,
+                  sql`(${operation.payload}->>'runtimeAttemptId')::uuid = (${conversationContext.archivedSession}->>'runtime_attempt_id')::uuid`,
                 ),
               )
               .where(
                 and(
-                  eq(sessionArchive.state, "saved"),
+                  eq(operation.kind, SESSION_ARCHIVE_KIND),
+                  eq(operation.scopeType, "agent_turn"),
+                  eq(operation.state, "saved"),
                   eq(conversationContext.id, target),
                   eq(conversationContext.kind, "coding"),
                   isNotNull(conversationContext.archivedSession),
@@ -296,12 +339,15 @@ export function createSessionArchives(
                 eq(changeAgentSession.activeTurnId, agentTurn.id),
                 inArray(changeAgentSession.state, ["waiting", "committed", "stopped", "failed"]),
                 isNotNull(changeAgentSession.nativeSessionConfirmedAt),
-                eq(sessionArchive.state, "saved"),
-                eq(sessionArchive.runtimeAttemptId, target.runtimeAttemptID),
-                eq(sessionArchive.runtimeAttemptId, changeAgentSession.runtimeAttemptId),
-                eq(sessionArchive.sessionId, target.sessionID),
-                eq(sessionArchive.sessionId, changeAgentSession.opencodeSessionId),
-                sql`${sessionArchive.sessionId}=COALESCE(${changeAgentSession.implementationSessionId},${changeAgentSession.opencodeSessionId})`,
+                eq(operation.kind, SESSION_ARCHIVE_KIND),
+                eq(operation.scopeType, "agent_turn"),
+                eq(operation.idempotencyKey, sessionArchiveKey(target.turnID)),
+                eq(operation.state, "saved"),
+                sql`(${operation.payload}->>'runtimeAttemptId')::uuid = ${target.runtimeAttemptID}::uuid`,
+                sql`(${operation.payload}->>'runtimeAttemptId')::uuid = ${changeAgentSession.runtimeAttemptId}`,
+                sql`${operation.payload}->>'sessionId' = ${target.sessionID}`,
+                sql`${operation.payload}->>'sessionId' = ${changeAgentSession.opencodeSessionId}`,
+                sql`${operation.payload}->>'sessionId' = COALESCE(${changeAgentSession.implementationSessionId},${changeAgentSession.opencodeSessionId})`,
                 sql`${agentTurn.input}->>'contextId' IS NOT DISTINCT FROM ${ticketConversation.activeCodingContextId}::text`,
                 or(
                   isNull(ticketConversation.activeCodingContextId),
@@ -309,7 +355,7 @@ export function createSessionArchives(
                     eq(conversationContext.kind, "coding"),
                     eq(conversationContext.changeId, change.id),
                     eq(conversationContext.conversationId, ticketConversation.id),
-                    eq(conversationContext.nativeSessionId, sessionArchive.sessionId),
+                    sql`${conversationContext.nativeSessionId} = ${operation.payload}->>'sessionId'`,
                     isNull(conversationContext.archivedSession),
                   ),
                 ),
@@ -387,27 +433,40 @@ export function createSessionArchives(
     async status(changeID: string) {
       const latest = await database.db
         .select({
-          turnID: sessionArchive.turnId,
-          state: sessionArchive.state,
-          attempts: sessionArchive.attempts,
-          lastError: sessionArchive.lastError,
+          turnID: operation.scopeId,
+          state: sql<"pending" | "failed" | "saved">`${operation.state}`,
+          attempts: sql<number>`(${operation.payload}->>'attempts')::integer`,
+          lastError: operation.error,
         })
-        .from(sessionArchive)
-        .innerJoin(agentTurn, eq(agentTurn.id, sessionArchive.turnId))
-        .where(eq(agentTurn.changeId, changeID))
+        .from(operation)
+        .innerJoin(agentTurn, sql`${agentTurn.id}::text = ${operation.scopeId}`)
+        .where(
+          and(
+            eq(operation.kind, SESSION_ARCHIVE_KIND),
+            eq(operation.scopeType, "agent_turn"),
+            eq(agentTurn.changeId, changeID),
+          ),
+        )
         .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
         .limit(1);
       const [checkpoint] = await database.db
         .select({
-          turnID: sessionArchive.turnId,
-          sessionID: sessionArchive.sessionId,
-          runtimeAttemptID: sessionArchive.runtimeAttemptId,
-          savedAt: sql<string>`${sessionArchive.savedAt}::text`,
-          throughMessageID: sql<string>`${sessionArchive.throughMessageId}`,
+          turnID: operation.scopeId,
+          sessionID: sql<string>`${operation.payload}->>'sessionId'`,
+          runtimeAttemptID: sql<string>`${operation.payload}->>'runtimeAttemptId'`,
+          savedAt: sql<string>`${operation.completedAt}::text`,
+          throughMessageID: sql<string>`${operation.payload}->>'throughMessageId'`,
         })
-        .from(sessionArchive)
-        .innerJoin(agentTurn, eq(agentTurn.id, sessionArchive.turnId))
-        .where(and(eq(agentTurn.changeId, changeID), eq(sessionArchive.state, "saved")))
+        .from(operation)
+        .innerJoin(agentTurn, sql`${agentTurn.id}::text = ${operation.scopeId}`)
+        .where(
+          and(
+            eq(operation.kind, SESSION_ARCHIVE_KIND),
+            eq(operation.scopeType, "agent_turn"),
+            eq(agentTurn.changeId, changeID),
+            eq(operation.state, "saved"),
+          ),
+        )
         .orderBy(desc(agentTurn.createdAt), desc(agentTurn.id))
         .limit(1);
       return {

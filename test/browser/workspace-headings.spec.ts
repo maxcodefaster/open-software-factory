@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { repositoryDocumentsSchema } from "../../apps/factory/src/knowledge/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -85,15 +85,17 @@ test("document titles share their action row and remain editable, wrapping and k
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Header layout','https://example.invalid/owned-headers.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Header layout','https://example.invalid/owned-headers.git','main','.factory/actor-template.json',${session.user.id})`;
     await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
       VALUES(${pageID},${projectID},'onboarding','Onboarding guide','Saved guidance.','Saved guidance.',${"a".repeat(40)},${session.user.id})`;
     await database.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,created_by)
       VALUES(${revisionID},${pageID},1,'human','Onboarding guide','Saved guidance.','Saved guidance.',${"a".repeat(40)},${session.user.id})`;
     await database.client`UPDATE factory.knowledge_page SET current_revision_id=${revisionID} WHERE id=${pageID}`;
-    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,page_count,conflict_count,created_by,completed_at)
-      VALUES(${crypto.randomUUID()},${projectID},${"a".repeat(40)},'succeeded',1,0,${session.user.id},now())`;
+    const generationID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+      VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},NULL,'succeeded',${session.user.id},now(),
+        ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: 1, conflictCount: 0, failure: null, createdBy: session.user.id, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.getByRole("button", { name: "New Ticket", exact: true }).click();

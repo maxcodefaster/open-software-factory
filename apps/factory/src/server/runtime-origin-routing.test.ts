@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import type { RuntimeSocketData } from "../runtime/hub";
+import { RuntimeHub, type RuntimeSocketData } from "../runtime/hub";
 import { createApiProtocol } from "./protocols/api";
 import { createRuntimeProtocol } from "./protocols/runtime";
 import { startFactoryTransport } from "./transport";
@@ -101,6 +101,55 @@ test("a failed Preview navigation reports attachment failure instead of displayi
 
 test("isolated App origins serve root pages, assets, APIs and sockets without entering Factory", async () => {
   let factoryCalls = 0;
+  const hub = new RuntimeHub(async () => {});
+  const child = {
+    data: { kind: "connector", role: "child", attemptID: id, generation: 1 },
+    close() {},
+    send(raw: string) {
+      const frame = JSON.parse(String(raw));
+      if (frame.type !== "http-request") return 1;
+      hub.message(
+        child,
+        JSON.stringify({
+          type: "http-response",
+          streamId: frame.streamId,
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      hub.message(
+        child,
+        JSON.stringify({
+          type: "stream-data",
+          streamId: frame.streamId,
+          data: Buffer.from(
+            JSON.stringify({
+              attemptID: id,
+              app: frame.channel,
+              path: frame.path,
+              method: frame.method,
+              body: Buffer.from(frame.data, "base64").toString(),
+              headers: frame.headers,
+            }),
+          ).toString("base64"),
+        }),
+      );
+      hub.message(child, JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
+      return 1;
+    },
+  } as unknown as ServerWebSocket<RuntimeSocketData>;
+  hub.open(child);
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "hello",
+      role: "child",
+      channels: [
+        { name: "app", kind: "app" },
+        { name: "app-forms", kind: "app" },
+      ],
+    }),
+  );
   const services = {
     factoryHost: "127.0.0.1",
     factoryOrigin: origin,
@@ -113,7 +162,10 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
       authorize: async (request: Request, attempt: string, role: string, app = "app") =>
         attempt === id &&
         role === "app" &&
-        request.headers.get("cookie") === `factory_runtime_access=${app}`
+        request.headers
+          .get("cookie")
+          ?.split(";")
+          .some((value) => value.trim() === `factory_runtime_access=${app}`)
           ? app
           : undefined,
       redeem: async (url: URL, _attempt: string, _role: string, cookiePath: string) =>
@@ -125,9 +177,8 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
           : undefined,
     },
     runtimeHub: {
-      hasAppChannel: (_attempt: string, channel: string) => ["app", "app-forms"].includes(channel),
-      request: async (_attempt: string, app: string, request: Request, path: string) =>
-        Response.json({ app, path, method: request.method, body: await request.text() }),
+      hasAppChannel: hub.hasAppChannel.bind(hub),
+      request: hub.request.bind(hub),
       open: (socket: ServerWebSocket<RuntimeSocketData>) =>
         socket.send(JSON.stringify(socket.data)),
       close: () => {},
@@ -144,7 +195,9 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
     startFetch: (request: Request) => createRuntimeProtocol(services)(request),
   } as unknown as Parameters<typeof startFactoryTransport>[0];
   const previous = process.env["FACTORY_PORT"];
+  const previousBaseURL = process.env["FACTORY_BASE_URL"];
   process.env["FACTORY_PORT"] = "0";
+  process.env["FACTORY_BASE_URL"] = origin;
   const servers = startFactoryTransport(services);
   if (previous === undefined) delete process.env["FACTORY_PORT"];
   else process.env["FACTORY_PORT"] = previous;
@@ -155,6 +208,7 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
       ["app-forms", `${hex}app-forms.runtime.factory.example`],
     ] as const) {
       for (const path of [
+        "/",
         "/rund-ums-fahrzeug/elektromobilitaet/",
         "/@vite/client",
         "/fonts/app.woff2",
@@ -162,10 +216,33 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
         "/_server/data/app",
       ]) {
         const response = await fetch(`${base}${path}?q=one`, {
-          headers: { host, cookie: `factory_runtime_access=${app}` },
+          headers: {
+            host,
+            origin: `https://${host}`,
+            cookie: `factory_runtime_access=${app}; starter.session_token=owned`,
+            authorization: "Bearer factory-secret",
+            forwarded: "host=spoofed.test;proto=http",
+            "x-forwarded-host": "spoofed.test",
+            "x-forwarded-proto": "http",
+            "x-forwarded-prefix": "/spoofed",
+          },
         });
         expect(response.status, `${app} ${path}`).toBe(200);
-        expect(await response.json()).toMatchObject({ app, path: `${path}?q=one` });
+        const forwarded = await response.json();
+        expect(forwarded).toMatchObject({
+          attemptID: id,
+          app,
+          path: `${path}?q=one`,
+          headers: {
+            "x-forwarded-host": host,
+            "x-forwarded-proto": "https",
+            "x-forwarded-prefix": "",
+            origin: `https://${host}`,
+            cookie: "starter.session_token=owned",
+          },
+        });
+        for (const name of ["authorization", "host", "forwarded"])
+          expect(forwarded.headers).not.toHaveProperty(name);
       }
       const grant = await fetch(`${base}/runtime/${id}/preview/${app}/?factory-grant=owned`, {
         headers: { host },
@@ -224,12 +301,52 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
       });
       expect(submitted.status).toBe(200);
       expect(await submitted.json()).toMatchObject({
+        attemptID: id,
         app,
         path: "/api/submit",
         method: "POST",
         body: "retained App request",
       });
     }
+    for (const host of [
+      "factory.example",
+      "foreign.example",
+      `${hex}-app.runtime.factory.example.evil.test`,
+    ]) {
+      const prefix = `/runtime/${id}/preview/app`;
+      const response = await fetch(`${base}${prefix}/@vite/client?route=%2Fforms%2F`, {
+        headers: {
+          host,
+          cookie: "factory_runtime_access=app",
+          "x-forwarded-host": `${hex}-app.runtime.factory.example`,
+          "x-forwarded-proto": "https",
+          "x-forwarded-prefix": "",
+        },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        attemptID: id,
+        app: "app",
+        path: "/@vite/client?route=%2Fforms%2F",
+        headers: {
+          "x-forwarded-host": host,
+          "x-forwarded-proto": host === "factory.example" ? "https" : "http",
+          "x-forwarded-prefix": prefix,
+        },
+      });
+    }
+    const otherAttempt = "01994a7d000070008000000000000002-app.runtime.factory.example";
+    expect(
+      (
+        await fetch(`${base}/?q=original`, {
+          headers: {
+            host: otherAttempt,
+            cookie: "factory_runtime_access=app",
+            "x-forwarded-host": `${hex}-app.runtime.factory.example`,
+          },
+        })
+      ).status,
+    ).toBe(401);
     const ide = await fetch(`${base}/runtime/${id}/ide/`, {
       headers: {
         host: "factory.example",
@@ -262,14 +379,86 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
         attemptID: id,
         channel: "app-forms",
         path: "/?token=hmr",
+        protocol: "vite-hmr",
+        headers: {
+          "x-forwarded-host": `${hex}app-forms.runtime.factory.example`,
+          "x-forwarded-proto": "https",
+          "x-forwarded-prefix": "",
+          origin: `https://${hex}app-forms.runtime.factory.example`,
+        },
       });
     } finally {
       socket.close();
+    }
+    for (const [host, channel, mount, expectedPrefix, proto] of [
+      [`${hex}-app.runtime.factory.example`, "app", `/runtime/${id}/app`, "", "https"],
+      [
+        `${hex}app-forms.runtime.factory.example`,
+        "app-forms",
+        `/runtime/${id}/preview/app-forms`,
+        "",
+        "https",
+      ],
+      ["factory.example", "app", `/runtime/${id}/app`, `/runtime/${id}/app`, "https"],
+      [
+        "foreign.example",
+        "app",
+        `/runtime/${id}/preview/app`,
+        `/runtime/${id}/preview/app`,
+        "http",
+      ],
+    ] as const) {
+      const path = "/@vite/client?token=hmr&route=%2Fforms%2F";
+      const mountedSocket = new (
+        WebSocket as typeof WebSocket & {
+          new (url: string, options: Bun.WebSocketOptions & { protocols: string[] }): WebSocket;
+        }
+      )(`${base.replace("http:", "ws:")}${mount}${path}`, {
+        protocols: ["vite-hmr"],
+        headers: {
+          host,
+          cookie: `factory_runtime_access=${channel}; starter.session_token=app`,
+          origin: `https://${host}`,
+          authorization: "Bearer factory-secret",
+          forwarded: "host=spoofed.test;proto=https",
+          "x-forwarded-host": `${hex}-app.runtime.factory.example`,
+          "x-forwarded-proto": "https",
+          "x-forwarded-prefix": "/spoofed",
+        },
+      });
+      try {
+        const message = await new Promise<string>((resolve, reject) => {
+          mountedSocket.onmessage = (event) => resolve(String(event.data));
+          mountedSocket.onerror = () => reject(new Error("Mounted App socket failed"));
+          mountedSocket.onclose = () => reject(new Error("Mounted App socket closed"));
+        });
+        const forwarded = JSON.parse(message);
+        expect(forwarded).toMatchObject({
+          attemptID: id,
+          channel,
+          path,
+          protocol: "vite-hmr",
+          headers: {
+            "x-forwarded-host": host,
+            "x-forwarded-proto": proto,
+            "x-forwarded-prefix": expectedPrefix,
+            cookie: "starter.session_token=app",
+          },
+        });
+        expect(forwarded.headers.origin).toBe(proto === "https" ? `https://${host}` : undefined);
+        for (const name of ["authorization", "host", "forwarded", "sec-websocket-key"])
+          expect(forwarded.headers).not.toHaveProperty(name);
+      } finally {
+        mountedSocket.close();
+      }
     }
     expect(factoryCalls).toBe(0);
     expect((await fetch(`${base}/`, { headers: { host: "factory.example" } })).status).toBe(403);
     expect(factoryCalls).toBe(1);
   } finally {
+    hub.revoke(id);
     for (const server of servers) await server.stop(true);
+    if (previousBaseURL === undefined) delete process.env["FACTORY_BASE_URL"];
+    else process.env["FACTORY_BASE_URL"] = previousBaseURL;
   }
 }, 10_000);

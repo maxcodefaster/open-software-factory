@@ -3,10 +3,10 @@ import {
   attachmentIDs,
   attachmentToolCallInput,
   attachmentToolCatalogue,
-} from "../../../../packages/conversation-domain/src/attachments";
-import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { attachment, attachmentReference } from "../../../../packages/db/src/schema";
+} from "#conversation-domain/attachments";
+import type { BuildBrowserResult } from "#conversation-domain/browser-tools";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { attachment, attachmentReference } from "#db/schema";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 import { attachmentContextIn, createAttachmentStore, readableAttachmentIn } from "./store";

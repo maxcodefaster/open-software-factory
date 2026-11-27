@@ -96,7 +96,7 @@ export function browserProtocolDecision(call: BrowserNetworkCall): string | unde
       return "Raw Attachment PUT with real transfer progress; metadata and admission use Server Functions.";
   }
   if (
-    file === "apps/factory/src/attachments/ui.tsx" &&
+    file === "apps/factory/src/attachments/upload-runner.ts" &&
     operation === "apiUpload" &&
     args[0] === "attachmentSummary" &&
     args[1] === "attachmentURL(id)"

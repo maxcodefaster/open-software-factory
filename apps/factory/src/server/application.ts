@@ -1,929 +1,108 @@
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { asc, desc, eq } from "drizzle-orm";
-import { z } from "zod";
-import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
-import { createDatabase } from "../../../../packages/db/src/client";
-import {
-  projectImagePreparation,
-  projectRepositoryIntent,
-  projectSetupReadiness,
-  project as projectTable,
-  runtimeAttempt,
-  wikiSourceUpdate,
-} from "../../../../packages/db/src/schema";
-import { createForgejoAccess } from "../../../../packages/forge/src/access";
-import { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { createForgejoReleases } from "../../../../packages/forge/src/releases";
-import { projectImportOrigins } from "../../../../packages/project-domain/src/setup";
-import { createAccountRevocation } from "../access/account-revocation";
-import { createAccessController } from "../access/controller";
-import { createForgeAccessReconciliation } from "../access/forge";
-import { createForgeIdentityRoutes } from "../access/forge-routes";
-import { createIdentityConfiguration } from "../access/identity-configuration";
-import { createProjectAppPreviews } from "../access/previews";
-import { createAccessRevocation } from "../access/revocation";
-import { createRuntimeAccess } from "../access/runtime";
-import { createAccessService } from "../access/service";
-import { createChangeWriterController } from "../access/writer-controller";
-import { createWriterService } from "../access/writer-service";
-import { createBuildBrowserController } from "../agent/browser-controller";
-import { createBuildBrowserEndpoint } from "../agent/browser-endpoint";
-import { createCandidateReviewController } from "../agent/candidate-review";
-import { createAgentController } from "../agent/controller";
-import { createOpenCodeClient } from "../agent/opencode-adapter";
-import { createReviewExecutionReader } from "../agent/review-execution";
-import { createAgentService } from "../agent/service";
-import { createVerificationTools } from "../agent/verification-tools";
-import { createAttachmentRoutes } from "../attachments/routes";
-import { createAttachmentStore } from "../attachments/store";
-import { createAttachmentTools } from "../attachments/tools";
-import { createBootstrapService } from "../bootstrap/service";
-import { factoryBuildDirectory } from "../build-directory";
-import { createChangeController } from "../change/controller";
-import { createTicketDocumentController } from "../change/document";
-import { createImplementationOrders } from "../change/implementation-orders";
-import { createTicketService } from "../change/service";
-import { createTicketTrashController } from "../change/trash";
-import { CommandError } from "../command-error";
-import { createDeliveryController } from "../delivery/controller";
-import { createChangeIntegration } from "../delivery/integration";
-import { createDeliveryService } from "../delivery/service";
-import { createEnvironmentController } from "../environments/controller";
-import { createOpenBaoEnvironmentSecrets } from "../environments/openbao";
-import { createRuntimeEnvironmentEndpoint } from "../environments/runtime";
-import { createEnvironmentService } from "../environments/service";
-import { reportFailure } from "../failure-log";
-import { createInboxService } from "../inbox/service";
-import { installationInMaintenance } from "../installation/maintenance";
-import { createKnowledgeController } from "../knowledge/controller";
-import { factoryForgeSource } from "../knowledge/forge-source";
-import { createKnowledgeService } from "../knowledge/service";
-import { createWikiSourceUpdates } from "../knowledge/source-updates";
-import { createLearningService } from "../learning/service";
-import { createLearningWorker } from "../learning/worker";
-import { createMCPConnections } from "../mcp/connections";
-import { createExternalFactoryMCP } from "../mcp/external";
-import { createMCPOAuthCallback } from "../mcp/oauth-callback";
-import { createMCPSecrets } from "../mcp/secrets";
-import { createMCPService } from "../mcp/service";
-import { createMCPSourceEndpoint } from "../mcp/sources";
-import { createModelConnections } from "../models/connections";
-import { createModelSettingsController } from "../models/controller";
-import { createModelRelay } from "../models/relay";
-import { installationPlanningConnection } from "../models/resolver";
-import { createOpenBaoModelSecrets } from "../models/secrets";
-import { createModelService } from "../models/service";
-import { createMonitoringController } from "../monitoring/controller";
-import { createMonitoringRoutes } from "../monitoring/routes";
-import { createInputService } from "../monitoring/service";
-import { createMonitoringWorker } from "../monitoring/worker";
-import { createUIPreferenceController } from "../preferences/controller";
-import { createProjectAgentController } from "../project-agent/controller";
-import { createConversationService } from "../project-agent/service";
-import { createProjectService } from "../projects/service";
-import { createReleaseController } from "../releases/controller";
-import { createReleaseSecrets } from "../releases/secrets";
-import { createRepositoryMirrorController } from "../repository-mirrors/controller";
-import { factoryRequestURL } from "../request-origin";
-import { createVisualReviewController } from "../review/controller";
-import { createReviewMedia } from "../review/media";
-import { createReviewMediaRoutes } from "../review/media-routes";
-import { createReviewService } from "../review/service";
-import { createRuntimeController } from "../runtime/controller";
-import { createRuntimeDemand } from "../runtime/demand";
-import { RuntimeHub } from "../runtime/hub";
-import { createIdleCompute } from "../runtime/idle";
-import { createProjectPreparation } from "../runtime/project-preparation";
-import { createRuntimeService } from "../runtime/service";
-import { createSubstrateCapacity } from "../runtime/substrate-capacity";
+import { factorySigningSecret } from "#auth/signing-secret";
+import { createDatabase } from "#db/client";
 import { configuredSubstrateInstallation } from "../runtime/substrate-workspaces";
-import { createServerFunctionEndpoint } from "../server-functions/endpoint";
-import { createProjectSetupController } from "../setup/controller";
-import { createSetupInspection } from "../setup/inspection";
-import { createSetupReadiness } from "../setup/readiness";
-import { createImportSecrets } from "../setup/secrets";
-import { createSetupService } from "../setup/service";
-import { createSkillController } from "../skills/controller";
-import { createSkillService } from "../skills/service";
-import { createStaticAssets } from "../static-assets";
 import { usageCatalogue } from "../usage/rates";
-import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
-import { createUsageService } from "../usage/service";
-import { createWorkspaceCollaboration } from "../workspace/collaboration";
-import { createWorkspaceCommands } from "../workspace/commands";
-import { createWorkspaceContainerFiles } from "../workspace/container-files";
-import { createDeveloperIDEController } from "../workspace/developer-ide-controller";
-import { createDeveloperIDEEdge } from "../workspace/developer-ide-edge";
-import { createDeveloperIDERuntime } from "../workspace/developer-ide-runtime";
-import { createWorkspaceService } from "../workspace/service";
-import { createWorkspaceSharing } from "../workspace/sharing";
-import { createWorkspaceSourceController } from "../workspace/source-controller";
-import { createWorkspaceSourceProtocol } from "../workspace/source-protocol";
-import { createWorkspaceSubmission } from "../workspace/submission";
-import { createSubstrateSources } from "../workspace/substrate-source";
-import { createWorkspaceTransferRoutes } from "../workspace/transfer-routes";
-import { createPageHint } from "./page-hints";
+import { readServerConfig } from "./config";
+import { createWiringHooks } from "./wiring-hooks";
+import { wirePlatform } from "./wiring-platform";
+import { wireProduct } from "./wiring-product";
+import { wireRuntime } from "./wiring-runtime";
+import { wireServices } from "./wiring-services";
 
 export async function createFactoryApplication() {
-  const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_CACHE_URL } =
-    process.env;
-  const factoryHost = FACTORY_HOST ?? "127.0.0.1";
-  const factoryOrigin = new URL(process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000").origin;
-  const forgeAPIURL = process.env["FACTORY_FORGEJO_API_URL"];
-  if (!forgeAPIURL) throw new Error("Configure the Factory Forgejo API before starting the server");
-  const forgeOwner = process.env["FACTORY_FORGEJO_OWNER"];
-  const forgeToken = process.env["FACTORY_FORGEJO_TOKEN"];
-  const forgeAdminToken = process.env["FACTORY_FORGEJO_ADMIN_TOKEN"];
-  if (!forgeOwner || !forgeToken)
-    throw new Error("Configure the Factory Forgejo owner and token before starting the server");
-  const forgeTransportOrigin = new URL(forgeAPIURL).origin;
-  const forgePublicOrigin = new URL(process.env["FACTORY_FORGEJO_PUBLIC_URL"] ?? forgeAPIURL)
-    .origin;
-  const { FACTORY_STARTUP_ID } = process.env;
-  const startupID = FACTORY_STARTUP_ID ?? crypto.randomUUID();
-  if (
-    !["127.0.0.1", "localhost", "::1"].includes(factoryHost) &&
-    (!FACTORY_AUTH_SECRET || !FACTORY_ADMIN_PASSWORD)
-  ) {
-    throw new Error(
-      "FACTORY_AUTH_SECRET and FACTORY_ADMIN_PASSWORD are required outside a loopback listener",
-    );
-  }
+  const config = readServerConfig();
   const nativeSetup = configuredSubstrateInstallation();
   if (!nativeSetup) throw new Error("Factory requires its Substrate installation configuration");
+
   const database = createDatabase();
   void usageCatalogue.refresh();
-  const ticketDocuments = createTicketDocumentController(database, (sql, input) =>
-    projectAgentController.admitTechnicalIn(sql, input),
-  );
   const runtimeSecret = factorySigningSecret();
-  const factoryAuth = createIdentityConfiguration(database, runtimeSecret, undefined, [
-    "https://login.microsoftonline.com",
-    ...(process.env["FACTORY_IDENTITY_ALLOWED_ORIGINS"]
-      ?.split(",")
-      .map((value) => value.trim())
-      .filter(Boolean) ?? []),
-  ]);
-  await factoryAuth.bootstrap();
-  const accessController = createAccessController(database);
-  const forgeAccess = forgeAdminToken
-    ? createForgeAccessReconciliation({
-        database,
-        forge: createForgejoAccess({
-          apiURL: forgeAPIURL,
-          token: forgeAdminToken,
-        }),
-        owner: forgeOwner,
-        origin: forgeTransportOrigin,
-        publicOrigin: forgePublicOrigin,
-      })
-    : undefined;
-  let runtimeController: ReturnType<typeof createRuntimeController>;
-  let agentController: ReturnType<typeof createAgentController>;
-  let buildBrowserController: ReturnType<typeof createBuildBrowserController>;
-  let deliveryController: ReturnType<typeof createDeliveryController>;
-  let knowledgeController: ReturnType<typeof createKnowledgeController>;
-  let projectAgentController: ReturnType<typeof createProjectAgentController>;
-  const uiPreferenceController = createUIPreferenceController(database);
-  const modelSettingsController = createModelSettingsController(database);
-  const modelConnections = createModelConnections(
-    database,
-    createOpenBaoModelSecrets(),
-    runtimeSecret,
-    process.env["FACTORY_MODEL_ALLOWED_ORIGINS"]
-      ?.split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean) ?? [],
-  );
-  const modelService = createModelService({
-    settings: modelSettingsController,
-    connections: modelConnections,
-    access: accessController,
-    signingKey: runtimeSecret,
-  });
-  await modelConnections
-    .recover()
-    .catch(reportFailure("Model connection save recovery is unavailable"));
-  const environmentSecrets = createOpenBaoEnvironmentSecrets();
-  const environmentController = createEnvironmentController(
-    database,
-    environmentSecrets,
-    runtimeSecret,
-  );
-  const runtimeEnvironmentEndpoint = createRuntimeEnvironmentEndpoint(database, environmentSecrets);
-  await environmentController
-    .recover()
-    .catch(reportFailure("Environment save recovery is unavailable"));
-  const skillService = createSkillService(createSkillController(database), accessController);
-  const mcpConnections = createMCPConnections(
-    database,
-    createMCPSecrets(),
-    runtimeSecret,
-    factoryOrigin,
-  );
-  const mcpOAuthCallback = createMCPOAuthCallback(mcpConnections);
-  await mcpConnections.recover().catch(reportFailure("MCP credential recovery is unavailable"));
-  const usageService = createUsageService(database);
-  const learningService = createLearningService(database);
-  const learningWorker = createLearningWorker(database, { signingKey: runtimeSecret });
-  const runtimeHub = new RuntimeHub(async (attemptID, phase, error) => {
-    await runtimeController.status(attemptID, phase, error);
-    try {
-      agentController?.runtimeActivityChanged();
-      if (phase === "ready") {
-        if (agentController) await agentController.recoverRuntimeWork(attemptID);
-        if (agentController) await agentController.dispatchRuntimePending(attemptID);
-        if (buildBrowserController) await buildBrowserController.recover(attemptID);
-      }
-    } catch {
-      // Persistence succeeded. Dependent recovery must not reject that status
-      // and interrupt healthy compute. Pending admissions have their own drain.
-      console.error("Runtime work reconciliation needs another observation");
-    }
-  });
-  const relayModel = createModelRelay(
-    database,
-    runtimeSecret,
-    undefined,
-    (turnID, attemptID, sessionID) =>
-      createRecordedOpenCodeUsage(database).drain(
-        turnID,
-        createOpenCodeClient((request, path) =>
-          runtimeHub.request(attemptID, "agent", request, path),
-        ),
-        sessionID,
-      ),
-  );
-  const reviewMedia = createReviewMedia(database);
-  const reviewMediaRoutes = createReviewMediaRoutes(reviewMedia);
-  const attachmentStore = createAttachmentStore(database);
-  const attachmentRoutes = createAttachmentRoutes(attachmentStore);
-  const visualReview = createVisualReviewController(database, reviewMedia.bytes);
-  buildBrowserController = createBuildBrowserController(database, runtimeHub, runtimeSecret);
-  const mcpSourceEndpoint = createMCPSourceEndpoint(
-    database,
-    mcpConnections,
-    buildBrowserController,
-  );
-  const buildBrowserEndpoint = createBuildBrowserEndpoint(
-    buildBrowserController,
-    createCandidateReviewController(
-      database,
-      undefined,
-      createReviewExecutionReader(database, runtimeHub, environmentSecrets),
-    ),
-    visualReview,
-    createAttachmentTools(database, attachmentStore),
-    createVerificationTools(database),
-  );
-  const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
-  const nativeSources = createSubstrateSources(database, runtimeHub);
-  const workspaceSources = createWorkspaceSourceController(database, runtimeHub, nativeSources, {
-    supportsInitialRole: (attemptID, sql) =>
-      runtimeController.supportsInitialSourceRole(attemptID, sql),
-  });
-  const workspaceCollaboration = createWorkspaceCollaboration(database, workspaceSources);
-  const workspaceSharing = createWorkspaceSharing(database, async (workspaceID, userID) => {
-    workspaceCollaboration.revoke(workspaceID, userID);
-    workspaceSources.revokeSharedMember(workspaceID, userID);
-    await runtimeAccess.revokeWorkspaceMember(workspaceID, userID);
-  });
-  await workspaceSharing.recover().catch(reportFailure("Workspace access recovery is unavailable"));
-  const nativeCapacity =
-    nativeSetup.deployment === "fresh-workspaces"
-      ? createSubstrateCapacity(database, nativeSetup)
-      : undefined;
-  runtimeController = createRuntimeController(database, runtimeHub, runtimeSecret, {
-    configuration: nativeSetup,
-    stopCoding: async (changeID, handoff) => {
-      if (!agentController)
-        throw new CommandError("unavailable", "Coding Stop is not ready; compute was retained");
-      await agentController.stop(changeID, handoff);
-    },
-    sources: nativeSources,
-    ...(nativeCapacity ? { capacity: nativeCapacity } : {}),
-  });
-  const workspaceCommands = createWorkspaceCommands(
-    database,
-    runtimeHub,
-    runtimeController,
-    runtimeSecret,
-  );
-  const workspaceFiles = createWorkspaceContainerFiles(
-    database,
-    runtimeHub,
-    runtimeController,
-    runtimeSecret,
-  );
-  const workspaceSubmission = createWorkspaceSubmission(
-    database,
-    runtimeHub,
-    workspaceCollaboration,
-    createForgejoClient({ apiURL: forgeAPIURL, token: forgeToken }),
-    { username: forgeOwner, password: forgeToken },
-    {
-      fenceSource: workspaceSources.fenceChange,
-      protect: async (changeID, writers) => {
-        if (!forgeAccess)
-          throw new CommandError("unavailable", "Forge writing authority is not configured");
-        await forgeAccess.protectChange(changeID, writers);
-      },
-    },
-  );
-  const workspaceTransferRoutes = createWorkspaceTransferRoutes({
-    identity: factoryAuth,
-    files: workspaceFiles,
-    origin: factoryOrigin,
-  });
-  const releaseController = createReleaseController({
-    database,
-    signingKey: runtimeSecret,
-    secrets: createReleaseSecrets(),
-    runtime: runtimeController,
-    forge: createForgejoClient({
-      apiURL: forgeAPIURL,
-      token: forgeToken,
-    }),
-    publication: createForgejoReleases({
-      apiURL: forgeAPIURL,
-      token: forgeToken,
-      ...(process.env["FACTORY_FORGEJO_ADMIN_TOKEN"]
-        ? { adminToken: process.env["FACTORY_FORGEJO_ADMIN_TOKEN"] }
-        : {}),
-    }),
-    apiURL: forgeAPIURL,
-    publicURL: forgePublicOrigin,
-    owner: forgeOwner,
-  });
-  const sourceProtocol = createWorkspaceSourceProtocol(workspaceSources);
-  const projectAppPreviews = createProjectAppPreviews(
-    database,
-    (id) => runtimeHub.appChannels(id),
-    (id, channel) => {
-      const process = runtimeHub.processes(id).find((candidate) => candidate.name === channel);
-      return process
-        ? {
-            state: process.state,
-            ...(process.exitCode === undefined ? {} : { exitCode: process.exitCode }),
-          }
-        : undefined;
-    },
-  );
-  const idleCompute = createIdleCompute(database, runtimeHub, runtimeController);
-  const developerEditors = createDeveloperIDEController(database);
-  const developerIDEEdge = createDeveloperIDEEdge(
-    database,
-    developerEditors,
-    workspaceSources,
-    factoryOrigin,
-    createDeveloperIDERuntime(database, runtimeController, runtimeHub, runtimeAccess, {
-      view: (changeID, userID) => changeWriters.view(changeID, userID),
-      takeOver: (...args) => changeWriters.takeOver(...args),
-      activity: (changeID, userID, epoch, kind) =>
-        changeWriters.activity(changeID, userID, epoch, kind),
-      request: (...args) => changeWriters.request(...args),
-      release: (...args) => changeWriters.release(...args),
-      approve: (...args) => changeWriters.approve(...args),
-      takeIdle: (...args) => changeWriters.takeIdle(...args),
-    }),
-    workspaceCollaboration,
-  );
-  const revokeAccountAccess = createAccountRevocation({
-    database,
-    sweepRuntime: () => runtimeAccess.sweep(),
-    reconcileEditor: (userID) => developerIDEEdge.sweep(userID),
-    reconcileSources: (userID) => workspaceSources.reconcileUserAccess(userID),
-    stopRuntime: (attemptID) => runtimeController.stop(attemptID),
-    stopAgent: async (changeID) => agentController?.stop(changeID),
-    reconcileForge: async (userID) => forgeAccess?.reconcile(userID),
-  });
-  const accessRevocation = createAccessRevocation(database, revokeAccountAccess);
-  const forgeIdentityRoutes = createForgeIdentityRoutes({
-    database,
-    identity: factoryAuth,
-    forgeOrigin: forgePublicOrigin,
-    discoveryURL:
-      process.env["FACTORY_FORGE_DISCOVERY_URL"] ??
-      `${factoryOrigin}/api/auth/.well-known/openid-configuration`,
-    reconcile: accessRevocation.drain,
-  });
-  const accessService = createAccessService({
-    database,
-    identity: factoryAuth,
-    async revokeMember(projectID, userID) {
-      await runtimeAccess.revokeMember(projectID, userID);
-      await workspaceSources.revokeMember(projectID, userID);
-      await developerEditors.revokeMember(projectID, userID);
-      await developerIDEEdge.revokeUser(userID);
-    },
-    revokeAccount: revokeAccountAccess,
-    forgeOrigin: forgeAccess ? forgePublicOrigin : undefined,
-    mcpAuthorization: factoryAuth,
-  });
-  const observeRecoveredRuntimes = await runtimeController.recover();
-  await workspaceSources.recover();
-  await developerEditors.recover();
-  const changeController: ReturnType<typeof createChangeController> = createChangeController(
-    database,
-    runtimeController,
-    async (changeID) => {
-      await agentController?.dispatchPending(changeID);
-    },
-    async (changeID) => {
-      if (!forgeAccess) throw new CommandError("unavailable", "Forge protection is not configured");
-      // Native branch creation itself is a protected write. Only the existing
-      // Factory control identity may create it; developers remain excluded.
-      await forgeAccess.protectChange(changeID, [forgeOwner]);
-    },
-  );
-  await changeController.recover();
-  await buildBrowserController.recover();
-  const changeWriters = createChangeWriterController({
-    database,
-    runtime: runtimeController,
-    stopAgent: (changeID) => agentController.stop(changeID),
-    agentUsername: forgeOwner,
-    fenceSource: workspaceSources.fenceChange,
-    protect: async (changeID, writers) => {
-      if (!forgeAccess)
-        throw new CommandError("unavailable", "Forge writing authority is not configured");
-      await forgeAccess.protectChange(changeID, writers);
-    },
-  });
-  agentController = createAgentController(
-    database,
-    runtimeHub,
-    runtimeController,
-    buildBrowserController,
-    changeWriters,
-    (target, signal) => runtimeController.settleRetainedInputStop(target, signal),
-  );
-  await agentController.recover();
-  const implementationOrders = createImplementationOrders(
-    database,
-    changeController,
-    agentController,
-  );
-  deliveryController = createDeliveryController(
-    database,
-    runtimeController,
-    agentController,
-    async (changeID) => {
-      if (!forgeAccess)
-        throw new CommandError("unavailable", "Forge branch retirement is not configured");
-      await forgeAccess.protectChange(changeID, []);
-    },
-    undefined,
-    createChangeIntegration(database, runtimeHub, agentController, runtimeController),
-  );
-  const ticketTrash = createTicketTrashController(
-    database,
-    runtimeController,
-    agentController,
-    deliveryController,
-  );
-  await ticketTrash.recover();
-  await deliveryController.recover();
-  knowledgeController = createKnowledgeController(database);
-  await knowledgeController.recover();
-  projectAgentController = createProjectAgentController(
-    database,
-    knowledgeController,
-    mcpConnections,
-    (conversationID, contextID) => agentController.retainedMessages(conversationID, contextID),
-  );
-  await projectAgentController.recover();
-  const monitoringController = createMonitoringController(
-    database,
-    runtimeSecret,
-    factoryOrigin,
-    (projectId) => {
-      void monitoringWorker.project(projectId).catch(reportFailure("Monitoring project run"));
-    },
-  );
-  const monitoringWorker = createMonitoringWorker(database, {
-    mcp: mcpConnections,
-    code: knowledgeController,
-    changes: changeController,
-    agent: agentController,
-    delivery: deliveryController,
-    signingKey: runtimeSecret,
-  });
-  const monitoringRoutes = createMonitoringRoutes(monitoringController);
-  await monitoringWorker.recover();
-  await accessRevocation.start();
+  const hooks = createWiringHooks();
 
-  function sameRuntimeOrigin(request: Request) {
-    const origin = request.headers.get("origin");
-    return (
-      origin !== null && new URL(origin).origin === factoryRequestURL(request, factoryOrigin).origin
-    );
-  }
+  const platform = await wirePlatform({ config, database, runtimeSecret });
+  const runtime = await wireRuntime({
+    config,
+    database,
+    runtimeSecret,
+    nativeSetup,
+    platform,
+    hooks,
+  });
+  const product = await wireProduct({
+    config,
+    database,
+    runtimeSecret,
+    platform,
+    runtime,
+    hooks,
+  });
+  const services = await wireServices({
+    config,
+    database,
+    runtimeSecret,
+    ...(config.planningCacheEpoch ? { planningCacheEpoch: config.planningCacheEpoch } : {}),
+    platform,
+    runtime,
+    product,
+  });
 
-  async function runtimeReady(attemptID: string) {
-    const [attempt] = await database.db
-      .select({ state: runtimeAttempt.state })
-      .from(runtimeAttempt)
-      .where(eq(runtimeAttempt.id, attemptID));
-    return attempt?.state === "ready";
-  }
-
-  const demandRuntime = createRuntimeDemand(runtimeController, runtimeHub);
-
-  async function requireSession(request: Request) {
-    return factoryAuth.session(request);
-  }
-
-  const preparationForge = createForgejoClient({
-    apiURL: forgeAPIURL,
-    token: forgeToken,
-  });
-  const projectPreparation = createProjectPreparation({
-    database,
-    start: (id) => runtimeController.startProjectPrebuild(id),
-    finish: (id) => runtimeController.status(id, "stopped"),
-    expire: (id) =>
-      runtimeController.status(
-        id,
-        "failed",
-        "Project image preparation exceeded its twelve-minute bound; normal startup remains available",
-      ),
-    head: async (projectID) => {
-      const [project] = await database.db
-        .select({ url: projectTable.repositoryUrl })
-        .from(projectTable)
-        .where(eq(projectTable.id, projectID));
-      if (!project) throw new Error("Project not found");
-      const repository = factoryForgeSource(
-        project.url,
-        forgeAPIURL,
-        forgeOwner,
-        forgePublicOrigin,
-      );
-      return (await preparationForge.getDefaultBranch(repository)).headSha;
-    },
-  });
-  const wikiSourceUpdates = createWikiSourceUpdates({
-    database,
-    forge: createForgejoClient({
-      apiURL: forgeAPIURL,
-      token: forgeToken,
-    }),
-    apiURL: forgeAPIURL,
-    publicURL: forgePublicOrigin,
-    owner: forgeOwner,
-    receiverURL:
-      process.env["FACTORY_WIKI_WEBHOOK_URL"] ??
-      process.env["FACTORY_BASE_URL"] ??
-      `http://127.0.0.1:${process.env["FACTORY_PORT"] ?? "3000"}`,
-    signingKey: process.env["FACTORY_WIKI_WEBHOOK_SECRET"] ?? runtimeSecret,
-    reconcile: (projectID) => knowledgeController.reconcile(projectID),
-    prepareProject: projectPreparation.ensure,
-  });
-  const projectService = createProjectService({
-    database,
-    localRepositoryOrigin: new URL(process.env["FACTORY_FORGEJO_API_URL"] ?? "").origin,
-    publicRepositoryOrigin: forgePublicOrigin,
-    onRegistered: async (projectID, userID, recovering) => {
-      await setupReadiness.start(projectID, userID, false, recovering);
-      await setupInspection.start(projectID, userID, projectID);
-    },
-    forgeOwner: forgeOwner,
-  });
-  const setupReadiness = createSetupReadiness({
-    database,
-    environments: environmentController,
-    signingKey: runtimeSecret,
-    requiredVariables: async (projectID) => {
-      const [project] = await database.db
-        .select({ slug: projectTable.slug, configuration: projectTable.devcontainerPath })
-        .from(projectTable)
-        .where(eq(projectTable.id, projectID));
-      if (!project) throw new Error("Project not found");
-      const repository = { owner: forgeOwner, name: project.slug };
-      const head = await preparationForge.getDefaultBranch(repository);
-      const { readRequiredEnvironmentVariables } = await import("../setup/configuration");
-      return readRequiredEnvironmentVariables(project.configuration, (path) =>
-        preparationForge.getFile(repository, path, head.headSha),
-      );
-    },
-    protection: async (projectID) => {
-      const [project] = await database.db
-        .select({ slug: projectTable.slug, branch: projectTable.defaultBranch })
-        .from(projectTable)
-        .where(eq(projectTable.id, projectID));
-      if (!project) throw new Error("Project not found");
-      await preparationForge.ensureDefaultBranchProtection(
-        { owner: forgeOwner, name: project.slug },
-        project.branch,
-      );
-      await preparationForge.protectSetupWorkflow(
-        { owner: forgeOwner, name: project.slug },
-        project.branch,
-      );
-    },
-    hook: async (projectID) => {
-      await wikiSourceUpdates.ensure(projectID);
-      const [hook] = await database.db
-        .select({ state: wikiSourceUpdate.hookState })
-        .from(wikiSourceUpdate)
-        .where(eq(wikiSourceUpdate.projectId, projectID));
-      if (hook?.state !== "ready") throw new Error("Repository hook needs retry");
-    },
-    wiki: async (projectID, userID, automatic) => {
-      const generation = await knowledgeController.generate(projectID, userID, automatic);
-      if (!generation) throw new Error("Wiki generation was not admitted");
-      return z.uuid().parse(generation["id"]);
-    },
-    prepare: async (projectID) => {
-      await projectPreparation.ensure(projectID);
-      const images = await database.db
-        .selectDistinctOn([projectImagePreparation.environment], {
-          id: projectImagePreparation.id,
-          environment: projectImagePreparation.environment,
-        })
-        .from(projectImagePreparation)
-        .where(eq(projectImagePreparation.projectId, projectID))
-        .orderBy(asc(projectImagePreparation.environment), desc(projectImagePreparation.createdAt));
-      const development = images.find((image) => image.environment === "development")?.id;
-      const preview = images.find((image) => image.environment === "main-preview")?.id;
-      if (!development || !preview) throw new Error("Image preparation was not admitted");
-      return { development, preview };
-    },
-    preview: async (projectID, userID) => {
-      const attempt = await runtimeController.ensureStaging(projectID, userID);
-      if (!attempt) throw new Error("Main-Preview was not admitted");
-      return attempt.id;
-    },
-  });
-  const projectSetup = createProjectSetupController({
-    database,
-    forge: preparationForge,
-    forgeOwner: forgeOwner,
-    forgeOrigin: new URL(forgeAPIURL).origin,
-    secrets: createImportSecrets(),
-    signingKey: runtimeSecret,
-    importOrigins: projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"]),
-    onCreated: async (projectID, userID) => {
-      // Configuration confirmation owns runtime readiness. Creation itself keeps
-      // planning available without starting arbitrary imported Project code.
-      const [intent] = await database.db
-        .select({ kind: projectRepositoryIntent.kind })
-        .from(projectRepositoryIntent)
-        .where(eq(projectRepositoryIntent.projectId, projectID));
-      void setupReadiness
-        .start(projectID, userID, intent?.kind === "starter")
-        .catch(reportFailure("Project preparation needs attention"));
-      if (intent?.kind === "import")
-        void setupInspection
-          .start(projectID, userID, projectID)
-          .catch(reportFailure("Project configuration inspection needs attention"));
-    },
-  });
-  const setupInspection = createSetupInspection({
-    database,
-    forge: preparationForge,
-    forgeURL: forgeAPIURL,
-    forgePublicURL: forgePublicOrigin,
-    forgeOwner: forgeOwner,
-    model: async (projectID, userID, sql) => {
-      const modelID = await modelSettingsController.resolve("planning", sql, { projectID, userID });
-      const reference = await modelConnections.reference("planning", sql);
-      return {
-        modelID,
-        connectionID: reference?.connectionID ?? null,
-        connectionVersion: reference?.version ?? null,
-      };
-    },
-    connection: async (reference) =>
-      reference.connectionID && reference.connectionVersion
-        ? modelConnections.resolve(reference.connectionID, reference.connectionVersion)
-        : installationPlanningConnection(),
-    ready: async (projectID, userID) => {
-      await database.db
-        .insert(projectSetupReadiness)
-        .values({
-          projectId: projectID,
-          task: "configuration",
-          commandId: crypto.randomUUID(),
-          state: "ready",
-        })
-        .onConflictDoUpdate({
-          target: [projectSetupReadiness.projectId, projectSetupReadiness.task],
-          set: { state: "ready", failure: null },
-        });
-      void setupReadiness
-        .start(projectID, userID, false)
-        .catch(reportFailure("Confirmed Project preparation needs attention"));
-    },
-  });
-  await setupInspection
-    .recover()
-    .catch(reportFailure("Project inspection recovery is unavailable"));
-  await projectSetup.recover().catch(reportFailure("Project setup recovery is unavailable"));
-  await setupReadiness
-    .recover()
-    .catch(reportFailure("Project preparation recovery is unavailable"));
-  await projectService.recover().catch(reportFailure("Registered Project recovery is unavailable"));
-
-  const buildDirectory = factoryBuildDirectory();
-  const externalMCP = createExternalFactoryMCP({
-    database,
-    factoryAuth,
-    factoryOrigin,
-    workspaceSources,
-    workspaceSharing,
-    workspaceCommands,
-    workspaceFiles,
-    runtimeController,
-    workspaceCollaboration,
-    runtimeAccess,
-    workspaceSubmission,
-    runtimeHub,
-    projects: projectService,
-    writers: changeWriters,
-  });
-  const planningCacheURL =
-    process.env["FACTORY_ZERO_CACHE_PUBLIC_URL"] ??
-    FACTORY_ZERO_CACHE_URL ??
-    "http://127.0.0.1:4948";
-  const bootstrapService = createBootstrapService({
-    policy: () => factoryAuth.policy,
-    preference: uiPreferenceController.get,
-    planningCacheURL,
-    signingKey: runtimeSecret,
-    ...(process.env["FACTORY_PLANNING_CACHE_EPOCH"]
-      ? { planningCacheEpoch: process.env["FACTORY_PLANNING_CACHE_EPOCH"] }
-      : {}),
-    forgeOrigins: { browser: forgePublicOrigin, transport: forgeTransportOrigin },
-    async modelAvailability() {
-      return Boolean(
-        (process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"]) ||
-          (await database.client.begin((sql) => modelConnections.reference("build", sql))),
-      );
-    },
-  });
-  const serverFunctionEntry = pathToFileURL(resolve(buildDirectory, "server/entry.js")).href;
-  const serverFunctions: typeof import("../start-server") = await import(serverFunctionEntry);
-  const serverFunctionEndpoint = createServerFunctionEndpoint({
-    origin: factoryOrigin,
-    session: requireSession,
-    services: {
-      repositoryMirrors: createRepositoryMirrorController({
-        database,
-        forge: createForgejoClient({ apiURL: forgeAPIURL, token: forgeToken }),
-        apiURL: forgeAPIURL,
-        publicURL: forgePublicOrigin,
-        owner: forgeOwner,
-        signingKey: runtimeSecret,
-        allowedOrigins: projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"]),
-      }),
-      learning: learningService,
-      inbox: createInboxService(database),
-      releases: releaseController,
-      projects: projectService,
-      delivery: createDeliveryService({ access: accessController, controller: deliveryController }),
-      runtime: createRuntimeService({
-        database,
-        access: accessController,
-        changes: changeController,
-        runtime: runtimeController,
-        previews: projectAppPreviews,
-        closeBrowser: (id) => buildBrowserController.closeChange(id),
-        cancelDelivery: (id) => deliveryController.cancel(id),
-        revokeAttempt: (id) => runtimeAccess.revokeAttempt(id),
-        suspendAttempt: (id) => runtimeHub.suspend(id),
-      }),
-      agent: createAgentService({ access: accessController, controller: agentController }),
-      conversations: createConversationService({
-        access: accessController,
-        controller: projectAgentController,
-      }),
-      tickets: createTicketService({
-        database,
-        access: accessController,
-        documents: ticketDocuments,
-        trash: ticketTrash,
-        changes: changeController,
-        agent: agentController,
-        planning: projectAgentController,
-      }),
-      usage: usageService,
-      models: modelService,
-      environments: createEnvironmentService(environmentController, projectPreparation.ensure),
-      access: accessService,
-      bootstrap: bootstrapService,
-      setup: createSetupService({
-        database,
-        drafts: projectSetup,
-        inspection: setupInspection,
-        readiness: setupReadiness,
-      }),
-      skills: skillService,
-      mcp: createMCPService(mcpConnections),
-      inputs: createInputService(monitoringController, accessController),
-      writer: createWriterService(changeWriters, accessController),
-      review: createReviewService({
-        controller: visualReview,
-        access: accessController,
-        admit: (changeID, userID, sql, text, commandID) =>
-          agentController.admitPromptIn(sql, changeID, userID, text, commandID),
-        dispatchPending: (changeID) => agentController.dispatchPending(changeID),
-      }),
-      attachments: attachmentStore,
-      workspaces: createWorkspaceService({
-        sources: workspaceSources,
-        editors: developerEditors,
-        revokeEditor: (userID) => developerIDEEdge.revokeUser(userID),
-        sharing: workspaceSharing,
-        collaboration: workspaceCollaboration,
-        submission: workspaceSubmission,
-        database,
-      }),
-      knowledge: createKnowledgeService({
-        controller: knowledgeController,
-        access: accessController,
-        observeRetry: (projectID, userID, generationID) =>
-          setupReadiness.observeWikiRetry(projectID, userID, generationID),
-      }),
-    },
-    maintenance: () =>
-      process.env["FACTORY_HELM_RELEASE"]
-        ? installationInMaintenance(database)
-        : Promise.resolve(false),
-    requireFresh: (request) => factoryAuth.requireFresh(request),
-    handle: async (request, options) => serverFunctions.default.fetch(request, options),
-    publicFunctionIDs: serverFunctions.publicFunctionIDs,
-    functionIDs: serverFunctions.functionIDs,
-  });
-  const clientDirectory = resolve(buildDirectory, "client");
-  const pageHint = createPageHint(clientDirectory);
-  const staticAssets = createStaticAssets(clientDirectory, async (request) => {
-    const response = await serverFunctions.default.fetch(request, { context: {} });
-    response.headers.set("cache-control", "no-store");
-    response.headers.set("x-content-type-options", "nosniff");
-    if (pageHint) response.headers.append("link", pageHint);
-    return response;
-  });
   return {
-    accessController,
-    agentController,
-    attachmentRoutes,
-    attachmentStore,
-    buildBrowserController,
-    buildBrowserEndpoint,
+    accessController: platform.accessController,
+    agentController: product.agentController,
+    attachmentRoutes: runtime.attachmentRoutes,
+    attachmentStore: runtime.attachmentStore,
+    buildBrowserController: runtime.buildBrowserController,
+    buildBrowserEndpoint: runtime.buildBrowserEndpoint,
     database,
-    demandRuntime,
-    developerIDEEdge,
-    deliveryController,
-    environmentController,
-    environmentSecrets,
-    factoryAuth,
-    factoryHost,
-    factoryOrigin,
-    forgeIdentityRoutes,
-    idleCompute,
-    implementationOrders,
-    knowledgeController,
-    learningWorker,
-    mcpConnections,
-    mcpOAuthCallback,
-    mcpSourceEndpoint,
-    externalMCP,
-    workspaceTransferRoutes,
-    monitoringRoutes,
-    monitoringWorker,
-    observeRecoveredRuntimes,
-    planningCacheURL,
-    projectPreparation,
-    projectAgentController,
-    projectSetup,
-    setupReadiness,
-    relayModel,
-    releaseController,
-    requireSession,
-    reviewMedia,
-    reviewMediaRoutes,
-    runtimeAccess,
-    runtimeController,
-    runtimeEnvironmentEndpoint,
-    runtimeHub,
-    runtimeReady,
-    sameRuntimeOrigin,
-    serverFunctionEndpoint,
-    sourceProtocol,
-    startupID,
-    staticAssets,
-    startFetch: serverFunctions.default.fetch,
-    wikiSourceUpdates,
-    workspaceSources,
-    workspaceSharing,
-    workspaceCommands,
-    accessRevocation,
-    workspaceCollaboration,
-    workspaceSubmission,
-    workspaceFiles,
+    demandRuntime: runtime.demandRuntime,
+    developerIDEEdge: runtime.developerIDEEdge,
+    deliveryController: product.deliveryController,
+    environmentController: platform.environmentController,
+    environmentSecrets: platform.environmentSecrets,
+    factoryAuth: platform.factoryAuth,
+    factoryHost: config.factoryHost,
+    factoryOrigin: config.factoryOrigin,
+    forgeIdentityRoutes: runtime.forgeIdentityRoutes,
+    idleCompute: runtime.idleCompute,
+    implementationOrders: product.implementationOrders,
+    knowledgeController: product.knowledgeController,
+    learningWorker: platform.learningWorker,
+    mcpConnections: platform.mcpConnections,
+    mcpOAuthCallback: platform.mcpOAuthCallback,
+    mcpSourceEndpoint: runtime.mcpSourceEndpoint,
+    externalMCP: services.externalMCP,
+    workspaceTransferRoutes: runtime.workspaceTransferRoutes,
+    monitoringRoutes: product.monitoringRoutes,
+    monitoringWorker: product.monitoringWorker,
+    observeRecoveredRuntimes: runtime.observeRecoveredRuntimes,
+    planningCacheURL: config.planningCacheURL,
+    projectAgentController: product.projectAgentController,
+    projectSetup: product.projectSetup,
+    setupReadiness: product.setupReadiness,
+    relayModel: runtime.relayModel,
+    releaseController: runtime.releaseController,
+    requireSession: platform.requireSession,
+    reviewMedia: runtime.reviewMedia,
+    reviewMediaRoutes: runtime.reviewMediaRoutes,
+    runtimeAccess: runtime.runtimeAccess,
+    runtimeController: runtime.runtimeController,
+    runtimeEnvironmentEndpoint: runtime.runtimeEnvironmentEndpoint,
+    runtimeHub: runtime.runtimeHub,
+    runtimeReady: runtime.runtimeReady,
+    sameRuntimeOrigin: runtime.sameRuntimeOrigin,
+    serverFunctionEndpoint: services.serverFunctionEndpoint,
+    sourceProtocol: runtime.sourceProtocol,
+    startupID: config.startupID,
+    staticAssets: services.staticAssets,
+    startFetch: services.startFetch,
+    wikiSourceUpdates: product.wikiSourceUpdates,
+    workspaceSources: runtime.workspaceSources,
+    workspaceSharing: runtime.workspaceSharing,
+    workspaceCommands: runtime.workspaceCommands,
+    accessRevocation: runtime.accessRevocation,
+    workspaceCollaboration: runtime.workspaceCollaboration,
+    workspaceSubmission: runtime.workspaceSubmission,
+    workspaceFiles: runtime.workspaceFiles,
   };
 }
 export type FactoryApplication = Awaited<ReturnType<typeof createFactoryApplication>>;

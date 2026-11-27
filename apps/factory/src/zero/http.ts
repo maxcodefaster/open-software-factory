@@ -1,9 +1,9 @@
 import { getQuery } from "@rocicorp/zero";
 import { handleQueryRequest, PushProcessor } from "@rocicorp/zero/server";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { zeroQueries, zeroSchema } from "../../../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../../../packages/zero-schema/src/server";
+import type { createDatabase } from "#db/client";
+import { zeroQueries, zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { createAccessController } from "../access/api";
 
 type Database = ReturnType<typeof createDatabase>;

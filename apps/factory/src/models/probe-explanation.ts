@@ -1,4 +1,4 @@
-import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
 
 function origin(endpoint: string | null | undefined) {
   if (!endpoint) return undefined;

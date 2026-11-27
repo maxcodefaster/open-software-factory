@@ -1,9 +1,9 @@
 import { createMemo, createSignal, Errored, Loading, lazy, Match, Show, Switch } from "solid-js";
-import { defaultDesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
+import { defaultDesktopBackgroundKey } from "#interface-domain/background";
 import { loadBootstrap } from "./bootstrap/client";
 import { plainErrorMessage } from "./command-error";
-import { SignIn } from "./sign-in";
 import { MCPAuthorization, mcpAuthorizationQuery } from "./mcp/authorization";
+import { SignIn } from "./sign-in";
 
 const AuthenticatedFactory = lazy(async () => ({
   default: (await import("./factory")).AuthenticatedFactory,

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseAllDocuments } from "yaml";
-import { createForgejoClient } from "../../packages/forge/src/forge";
+import { createForgejoClient } from "#forge/forge";
 import { eventually } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 

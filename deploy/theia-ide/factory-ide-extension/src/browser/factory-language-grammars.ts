@@ -1,21 +1,21 @@
-import { injectable } from "@theia/core/shared/inversify";
-import * as monaco from "@theia/monaco-editor-core";
-import type { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
-import type { TextmateRegistry } from "@theia/monaco/lib/browser/textmate/textmate-registry";
-import typescript from "@shikijs/langs/typescript";
-import tsx from "@shikijs/langs/tsx";
-import javascript from "@shikijs/langs/javascript";
-import jsx from "@shikijs/langs/jsx";
 import css from "@shikijs/langs/css";
+import dockerfile from "@shikijs/langs/dockerfile";
 import html from "@shikijs/langs/html";
+import javascript from "@shikijs/langs/javascript";
 import json from "@shikijs/langs/json";
 import jsonc from "@shikijs/langs/jsonc";
+import jsx from "@shikijs/langs/jsx";
 import markdown from "@shikijs/langs/markdown";
-import yaml from "@shikijs/langs/yaml";
-import sql from "@shikijs/langs/sql";
-import shell from "@shikijs/langs/shellscript";
-import dockerfile from "@shikijs/langs/dockerfile";
 import python from "@shikijs/langs/python";
+import shell from "@shikijs/langs/shellscript";
+import sql from "@shikijs/langs/sql";
+import tsx from "@shikijs/langs/tsx";
+import typescript from "@shikijs/langs/typescript";
+import yaml from "@shikijs/langs/yaml";
+import { injectable } from "@theia/core/shared/inversify";
+import type { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
+import type { TextmateRegistry } from "@theia/monaco/lib/browser/textmate/textmate-registry";
+import * as monaco from "@theia/monaco-editor-core";
 
 const codeConfiguration: monaco.languages.LanguageConfiguration = {
   comments: { lineComment: "//", blockComment: ["/*", "*/"] },

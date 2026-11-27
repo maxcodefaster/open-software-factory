@@ -1,4 +1,4 @@
-import { LearningResultRejected } from "../../../../packages/conversation-domain/src/learning";
+import { LearningResultRejected } from "#conversation-domain/learning";
 
 const semanticPredicates = new Set([
   "Work review must account for every admitted case exactly once",

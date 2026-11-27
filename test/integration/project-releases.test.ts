@@ -1,15 +1,12 @@
 import { expect, test } from "bun:test";
+import { factorySigningSecret } from "#auth/signing-secret";
+import type { createForgejoClient } from "#forge/forge";
+import type { createForgejoReleases } from "#forge/releases";
+import { releaseContract, releasePackageOwner } from "#project-domain/release";
+import { runtimeIdentity, runtimePublicationToken } from "#runtime-domain/identity";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { createReleaseController } from "../../apps/factory/src/releases/controller";
 import type { ReleaseCredential } from "../../apps/factory/src/releases/secrets";
-import { factorySigningSecret } from "../../packages/auth/src/signing-secret";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import type { createForgejoReleases } from "../../packages/forge/src/releases";
-import { releaseContract, releasePackageOwner } from "../../packages/project-domain/src/release";
-import {
-  runtimeIdentity,
-  runtimePublicationToken,
-} from "../../packages/runtime-domain/src/identity";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
 
@@ -93,8 +90,8 @@ test("release recovery retains immutable intent, never depends on a consumer and
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Release proof',${`${id}@factory.invalid`},true)`;
       await database.client`INSERT INTO factory.account_access(user_id) VALUES(${id}) ON CONFLICT DO NOTHING`;
       if (id === userID) {
-        await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-          VALUES(${projectID},${`release-${projectID.slice(0, 8)}`},'Release proof','https://forge.example/factory/project.git','main','.devcontainer/devcontainer.json',${userID})`;
+        await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+          VALUES(${projectID},${`release-${projectID.slice(0, 8)}`},'Release proof','https://forge.example/factory/project.git','main','.factory/actor-template.json',${userID})`;
       }
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${projectID},${id},${role},${id === userID},${userID})`;
@@ -126,7 +123,23 @@ test("release recovery retains immutable intent, never depends on a consumer and
     // A retained admitted intent models restart after confirmation, not a bypass of public admission.
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,notes,created_by)
       VALUES(${releaseID},${projectID},${releaseID},'1.2.3',${sha},'approved notes',${userID})`;
-    await database.client`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal) VALUES(${releaseID},${releaseID},${releaseID},1)`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${releaseID},'releases.attempt','project_release',${releaseID},${`releases.attempt:${releaseID}`},
+        ${`releases.attempt.ordinal:${releaseID}:1`},'pending',
+        ${JSON.stringify({
+          id: releaseID,
+          releaseId: releaseID,
+          commandId: releaseID,
+          ordinal: 1,
+          dispatchIntendedAt: null,
+          runId: null,
+          runnerId: null,
+          runnerUuid: null,
+          runnerToken: null,
+          jobHandle: null,
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::jsonb,${userID})`;
     await controller.reconcile(userID, projectID, releaseID);
     expect((await controller.view(userID, projectID)).releases[0]?.state).toBe("uncertain");
     await controller.recover();
@@ -160,21 +173,42 @@ test("release recovery retains immutable intent, never depends on a consumer and
     const contract = releaseContract.parse({ schemaVersion: 1, images: ["web"] });
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,state,created_by)
       VALUES(${publicationID},${projectID},${publicationID},'1.2.4',${sha},'.forgejo/workflows/factory-release.yml',${JSON.stringify(contract)}::text::jsonb,'admitted fixture','running',${userID})`;
-    await database.client`INSERT INTO factory.project_environment(project_id,environment,version,secret_key)
-      VALUES(${projectID},'development',1,'synthetic-development-secrets')`;
-    await database.client`INSERT INTO factory.release_attempt(
-      id,release_id,command_id,ordinal,state,run_id,job_handle,runner_uuid,runner_token,dispatch_intended_at)
-      VALUES(${publicationID},${publicationID},${publicationID},1,'running',71,
-        'owned-job-handle',${crypto.randomUUID()},'owned-publication-runner-token',now())`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'environments.environment','project',${projectID},
+        ${`environments.environment:${projectID}:development`},'saved',
+        ${JSON.stringify({
+          projectId: projectID,
+          environment: "development",
+          version: 1,
+          manifest: { variables: [] },
+          secretKey: "synthetic-development-secrets",
+        })}::jsonb,${userID})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${publicationID},'releases.attempt','project_release',${publicationID},
+        ${`releases.attempt:${publicationID}`},${`releases.attempt.ordinal:${publicationID}:1`},'running',
+        ${JSON.stringify({
+          id: publicationID,
+          releaseId: publicationID,
+          commandId: publicationID,
+          ordinal: 1,
+          dispatchIntendedAt: new Date().toISOString(),
+          runId: 71,
+          runnerId: null,
+          runnerUuid: crypto.randomUUID(),
+          runnerToken: "owned-publication-runner-token",
+          jobHandle: "owned-job-handle",
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::jsonb,${userID})`;
     jobs = await nativeJobsFixture(database, projectID);
     const execution = jobs;
     expect(await execution.startPublication(publicationID, userID)).toBe(identity.attemptID);
     const [bound] = await database.client`
       SELECT provision.owner_id,provision.intent->'environment' AS environment,
-        provision.intent->>'jobHandle' AS job, binding.actor_uid IS NOT NULL AS actor
-      FROM factory.substrate_isolated provision
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=provision.runtime_attempt_id
-      WHERE provision.runtime_attempt_id=${identity.attemptID}`;
+        provision.intent->>'jobHandle' AS job, attempt.actor_uid IS NOT NULL AS actor
+      FROM factory.substrate_provision provision
+      JOIN factory.runtime_attempt attempt ON attempt.id=provision.runtime_attempt_id
+      WHERE provision.kind IN ('staging','publication') AND provision.runtime_attempt_id=${identity.attemptID}`;
     expect(bound).toEqual({
       owner_id: publicationID,
       environment: { environment: "development", version: 0, secretKey: null },
@@ -183,14 +217,22 @@ test("release recovery retains immutable intent, never depends on a consumer and
     });
     await expect(
       (async () => {
-        await database.client`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key)
-        VALUES(${identity.attemptID},'development',1,'synthetic-development-secrets')`;
+        await database.client`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload)
+          VALUES(${crypto.randomUUID()},'runtime.environment_intent','runtime_attempt',${identity.attemptID},
+            ${`runtime.environment_intent:${identity.attemptID}`},'recorded',
+            ${JSON.stringify({
+              environment: "development",
+              version: 1,
+              secretKey: "synthetic-development-secrets",
+            })}::jsonb)`;
       })(),
-    ).rejects.toThrow("matching active create intent");
+    ).rejects.toThrow("operation_idempotency_key_key");
     await expect(
-      database.client`UPDATE factory.runtime_environment_intent
-        SET version=1,secret_key='synthetic-development-secrets'
-        WHERE runtime_attempt_id=${identity.attemptID}`.execute(),
+      database.client`UPDATE factory.operation
+        SET payload=payload || ${JSON.stringify({ version: 1, secretKey: "synthetic-development-secrets" })}::jsonb
+        WHERE kind='runtime.environment_intent' AND scope_type='runtime_attempt'
+          AND scope_id=${identity.attemptID}`.execute(),
     ).rejects.toThrow("immutable");
     expect(
       await database.client.begin((sql) => freezeRuntimeEnvironment(sql, identity.attemptID)),
@@ -305,10 +347,11 @@ test("release recovery retains immutable intent, never depends on a consumer and
     // End and credential revocation are retained even when native cleanup is
     // unavailable. Do not mark the Actor cleaned or commission another job.
     const [unsettled] = await database.client`SELECT release.ended_at IS NOT NULL AS ended,
-      attempt.cleaned_at IS NOT NULL AS cleaned,binding.deleted_at IS NOT NULL AS deleted
+      attempt.completed_at IS NOT NULL AS cleaned,runtime.deleted_at IS NOT NULL AS deleted
       FROM factory.project_release release
-      JOIN factory.release_attempt attempt ON attempt.release_id=release.id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.runtime_attempt_id
+      JOIN factory.operation attempt ON attempt.kind='releases.attempt' AND attempt.scope_type='project_release'
+        AND attempt.scope_id=release.id::text
+      JOIN factory.runtime_attempt runtime ON runtime.id::text=attempt.payload->>'runtimeAttemptId'
       WHERE release.id=${publicationID}`;
     expect(unsettled).toEqual({ ended: true, cleaned: false, deleted: false });
     expect(
@@ -326,11 +369,11 @@ test("release recovery retains immutable intent, never depends on a consumer and
     await controlled.recover();
     expect(revoked).toBe(1);
     const [deleted] = await database.client`SELECT deleted_at IS NOT NULL AS confirmed
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${identity.attemptID}`;
+      FROM factory.runtime_attempt WHERE id=${identity.attemptID}`;
     expect(deleted).toEqual({ confirmed: true });
     expect(
-      await database.client`SELECT id FROM factory.release_attempt
-      WHERE id=${publicationID} AND cleaned_at IS NOT NULL`,
+      await database.client`SELECT id FROM factory.operation
+      WHERE id=${publicationID} AND kind='releases.attempt' AND completed_at IS NOT NULL`,
     ).toHaveLength(1);
     expect(execution.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);
     expect(execution.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
@@ -362,11 +405,40 @@ test("release recovery retains immutable intent, never depends on a consumer and
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,created_by)
       VALUES(${artifactID},${projectID},${artifactID},'1.2.5',${sha},'.forgejo/workflows/factory-release.yml',
         ${JSON.stringify(artifactContract)}::text::jsonb,'admitted artifact recovery',${userID})`;
-    await database.client`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal)
-      VALUES(${artifactID},${artifactID},${artifactID},1)`;
-    await database.client`INSERT INTO factory.release_access(id,project_id,command_id,name,scope,state,username,secret_key,created_by,release_id)
-      VALUES(${grantID},${projectID},${grantID},'retained publisher','publish','active',${`fr-${grantID}`},
-        ${`release-access/${projectID}/${grantID}`},${userID},${artifactID})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${artifactID},'releases.attempt','project_release',${artifactID},${`releases.attempt:${artifactID}`},
+        ${`releases.attempt.ordinal:${artifactID}:1`},'pending',
+        ${JSON.stringify({
+          id: artifactID,
+          releaseId: artifactID,
+          commandId: artifactID,
+          ordinal: 1,
+          dispatchIntendedAt: null,
+          runId: null,
+          runnerId: null,
+          runnerUuid: null,
+          runnerToken: null,
+          jobHandle: null,
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::jsonb,${userID})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${grantID},'releases.access','project',${projectID},${`releases.access:${grantID}`},
+        ${`releases.access.publish:${artifactID}`},'active',
+        ${JSON.stringify({
+          id: grantID,
+          projectId: projectID,
+          commandId: grantID,
+          name: "retained publisher",
+          scope: "publish",
+          username: `fr-${grantID}`,
+          secretKey: `release-access/${projectID}/${grantID}`,
+          createdBy: userID,
+          releaseId: artifactID,
+          revokedAt: null,
+          tokenId: null,
+          replacesId: null,
+        })}::jsonb,${userID})`;
     store.set(`release-publish/${projectID}/${grantID}`, {
       username: `fr-${grantID}`,
       password: "synthetic-password",
@@ -447,7 +519,9 @@ test("release recovery retains immutable intent, never depends on a consumer and
     });
     await expect(
       (async () => {
-        await database.client`UPDATE factory.release_attempt SET run_id=91 WHERE id=${artifactID}`;
+        await database.client`UPDATE factory.operation
+          SET payload=jsonb_set(payload,'{runId}','91'::jsonb)
+          WHERE id=${artifactID} AND kind='releases.attempt'`;
       })(),
     ).rejects.toThrow();
     await expect(

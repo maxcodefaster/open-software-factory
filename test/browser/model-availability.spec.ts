@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { modelSettingsView } from "#conversation-domain/model-settings";
+import { createDatabase } from "#db/client";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -86,8 +86,8 @@ test("saving a first managed Coding model enables Implement without reloading th
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Managed model readiness','https://example.invalid/managed-model.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Managed model readiness','https://example.invalid/managed-model.git','main','.factory/actor-template.json',${session.user.id})`;
     created = true;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
       VALUES(${ticketID},${projectID},'Ready after model setup','Show the exact total.','ready',${session.user.id})`;

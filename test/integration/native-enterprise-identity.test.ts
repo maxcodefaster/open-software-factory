@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { createFactoryAuth } from "../../packages/auth/src/server";
-import { forgeClientID } from "../../packages/auth/src/forge-issuer";
+import { forgeClientID } from "#auth/forge-issuer";
+import { createFactoryAuth } from "#auth/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 function cookies(response: Response) {
@@ -190,7 +190,7 @@ test("native OIDC binds verified issuer/subject, rejects nonce/signature/replay/
     const forgeCallback = "https://forge.example.test/user/oauth2/Factory/callback";
     await identity.ensureForgeClient(new Headers({ cookie: cookies(adminLogin) }), forgeCallback);
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`sso-forge-${projectID}`},'Owned SSO Forge','https://example.invalid/repo.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},${`sso-forge-${projectID}`},'Owned SSO Forge','https://example.invalid/repo.git','main','.factory/actor-template.json',${session.user.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${session.user.id},'developer',${session.user.id})`;
     const authorize = new URL(`${fixture.base}/api/auth/oauth2/authorize`);
     for (const [key, value] of Object.entries({
@@ -233,7 +233,9 @@ test("native OIDC binds verified issuer/subject, rejects nonce/signature/replay/
       expect(rejected.response.headers.get("set-cookie") ?? "").not.toContain("session_token");
       expect(rejected.response.headers.get("location")).not.toBe(fixture.base);
     }
-    expect(await database.client`SELECT * FROM factory.external_identity`).toHaveLength(1);
+    expect(
+      await database.client`SELECT * FROM factory.operation WHERE kind='access.external_identity'`,
+    ).toHaveLength(1);
     const renamed = await login({ sub: "subject-a", email: "renamed@example.test" });
     const renamedSession = await identity.session(
       new Request(fixture.base, { headers: { cookie: cookies(renamed.response) } }),

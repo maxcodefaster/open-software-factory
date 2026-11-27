@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
-import { identityConfiguration } from "../../../../packages/identity-domain/src/configuration";
+import { identityConfiguration } from "#identity-domain/configuration";
 import { protocolRequest } from "../api-client";
 import { plainErrorMessage } from "../command-error";
 import {

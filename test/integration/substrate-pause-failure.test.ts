@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 test("native Pause retains a bounded control-free failure without discarding Source, replacing the Actor or repeating an uncertain checkpoint", async () => {
@@ -71,7 +71,7 @@ test("native Pause retains a bounded control-free failure without discarding Sou
       { uid: string; checkpoint: unknown; deleting: unknown }[]
     >`
       SELECT actor_uid AS uid,checkpoint,delete_intended_at AS deleting
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(binding?.uid).toBe(originalUID);
     expect(binding?.checkpoint).toBeNull();
     expect(binding?.deleting).toBeNull();

@@ -1,17 +1,17 @@
 import { and, asc, desc, eq, gt, isNull, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { unknownCounters } from "../../../../packages/conversation-domain/src/usage";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { unknownCounters } from "#conversation-domain/usage";
+import type { createDatabase } from "#db/client";
 import {
   agentTurn,
   changeAgentTurnIntent,
   modelConnectionVersion,
+  operation as operationTable,
   usageOperation,
-  usageReplayCursor,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { type createOpenCodeClient, listOpenCodeSessionTree } from "../agent/opencode-api";
 import { createContractRates } from "./contract-rates";
-import { createUsageJournal } from "./journal";
+import { createUsageJournal, usageReplayCursorKey } from "./journal";
 import { drainOpenCodeUsage } from "./opencode";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -53,14 +53,11 @@ export function createRecordedOpenCodeUsage(database: Database) {
     for (const sessionID of sessionIDs ?? (await listOpenCodeSessionTree(client, root))) {
       const [boundary] = next
         ? await database.db
-            .select({ start_sequence: usageReplayCursor.startSequence })
-            .from(usageReplayCursor)
-            .where(
-              and(
-                eq(usageReplayCursor.operationId, next.id),
-                eq(usageReplayCursor.sessionId, sessionID),
-              ),
-            )
+            .select({
+              start_sequence: sql<number>`(${operationTable.payload}->>'startSequence')::bigint::float8`,
+            })
+            .from(operationTable)
+            .where(eq(operationTable.idempotencyKey, usageReplayCursorKey(next.id, sessionID)))
         : [];
       const ceiling = boundary ? Number(boundary.start_sequence) : null;
       await drainOpenCodeUsage({

@@ -1,28 +1,28 @@
 import { render } from "@solidjs/web";
 import { createSignal, onSettled, Show } from "solid-js";
-import { InboxWorkspace } from "../../apps/factory/src/inbox/workspace";
 import {
-  initialInboxPosition,
-  nextInboxQueueItem,
-  type InboxQueue,
-} from "../../apps/factory/src/inbox/navigation";
-import { InboxSourceNavigation } from "../../apps/factory/src/inbox/source-navigation";
-import { TicketPeople } from "../../apps/factory/src/inbox/ticket-people";
-import { MentionSupport } from "../../apps/factory/src/inbox/mentions";
+  type InterviewQuestion,
+  normalizeInterviewAnswer,
+} from "#conversation-domain/conversation";
+import { ConversationEntryCard } from "../../apps/factory/src/conversation-components";
+import { DockButton } from "../../apps/factory/src/dock";
+import { markdownHTML } from "../../apps/factory/src/editor/client";
+import { revealInboxSource } from "../../apps/factory/src/inbox/client";
 import type {
   AttentionPerson,
   InboxItem,
   TicketAttention,
 } from "../../apps/factory/src/inbox/contracts";
-import { DockButton } from "../../apps/factory/src/dock";
-import { ReviewComposer } from "../../apps/factory/src/review/composer";
-import { markdownHTML } from "../../apps/factory/src/markdown";
-import { revealInboxSource } from "../../apps/factory/src/inbox/client";
-import { ConversationEntryCard } from "../../apps/factory/src/conversation-components";
+import { MentionSupport } from "../../apps/factory/src/inbox/mentions";
 import {
-  type InterviewQuestion,
-  normalizeInterviewAnswer,
-} from "../../packages/conversation-domain/src/conversation";
+  type InboxQueue,
+  initialInboxPosition,
+  nextInboxQueueItem,
+} from "../../apps/factory/src/inbox/navigation";
+import { InboxSourceNavigation } from "../../apps/factory/src/inbox/source-navigation";
+import { TicketPeople } from "../../apps/factory/src/inbox/ticket-people";
+import { InboxWorkspace } from "../../apps/factory/src/inbox/workspace";
+import { ReviewComposer } from "../../apps/factory/src/review/composer";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";

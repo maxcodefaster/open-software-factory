@@ -53,9 +53,18 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.url === "/health") {
-    const support = await fetch("http://support:4100/").then((result) => result.text());
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ status: "ok", support }));
+    try {
+      const result = await fetch("http://127.0.0.1:4100/", {
+        signal: AbortSignal.timeout(1000),
+      });
+      if (!result.ok) throw new Error("Support is not ready");
+      const support = await result.text();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "ok", support }));
+    } catch {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "starting" }));
+    }
     return;
   }
   if (request.url === "/source") {

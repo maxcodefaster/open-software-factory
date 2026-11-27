@@ -1,15 +1,7 @@
 import { createHmac } from "node:crypto";
-import { and, asc, desc, eq, sql as expression } from "drizzle-orm";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  environmentWrite as environmentWriteTable,
-  projectEnvironment,
-  projectImagePreparation,
-} from "../../../../packages/db/src/schema";
+import { and, asc, eq, sql as expression } from "drizzle-orm";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { operation as operationTable } from "#db/schema";
 import {
   type EnvironmentBundle,
   type EnvironmentManifest,
@@ -20,23 +12,42 @@ import {
   environmentWrite,
   type ProjectEnvironment,
   replaceEnvironment,
-} from "../../../../packages/project-domain/src/environment";
+} from "#project-domain/environment";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { type EnvironmentSecrets, emptyEnvironment, type StoredEnvironment } from "./openbao";
 
+const ENVIRONMENT_KIND = "environments.environment";
+const ENVIRONMENT_SCOPE_TYPE = "project";
+const environmentIdempotencyKey = (projectID: string, environment: ProjectEnvironment) =>
+  `${ENVIRONMENT_KIND}:${projectID}:${environment}`;
+const ENVIRONMENT_WRITE_KIND = "environments.write";
+const ENVIRONMENT_WRITE_SCOPE_TYPE = "project_environment";
+const environmentWriteScopeId = (projectID: string, environment: ProjectEnvironment) =>
+  `${projectID}:${environment}`;
+const environmentWriteActiveKey = (projectID: string, environment: ProjectEnvironment) =>
+  `${ENVIRONMENT_WRITE_KIND}:${projectID}:${environment}`;
+const environmentWriteIdempotencyKey = (secretKey: string) =>
+  `${ENVIRONMENT_WRITE_KIND}:${secretKey}`;
+
 type Database = ReturnType<typeof createDatabase>;
-type SettingsRow = Pick<
-  typeof projectEnvironment.$inferSelect,
-  "version" | "manifest" | "secretKey"
->;
-type WriteRow = Pick<
-  typeof environmentWriteTable.$inferSelect,
-  "environment" | "baseVersion" | "fingerprint" | "secretKey" | "state" | "createdBy"
-> & {
-  commandID: string;
-  projectID: string;
+type SettingsRow = {
+  version: number;
   manifest: EnvironmentManifest;
+  secretKey: string | null;
+};
+type WritePayload = {
+  projectID: string;
+  environment: ProjectEnvironment;
+  baseVersion: number;
+  fingerprint: string;
+  manifest: EnvironmentManifest;
+  secretKey: string;
+};
+type WriteRow = WritePayload & {
+  commandID: string;
+  state: "write-intended" | "committed" | "discarded";
+  createdBy: string;
 };
 
 export function createEnvironmentController(
@@ -62,36 +73,51 @@ export function createEnvironmentController(
     environment: ProjectEnvironment,
   ): Promise<SettingsRow> {
     const [row] = await drizzleTransaction(sql)
-      .select({
-        version: projectEnvironment.version,
-        manifest: projectEnvironment.manifest,
-        secretKey: projectEnvironment.secretKey,
-      })
-      .from(projectEnvironment)
+      .select({ payload: operationTable.payload })
+      .from(operationTable)
       .where(
         and(
-          eq(projectEnvironment.projectId, projectID),
-          eq(projectEnvironment.environment, environment),
+          eq(operationTable.kind, ENVIRONMENT_KIND),
+          eq(operationTable.scopeType, ENVIRONMENT_SCOPE_TYPE),
+          eq(operationTable.scopeId, projectID),
+          eq(operationTable.idempotencyKey, environmentIdempotencyKey(projectID, environment)),
         ),
       );
-    return row ?? { version: 0, manifest: { variables: [], registries: [] }, secretKey: null };
+    if (!row) return { version: 0, manifest: { variables: [] }, secretKey: null };
+    return {
+      version: Number(row.payload["version"] ?? 0),
+      manifest: environmentManifest.parse(row.payload["manifest"] ?? { variables: [] }),
+      secretKey: typeof row.payload["secretKey"] === "string" ? row.payload["secretKey"] : null,
+    };
   }
-  async function writeRow(sql: DatabaseTransaction, commandID: string) {
+  async function writeRow(
+    sql: DatabaseTransaction,
+    commandID: string,
+  ): Promise<WriteRow | undefined> {
     const [row] = await drizzleTransaction(sql)
       .select({
-        commandID: environmentWriteTable.commandId,
-        projectID: environmentWriteTable.projectId,
-        environment: environmentWriteTable.environment,
-        baseVersion: environmentWriteTable.baseVersion,
-        fingerprint: environmentWriteTable.fingerprint,
-        manifest: environmentWriteTable.manifest,
-        secretKey: environmentWriteTable.secretKey,
-        state: environmentWriteTable.state,
-        createdBy: environmentWriteTable.createdBy,
+        commandID: operationTable.id,
+        state: operationTable.state,
+        createdBy: operationTable.createdBy,
+        payload: operationTable.payload,
       })
-      .from(environmentWriteTable)
-      .where(eq(environmentWriteTable.commandId, commandID));
-    return row ? { ...row, manifest: environmentManifest.parse(row.manifest) } : undefined;
+      .from(operationTable)
+      .where(
+        and(eq(operationTable.id, commandID), eq(operationTable.kind, ENVIRONMENT_WRITE_KIND)),
+      );
+    if (!row?.createdBy) return undefined;
+    const payload = row.payload as WritePayload;
+    return {
+      commandID: row.commandID,
+      projectID: payload.projectID,
+      environment: payload.environment,
+      baseVersion: Number(payload.baseVersion),
+      fingerprint: payload.fingerprint,
+      manifest: environmentManifest.parse(payload.manifest),
+      secretKey: payload.secretKey,
+      state: row.state as WriteRow["state"],
+      createdBy: row.createdBy,
+    };
   }
   async function settle(row: WriteRow, stored: StoredEnvironment) {
     if (
@@ -117,36 +143,66 @@ export function createEnvironmentController(
           throw cause;
         // Keep the encrypted external result, but never publish it after authority loss.
         await drizzleTransaction(sql)
-          .update(environmentWriteTable)
-          .set({ state: "discarded" })
-          .where(eq(environmentWriteTable.commandId, intent.commandID));
+          .update(operationTable)
+          .set({
+            state: "discarded",
+            activeKey: null,
+            updatedAt: expression`now()`,
+            completedAt: expression`now()`,
+          })
+          .where(
+            and(
+              eq(operationTable.id, intent.commandID),
+              eq(operationTable.kind, ENVIRONMENT_WRITE_KIND),
+            ),
+          );
         return false;
       }
       const active = await current(sql, row.projectID, row.environment);
       if (active.version !== row.baseVersion) throw conflict();
       const db = drizzleTransaction(sql);
+      const nextPayload = {
+        projectId: row.projectID,
+        environment: row.environment,
+        version: row.baseVersion + 1,
+        manifest: row.manifest,
+        secretKey: row.secretKey,
+      };
       await db
-        .insert(projectEnvironment)
+        .insert(operationTable)
         .values({
-          projectId: row.projectID,
-          environment: row.environment,
-          version: row.baseVersion + 1,
-          manifest: row.manifest,
-          secretKey: row.secretKey,
+          id: crypto.randomUUID(),
+          kind: ENVIRONMENT_KIND,
+          scopeType: ENVIRONMENT_SCOPE_TYPE,
+          scopeId: row.projectID,
+          idempotencyKey: environmentIdempotencyKey(row.projectID, row.environment),
+          activeKey: null,
+          state: "saved",
+          payload: nextPayload,
+          createdBy: intent.createdBy,
         })
         .onConflictDoUpdate({
-          target: [projectEnvironment.projectId, projectEnvironment.environment],
+          target: operationTable.idempotencyKey,
           set: {
-            version: row.baseVersion + 1,
-            manifest: row.manifest,
-            secretKey: row.secretKey,
+            state: "saved",
+            payload: nextPayload,
             updatedAt: expression`now()`,
           },
         });
       await db
-        .update(environmentWriteTable)
-        .set({ state: "committed", committedAt: expression`now()` })
-        .where(eq(environmentWriteTable.commandId, row.commandID));
+        .update(operationTable)
+        .set({
+          state: "committed",
+          activeKey: null,
+          updatedAt: expression`now()`,
+          completedAt: expression`now()`,
+        })
+        .where(
+          and(
+            eq(operationTable.id, row.commandID),
+            eq(operationTable.kind, ENVIRONMENT_WRITE_KIND),
+          ),
+        );
       return true;
     });
   }
@@ -161,27 +217,16 @@ export function createEnvironmentController(
       const row = await current(sql, projectID, environment);
       const db = drizzleTransaction(sql);
       const [pending] = await db
-        .select({ commandID: environmentWriteTable.commandId })
-        .from(environmentWriteTable)
+        .select({ commandID: operationTable.id })
+        .from(operationTable)
         .where(
           and(
-            eq(environmentWriteTable.projectId, projectID),
-            eq(environmentWriteTable.environment, environment),
-            eq(environmentWriteTable.state, "write-intended"),
+            eq(operationTable.kind, ENVIRONMENT_WRITE_KIND),
+            eq(operationTable.scopeType, ENVIRONMENT_WRITE_SCOPE_TYPE),
+            eq(operationTable.scopeId, environmentWriteScopeId(projectID, environment)),
+            eq(operationTable.state, "write-intended"),
           ),
         );
-      const [preparation] = await db
-        .select({ state: projectImagePreparation.state })
-        .from(projectImagePreparation)
-        .where(
-          and(
-            eq(projectImagePreparation.projectId, projectID),
-            eq(projectImagePreparation.environment, environment),
-            eq(projectImagePreparation.environmentVersion, row.version),
-          ),
-        )
-        .orderBy(desc(projectImagePreparation.createdAt))
-        .limit(1);
       return {
         ...environmentManifest.parse(row.manifest),
         environment,
@@ -190,7 +235,6 @@ export function createEnvironmentController(
         storeConfigured: secrets.configured,
         pending: Boolean(pending),
         pendingCommandID: pending?.commandID ?? null,
-        preparation: preparation?.state ?? null,
       };
     });
   }
@@ -228,13 +272,14 @@ export function createEnvironmentController(
       const active = await current(sql, projectID, environment);
       if (active.version !== input.version) throw conflict();
       const [pending] = await drizzleTransaction(sql)
-        .select({ commandID: environmentWriteTable.commandId })
-        .from(environmentWriteTable)
+        .select({ commandID: operationTable.id })
+        .from(operationTable)
         .where(
           and(
-            eq(environmentWriteTable.projectId, projectID),
-            eq(environmentWriteTable.environment, environment),
-            eq(environmentWriteTable.state, "write-intended"),
+            eq(operationTable.kind, ENVIRONMENT_WRITE_KIND),
+            eq(operationTable.scopeType, ENVIRONMENT_WRITE_SCOPE_TYPE),
+            eq(operationTable.scopeId, environmentWriteScopeId(projectID, environment)),
+            eq(operationTable.state, "write-intended"),
           ),
         );
       if (pending) throw conflict();
@@ -261,16 +306,29 @@ export function createEnvironmentController(
         state: "write-intended",
         createdBy: userID,
       };
-      await drizzleTransaction(sql).insert(environmentWriteTable).values({
-        commandId: row.commandID,
-        projectId: projectID,
-        environment,
-        baseVersion: row.baseVersion,
-        fingerprint,
-        manifest: row.manifest,
-        secretKey: row.secretKey,
-        createdBy: userID,
-      });
+      await drizzleTransaction(sql)
+        .insert(operationTable)
+        .values({
+          id: row.commandID,
+          kind: ENVIRONMENT_WRITE_KIND,
+          scopeType: ENVIRONMENT_WRITE_SCOPE_TYPE,
+          scopeId: environmentWriteScopeId(projectID, environment),
+          idempotencyKey: environmentWriteIdempotencyKey(row.secretKey),
+          activeKey: environmentWriteActiveKey(projectID, environment),
+          state: "write-intended",
+          payload: {
+            projectID,
+            environment,
+            baseVersion: row.baseVersion,
+            fingerprint,
+            manifest: row.manifest,
+            secretKey: row.secretKey,
+          },
+          result: null,
+          error: null,
+          createdBy: userID,
+          completedAt: null,
+        });
       return { row, bundle };
     });
     if (admission.row.state === "committed") return get(projectID, userID, environment);
@@ -334,19 +392,31 @@ export function createEnvironmentController(
           throw conflict();
         // Fence late external acknowledgements. Current settings and stored values are not deleted.
         await drizzleTransaction(sql)
-          .update(environmentWriteTable)
-          .set({ state: "discarded" })
-          .where(eq(environmentWriteTable.commandId, commandID));
+          .update(operationTable)
+          .set({
+            state: "discarded",
+            activeKey: null,
+            updatedAt: expression`now()`,
+            completedAt: expression`now()`,
+          })
+          .where(
+            and(eq(operationTable.id, commandID), eq(operationTable.kind, ENVIRONMENT_WRITE_KIND)),
+          );
       });
       return get(projectID, userID, environment);
     },
     async recover() {
       if (!secrets.configured) return;
       const rows = await database.db
-        .select({ commandID: environmentWriteTable.commandId })
-        .from(environmentWriteTable)
-        .where(eq(environmentWriteTable.state, "write-intended"))
-        .orderBy(asc(environmentWriteTable.createdAt))
+        .select({ commandID: operationTable.id })
+        .from(operationTable)
+        .where(
+          and(
+            eq(operationTable.kind, ENVIRONMENT_WRITE_KIND),
+            eq(operationTable.state, "write-intended"),
+          ),
+        )
+        .orderBy(asc(operationTable.createdAt))
         .limit(32);
       for (const { commandID } of rows) {
         const row = await database.client.begin((sql) => writeRow(sql, commandID));

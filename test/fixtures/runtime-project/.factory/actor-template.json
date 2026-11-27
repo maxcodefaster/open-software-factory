@@ -1,0 +1,13 @@
+{
+  "containers": [
+    {
+      "name": "work",
+      "image": "registry.example.invalid/unpublished-starter-work@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "volumeMounts": [
+        { "name": "source", "mountPath": "/workspace" },
+        { "name": "fixture-data", "mountPath": "/data" }
+      ]
+    }
+  ],
+  "volumes": [{ "name": "source", "durableDir": {} }, { "name": "fixture-data", "durableDir": {} }]
+}

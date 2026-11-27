@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import {
+  type InterviewQuestion,
+  interviewAnswerCommandInput,
+} from "#conversation-domain/conversation";
+import { createDatabase } from "#db/client";
 import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import {
@@ -10,11 +15,6 @@ import {
 } from "../../apps/factory/src/project-agent/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { sourceWorkspaceViewSchema } from "../../apps/factory/src/workspace/contracts";
-import {
-  type InterviewQuestion,
-  interviewAnswerCommandInput,
-} from "../../packages/conversation-domain/src/conversation";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -49,9 +49,9 @@ test.beforeEach(async () => {
   ticketID = crypto.randomUUID();
   questionID = crypto.randomUUID();
   await database.client`
-    INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+    INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
     VALUES (${projectID}, ${projectSlug}, 'Interview coherence', 'https://example.invalid/interview.git',
-      'main', '.devcontainer/devcontainer.json', ${userID})
+      'main', '.factory/actor-template.json', ${userID})
   `;
   await database.client`
     INSERT INTO factory.ticket(id, project_id, title, description, state, created_by)
@@ -344,7 +344,18 @@ for (const buildState of ["stopped", "failed"] as const)
     await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${canonical},${createHash("sha256").update(canonical).digest("hex")},${userID})`;
     await database.client`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
     await database.client`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},'active',${userID})`;
-    await database.client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES(${crypto.randomUUID()},${changeID},'owned','interview',${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},${`owned:${changeID}`},'succeeded',${"a".repeat(40)},now())`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at) VALUES(${crypto.randomUUID()},'delivery.branch_create','change',${changeID},${`delivery.branch_create:change:${changeID}:create-branch`},NULL,'succeeded',${JSON.stringify(
+      {
+        changeId: changeID,
+        repositoryOwner: "owned",
+        repositoryName: "interview",
+        branchName: `factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`,
+        startSha: "a".repeat(40),
+        attemptCount: 1,
+        leaseGeneration: 1,
+        reconcileAfter: null,
+      },
+    )}::jsonb,${JSON.stringify({ observedHeadSha: "a".repeat(40) })}::jsonb,${userID},now())`;
     const buildView = {
       state: buildState,
       ...(buildState === "failed"

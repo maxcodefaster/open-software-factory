@@ -1,10 +1,7 @@
 import { expect, test } from "bun:test";
+import type { AgentTurnAuthority, AgentTurnCommand } from "#conversation-domain/agent-turn";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
-import type {
-  AgentTurnAuthority,
-  AgentTurnCommand,
-} from "../../packages/conversation-domain/src/agent-turn";
 import { factoryProcess } from "../fixtures/factory-process";
 
 async function fixture() {
@@ -21,9 +18,9 @@ async function fixture() {
       VALUES (${userID}, 'Owned Admission Regression', ${`admission-${suffix}@factory.local`}, true)
     `;
       await transaction`
-      INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
       VALUES (${projectID}, ${`admission-${suffix}`}, 'Owned Admission Regression',
-        'https://example.invalid/admission.git', 'main', '.devcontainer/devcontainer.json', ${userID})
+        'https://example.invalid/admission.git', 'main', '.factory/actor-template.json', ${userID})
     `;
       await transaction`
       INSERT INTO factory.ticket_conversation(id, project_id, created_by)

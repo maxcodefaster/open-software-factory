@@ -40,7 +40,6 @@ function startupFixture() {
           "learningWorker",
           "mcpConnections",
           "monitoringWorker",
-          "projectPreparation",
           "projectAgentController",
           "projectSetup",
           "setupReadiness",
@@ -91,6 +90,25 @@ test("shutdown while callback readiness is pending cannot start delayed recovery
   expect(f.calls).toEqual([]);
 });
 
+test("native startup never admits the retired Project image producer", async () => {
+  const f = startupFixture();
+  let producers = 0;
+  Object.assign(f.application, {
+    projectPreparation: {
+      async drain() {
+        producers++;
+      },
+    },
+  });
+  const close = startFactoryLifecycle(f.application);
+  try {
+    await Bun.sleep(2_100);
+    expect(producers).toBe(0);
+  } finally {
+    await close();
+  }
+});
+
 test("the process owns Delivery and Monitoring observations and drains them before shutdown", async () => {
   const finish = Promise.withResolvers<void>();
   const finishSetup = Promise.withResolvers<void>();
@@ -126,7 +144,6 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     "knowledgeController",
     "learningWorker",
     "mcpConnections",
-    "projectPreparation",
     "projectSetup",
     "projectAgentController",
     "releaseController",

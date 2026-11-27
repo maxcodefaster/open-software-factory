@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -26,8 +26,8 @@ test("an uncertain background Interview stays visible without resending inferenc
       inferenceRequests++;
   });
   try {
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES (${projectID},${slug},'Interview failure fixture','http://127.0.0.1:33030/fixture/unused.git','main','.devcontainer/devcontainer.json',${user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES (${projectID},${slug},'Interview failure fixture','http://127.0.0.1:33030/fixture/unused.git','main','.factory/actor-template.json',${user.id})`;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
       VALUES (${ticketID},${projectID},'Interrupted interview','Retain this intent.','ready',${user.id})`;
     await mockFactoryFunctions(page, {

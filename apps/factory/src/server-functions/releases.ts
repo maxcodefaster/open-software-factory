@@ -1,9 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import {
-  externalAccessInput,
-  publishRelease,
-} from "../../../../packages/project-domain/src/release";
+import { externalAccessInput, publishRelease } from "#project-domain/release";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

@@ -1,9 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { z } from "zod";
-import {
-  type SetupInspectionView,
-  setupFeedbackKey,
-} from "../../../../packages/project-domain/src/setup";
+import { type SetupInspectionView, setupFeedbackKey } from "#project-domain/setup";
 import { APIRequestError } from "../api-client";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";

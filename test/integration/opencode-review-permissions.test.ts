@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
+import type { createForgejoClient } from "#forge/forge";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-adapter";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { docker, observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
@@ -124,7 +124,6 @@ test("pinned OpenCode reviewer denies shell, edits and writing descendants while
   let owned: Awaited<ReturnType<typeof pinnedOpenCode>> | undefined;
   try {
     owned = await pinnedOpenCode(
-      undefined,
       undefined,
       undefined,
       `http://host.orb.internal:${provider.port}/v1`,

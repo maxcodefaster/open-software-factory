@@ -1,5 +1,5 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { createDatabase } from "#db/client";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import { createOpenCodeClient } from "./opencode-adapter";
 

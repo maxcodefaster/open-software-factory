@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { epicProposalInput } from "../../../packages/conversation-domain/src/epic-proposal";
-import { technicalDesignContentInput } from "../../../packages/requirement-domain/src/technical-design";
+import { epicProposalInput } from "#conversation-domain/epic-proposal";
+import { technicalDesignContentInput } from "#requirement-domain/technical-design";
 import { epicProposalProblem, technicalDesignProblem } from "./proposal-problems";
 
 const member = (key: string, patch: Record<string, unknown> = {}) => ({

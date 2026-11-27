@@ -1,11 +1,25 @@
-// Runs inside the primary Dev Container. The upstream runner stays unmodified;
+import { nativeToolShell } from "./native-tool";
+
+// Runs inside the native Work container. The upstream runner stays unmodified;
 // its failure must terminate the Factory-owned managed process, not leave a healthy shell.
 export const verificationSupervisor = `
 const { spawn } = require("node:child_process");
-const { openSync } = require("node:fs");
+const { openSync, writeFileSync } = require("node:fs");
 const directory = require("node:os").homedir() + "/.factory-runner/";
+let config = process.env.FACTORY_RUNNER_CONFIG;
+// The Connector starts this process in the selected checkout, after Work path remapping.
+config = config.replace("  envs:\\n", envs => {
+  process.env.FACTORY_CHECKOUT_ROOT = process.cwd();
+  let values = "    FACTORY_CHECKOUT_ROOT: " + JSON.stringify(process.env.FACTORY_CHECKOUT_ROOT) + "\\n";
+  if (config.includes("    FACTORY_RELEASE_ID: ")) {
+    process.env.FACTORY_RELEASE_SOURCE = process.env.FACTORY_CHECKOUT_ROOT;
+    values += "    FACTORY_RELEASE_SOURCE: " + JSON.stringify(process.env.FACTORY_RELEASE_SOURCE) + "\\n";
+  }
+  return envs + values;
+});
+writeFileSync(directory + "config.yml", config, { mode: 0o600 });
 const log = openSync(directory + "runner.log", "a", 0o600);
-const runner = spawn("/opt/factory/forgejo-runner", ["one-job", "--wait", ...(process.env.FACTORY_RUNNER_HANDLE ? ["--handle", process.env.FACTORY_RUNNER_HANDLE] : []), "--config", directory + "config.yml"], {
+const runner = spawn("/opt/factory-tools/usr/local/bin/forgejo-runner", ["one-job", "--wait", ...(process.env.FACTORY_RUNNER_HANDLE ? ["--handle", process.env.FACTORY_RUNNER_HANDLE] : []), "--config", directory + "config.yml"], {
   stdio: ["ignore", log, log],
 });
 let healthy = false;
@@ -44,7 +58,7 @@ export interface RuntimeVerification {
   };
 }
 
-// The pinned one-job owner inside the Substrate-owned Dev Container.
+// The pinned one-job owner inside the Substrate-owned native Work container.
 export function runtimeVerificationProcess(input: RuntimeVerification) {
   const publication = input.publication;
   const publicationEnvironment = publication
@@ -54,7 +68,6 @@ export function runtimeVerificationProcess(input: RuntimeVerification) {
         NODE_USE_ENV_PROXY: "1",
         FACTORY_RELEASE_ID: publication.id,
         FACTORY_RELEASE_VERSION: publication.version,
-        FACTORY_RELEASE_SOURCE: "/workspace/project",
         FACTORY_RELEASE_CREDENTIAL_URL: publication.credentialURL,
         FACTORY_RELEASE_CREDENTIAL_TOKEN: publication.credentialToken,
         FACTORY_RELEASE_REGISTRY: new URL(publication.registryURL ?? input.forgeURL).host,
@@ -66,7 +79,9 @@ export function runtimeVerificationProcess(input: RuntimeVerification) {
     command: [
       "sh",
       "-c",
-      `umask 077; mkdir -p "$HOME/.factory-runner"; printf %s "$FACTORY_RUNNER_CONFIG" > "$HOME/.factory-runner/config.yml"; exec node -e '${verificationSupervisor}'`,
+      `umask 077; mkdir -p "$HOME/.factory-runner" || exit
+${nativeToolShell("node")}
+exec "$factory_runtime" -e '${verificationSupervisor}'`,
     ],
     env: {
       ...(input.handle ? { FACTORY_RUNNER_HANDLE: input.handle } : {}),
@@ -79,14 +94,10 @@ export function runtimeVerificationProcess(input: RuntimeVerification) {
         "  capacity: 1",
         "  timeout: 30m",
         "  shutdown_timeout: 1m",
-        ...(publication
-          ? [
-              "  envs:",
-              ...Object.entries(publicationEnvironment).map(
-                ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
-              ),
-            ]
-          : []),
+        "  envs:",
+        ...Object.entries(publicationEnvironment).map(
+          ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
+        ),
         "cache:",
         "  enabled: false",
         "host:",

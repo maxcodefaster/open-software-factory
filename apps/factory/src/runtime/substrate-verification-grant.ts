@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import { runtimeAttempt } from "../../../../packages/db/src/schema";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { runtimeAttempt } from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
@@ -16,14 +16,14 @@ export async function substrateVerificationAuthorityIn(
     {
       revision: string;
       repository: string;
-      devcontainerPath: string;
+      actorTemplatePath: string;
       runnerUUID: string;
       runnerToken: string;
       jobHandle: string;
       attemptID: string | null;
     }[]
   >`SELECT verification.commit_sha AS revision,project.repository_url AS repository,
-      project.devcontainer_path AS "devcontainerPath",verification.runner_uuid AS "runnerUUID",
+      project.actor_template_path AS "actorTemplatePath",verification.runner_uuid AS "runnerUUID",
       verification.runner_token AS "runnerToken",verification.runner_job_handle AS "jobHandle",
       verification.runtime_attempt_id AS "attemptID"
     FROM factory.verification verification JOIN factory.change change ON change.id=verification.change_id
@@ -57,15 +57,19 @@ export async function substrateVerificationGrantIn(
     userID,
     attemptID,
   );
-  const [intent] =
-    await sql`SELECT provision.verification_id FROM factory.substrate_verification provision
+  const [intent] = await sql`SELECT provision.owner_id FROM factory.substrate_provision provision
     LEFT JOIN factory.runtime_attempt attempt ON attempt.id=${attemptID}
-    WHERE provision.verification_id=${verificationID} AND provision.runtime_attempt_id=${attemptID}
+    WHERE provision.kind='verification' AND provision.owner_id=${verificationID}
+      AND provision.runtime_attempt_id=${attemptID}
       AND provision.intent#>>'{configuration,projectID}'=${projectID}
       AND provision.intent->>'revision'=${scope.revision}
       AND provision.intent->>'jobHandle'=${scope.jobHandle}
-      AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
-      AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
+      AND jsonb_typeof(provision.resources->'atespace'->'value')='object'
+      AND jsonb_typeof(provision.resources->'policy'->'value')='object'
+      AND jsonb_typeof(provision.resources->'template'->'value')='object'
+      AND NOT COALESCE((provision.resources#>>'{atespace,rejected}')::boolean,false)
+      AND NOT COALESCE((provision.resources#>>'{policy,rejected}')::boolean,false)
+      AND NOT COALESCE((provision.resources#>>'{template,rejected}')::boolean,false)
       AND (attempt.id IS NULL OR (attempt.project_id=${projectID}
         AND attempt.verification_id=${verificationID} AND attempt.workspace_id IS NULL
         AND attempt.isolated_kind='verification' AND attempt.revision=${scope.revision}
@@ -105,15 +109,14 @@ export async function substrateVerificationSourceIn(sql: DatabaseTransaction, at
     { projectID: string; verificationID: string; userID: string; repository: string }[]
   >`SELECT a.project_id AS "projectID",a.verification_id AS "verificationID",a.created_by AS "userID",project.repository_url AS repository
     FROM factory.runtime_attempt a JOIN factory.project project ON project.id=a.project_id
-    JOIN factory.substrate_verification provision ON provision.runtime_attempt_id=a.id
-      AND provision.verification_id=a.verification_id AND provision.generation=a.generation
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
+    JOIN factory.substrate_provision provision ON provision.runtime_attempt_id=a.id
+      AND provision.kind='verification' AND provision.owner_id=a.verification_id AND provision.generation=a.generation
     WHERE a.id=${attemptID} AND a.isolated_kind='verification' AND a.workspace_id IS NULL
       AND a.state IN ('create-intended','starting') AND a.ready_at IS NULL AND a.stop_intended_at IS NULL
       AND provision.intent->>'repository'=project.repository_url
       AND provision.intent->>'revision'=a.revision
-      AND binding.actor_uid IS NOT NULL AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
-      AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL`;
+      AND a.actor_uid IS NOT NULL AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected
+      AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL`;
   if (!scope)
     throw new CommandError(
       "forbidden",

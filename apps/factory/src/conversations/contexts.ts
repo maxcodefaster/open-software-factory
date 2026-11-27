@@ -1,16 +1,7 @@
 import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
-import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  agentTurn,
-  conversationContext,
-  conversationEntry,
-  ticketConversation,
-} from "../../../../packages/db/src/schema";
+import type { ConversationMode } from "#conversation-domain/conversation";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { agentTurn, conversationContext, conversationEntry, ticketConversation } from "#db/schema";
 import { CommandError } from "../command-error";
 
 export async function contextIn(

@@ -3,12 +3,12 @@ import {
   type deliveryDelegationInput,
   deliverySettingsView,
   type promotionRetryInput,
-} from "../../../../packages/change-domain/src/delivery";
+} from "#change-domain/delivery";
 import type {
   candidateReviewRetryInput,
   verificationResumeInput,
-} from "../../../../packages/conversation-domain/src/candidate-review";
-import { type createAccessController } from "../access/api";
+} from "#conversation-domain/candidate-review";
+import type { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import { deliveryViewSchema } from "./contracts";
 import type { createDeliveryController } from "./controller";

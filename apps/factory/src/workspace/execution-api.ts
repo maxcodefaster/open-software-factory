@@ -1,1 +1,1 @@
-export { type createWorkspaceCommands } from "./commands";
+export type { createWorkspaceCommands } from "./commands";

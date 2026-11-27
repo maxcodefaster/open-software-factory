@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
+import { createDatabase } from "#db/client";
+import { runtimeModelToken } from "#runtime-domain/identity";
+import { runCommand } from "#runtime-kubernetes/command";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { terminalOutcomeInput } from "../../apps/factory/src/agent/terminal-outcome";
 import { createModelRelay } from "../../apps/factory/src/models/relay";
-import { createDatabase } from "../../packages/db/src/client";
-import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import {
   ownedPostgresServer,

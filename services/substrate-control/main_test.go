@@ -23,12 +23,16 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type testControl struct {
 	ate.UnimplementedControlServer
-	suspendMode   ate.DurabilityMode
-	deleteOptions *ate.DeleteOptions
+	suspendMode           ate.DurabilityMode
+	deleteOptions         *ate.DeleteOptions
+	deleteTemplateOptions *ate.DeleteOptions
+	templates             chan *ate.ActorTemplate
 }
 
 func TestLifecycleContextUsesNativeBudgetsAndStillHonorsCancellation(t *testing.T) {
@@ -83,7 +87,126 @@ func (s *testControl) CreateAtespaceAccessPolicy(_ context.Context, r *ate.Creat
 	return r.AccessPolicy, nil
 }
 func (s *testControl) CreateActorTemplate(_ context.Context, r *ate.CreateActorTemplateRequest) (*ate.ActorTemplate, error) {
+	if s.templates != nil {
+		s.templates <- r.ActorTemplate
+	}
 	return r.ActorTemplate, nil
+}
+func (s *testControl) DeleteActorTemplate(_ context.Context, r *ate.DeleteActorTemplateRequest) (*ate.ActorTemplate, error) {
+	s.deleteTemplateOptions = r.Options
+	return &ate.ActorTemplate{}, nil
+}
+
+func TestFactoryNativeTemplateSnapshotPolicy(t *testing.T) {
+	pair, ca := testCertificate(t, "api.ate-system.svc")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair},
+	})))
+	control := &testControl{templates: make(chan *ate.ActorTemplate, 1)}
+	ate.RegisterControlServer(server, control)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	directory := t.TempDir()
+	c := command{
+		Endpoint: listener.Addr().String(), ServerName: "api.ate-system.svc",
+		CAFile: filepath.Join(directory, "ca"), TokenFile: filepath.Join(directory, "token"),
+		Method: "CreateActorTemplate",
+	}
+	for path, content := range map[string][]byte{
+		c.CAFile: ca, c.TokenFile: []byte("rotated-api-audience-token"),
+	} {
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*ate.ActorTemplate)
+		accept bool
+	}{
+		{"MEMORY preference", func(*ate.ActorTemplate) {}, true},
+		{"ROOTFS cold fallback", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.PreferredFidelity = ate.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+		}, true},
+		{"owned Browser template", func(template *ate.ActorTemplate) {
+			template.Metadata.Name = "browser-0123456789abcdef0123456789abcdef"
+			template.SnapshotConfig.PreferredFidelity = ate.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+		}, true},
+		{"VOLUMES loses rootfs", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.PreferredFidelity = ate.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		}, false},
+		{"unspecified fidelity", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.PreferredFidelity = ate.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+		}, false},
+		{"unknown fidelity", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.PreferredFidelity = ate.SnapshotFidelity(99)
+		}, false},
+		{"missing snapshot configuration", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig = nil
+		}, false},
+		{"golden snapshots enabled", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.GoldenSnapshotConfig.Mode = ate.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED
+		}, false},
+		{"golden snapshots default", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.GoldenSnapshotConfig = nil
+		}, false},
+		{"golden mode unspecified", func(template *ate.ActorTemplate) {
+			template.SnapshotConfig.GoldenSnapshotConfig.Mode = ate.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_UNSPECIFIED
+		}, false},
+		{"foreign atespace", func(template *ate.ActorTemplate) {
+			template.Metadata.Atespace = "unowned"
+		}, false},
+		{"foreign template", func(template *ate.ActorTemplate) {
+			template.Metadata.Name = "unowned"
+		}, false},
+		{"missing identity", func(template *ate.ActorTemplate) {
+			template.Metadata = nil
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			template := &ate.ActorTemplate{}
+			if err := protojson.Unmarshal([]byte(`{
+				"metadata":{"name":"runtime","atespace":"fa-0123456789abcdef0123456789abcdef"},
+				"snapshotConfig":{"preferredFidelity":"SNAPSHOT_FIDELITY_MEMORY",
+					"goldenSnapshotConfig":{"mode":"GOLDEN_SNAPSHOT_MODE_DISABLED"}},
+				"containers":[{"name":"work","image":"registry.test/work@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"command":["node","server.mjs"],"volumeMounts":[{"name":"source","mountPath":"/workspace"}]}],
+				"volumes":[{"name":"source","durableDir":{}}]
+			}`), template); err != nil {
+				t.Fatal(err)
+			}
+			test.change(template)
+			request, err := protojson.Marshal(&ate.CreateActorTemplateRequest{ActorTemplate: template})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Request = request
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, err := call(ctx, c)
+			if !test.accept {
+				if err == nil || len(control.templates) != 0 {
+					t.Fatalf("unsafe template reached native API: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case observed := <-control.templates:
+				if !proto.Equal(observed, template) || !proto.Equal(result, template) {
+					t.Fatal("bridge changed native template or its snapshot preference")
+				}
+			default:
+				t.Fatal("admitted template did not reach native API")
+			}
+		})
+	}
 }
 
 func testCertificate(t *testing.T, name string) (tls.Certificate, []byte) {
@@ -182,6 +305,24 @@ func TestPublicGRPCTrustTokenRotationAndSafety(t *testing.T) {
 	}
 	if control.deleteOptions.Uid != "original-uid" || control.deleteOptions.Version != 7 {
 		t.Fatal("delete preconditions lost")
+	}
+	c.Method = "DeleteActorTemplate"
+	for _, request := range []string{
+		`{"actorTemplate":{"atespace":"fa-0123456789abcdef0123456789abcdef","name":"browser-0123456789abcdef0123456789abcdef"}}`,
+		`{"actorTemplate":{"atespace":"fa-0123456789abcdef0123456789abcdef","name":"runtime"},"options":{"uid":"original-template","version":"7"}}`,
+		`{"actorTemplate":{"atespace":"foreign","name":"browser-0123456789abcdef0123456789abcdef"},"options":{"uid":"original-template","version":"7"}}`,
+	} {
+		c.Request = json.RawMessage(request)
+		if _, err := call(ctx, c); err == nil || control.deleteTemplateOptions != nil {
+			t.Fatal("unbound Browser template delete reached native API")
+		}
+	}
+	c.Request = json.RawMessage(`{"actorTemplate":{"atespace":"fa-0123456789abcdef0123456789abcdef","name":"browser-0123456789abcdef0123456789abcdef"},"options":{"uid":"original-template","version":"7"}}`)
+	if _, err := call(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if control.deleteTemplateOptions.Uid != "original-template" || control.deleteTemplateOptions.Version != 7 {
+		t.Fatal("Browser template deletion lost UID/version preconditions")
 	}
 	c.Method = "CreateAtespace"
 	if _, err := call(ctx, c); err == nil {

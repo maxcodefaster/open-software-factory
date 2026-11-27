@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
@@ -31,13 +39,11 @@ import { admitInitialSourceSeedIn } from "../../apps/factory/src/workspace/sourc
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { admitInitialSource } from "../../apps/factory/src/workspace/source-initialization";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
 import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+  nativeProjectBootstrap,
+  nativeProjectDefinition,
+  nativeProjectTemplate,
+} from "../fixtures/native-project";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
@@ -54,7 +60,7 @@ test("native Workspace bootstrap carries installation registry CA without changi
     await writeFile(registryCAFile, registryCA);
     process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
     const environment = await f.database
-      .client`SELECT * FROM factory.project_environment WHERE project_id=${f.projectID}`;
+      .client`SELECT * FROM factory.operation WHERE kind='environments.environment' AND scope_type='project' AND scope_id=${f.projectID}`;
     await writeFile(registryCAFile, `${registryCA}-----BEGIN PRIVATE KEY-----\nowned-invalid`);
     await expect(f.controller().start(f.projectID, f.userID)).rejects.toThrow(
       "public certificates only",
@@ -72,7 +78,7 @@ test("native Workspace bootstrap carries installation registry CA without changi
     expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
     expect(
       await f.database
-        .client`SELECT * FROM factory.project_environment WHERE project_id=${f.projectID}`,
+        .client`SELECT * FROM factory.operation WHERE kind='environments.environment' AND scope_type='project' AND scope_id=${f.projectID}`,
     ).toEqual(environment);
     const originalTemplate = structuredClone(template);
     const creates = f.calls.filter((call) => call.method.startsWith("Create")).length;
@@ -102,14 +108,26 @@ test("native bootstrap trust preserves no-extra template hashes and refuses priv
       workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
       workerSelector: { "factory.dev/deployment": "owned" },
     };
-    const original = renderSubstrateTemplate("owned", config, { factoryCA });
+    const original = renderSubstrateTemplate(
+      "owned",
+      config,
+      nativeProjectBootstrap({ factoryCA }),
+      nativeProjectDefinition,
+    );
     for (const file of [undefined, "/etc/ssl/certs/ca-certificates.crt", ca, extra]) {
       if (file === undefined) delete process.env["FACTORY_REGISTRY_CA_FILE"];
       else process.env["FACTORY_REGISTRY_CA_FILE"] = file;
       const trust = substrateBootstrapCA(ca);
       expect(trust).toBe(factoryCA);
       expect(
-        substrateTemplateSHA256(renderSubstrateTemplate("owned", config, { factoryCA: trust })),
+        substrateTemplateSHA256(
+          renderSubstrateTemplate(
+            "owned",
+            config,
+            nativeProjectBootstrap({ factoryCA: trust }),
+            nativeProjectDefinition,
+          ),
+        ),
       ).toBe(substrateTemplateSHA256(original));
     }
     process.env["FACTORY_REGISTRY_CA_FILE"] = extra;
@@ -158,7 +176,7 @@ test("Starter fixture copies source without local installed dependencies", async
   }
 });
 
-test("devcontainer-only Start needs no setup confirmation; lost replies keep the same native intent", async () => {
+test("native template Start needs no setup confirmation; lost replies keep the same native intent", async () => {
   const f = await substrateFixture();
   const directory = await mkdtemp(join(tmpdir(), "substrate-provision-"));
   const ca = join(directory, "ca.pem");
@@ -187,18 +205,16 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
   const repo = join(directory, "repository");
   await Bun.$`git init -b main ${repo}`.quiet();
   await writeFile(join(repo, "README"), "owned source\n");
-  await mkdir(join(repo, ".devcontainer"));
-  await writeFile(
-    join(repo, ".devcontainer/devcontainer.json"),
-    JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
-  );
+  await mkdir(join(repo, ".factory"));
+  await writeFile(join(repo, nativeProjectTemplate.path), nativeProjectTemplate.content);
   await Bun.$`git -C ${repo} add .`.quiet();
   await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
+  const revision = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim();
   await f.database
     .client`UPDATE factory.project SET repository_url=${`file://${repo}`} WHERE id=${f.projectID}`;
   await f.database
-    .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-    VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
+    .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by)
+    VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${f.projectID},${`projects.setup_readiness:${f.projectID}:configuration`},'pending',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${f.userID})`;
   const objects = new Map<string, Record<string, unknown>>();
   let extraAttemptID: string | undefined;
   const creates = new Map<string, number>();
@@ -216,7 +232,10 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     if (method.startsWith("Create")) {
       creates.set(kind, (creates.get(kind) ?? 0) + 1);
       const [intent] = await f.database
-        .client`SELECT atespace_attempted_at,policy_attempted_at,template_attempted_at FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+        .client`SELECT resources#>>'{atespace,attemptedAt}' AS atespace_attempted_at,
+          resources#>>'{policy,attemptedAt}' AS policy_attempted_at,
+          resources#>>'{template,attemptedAt}' AS template_attempted_at
+        FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
       expect(
         intent?.[
           kind === "Atespace"
@@ -262,6 +281,15 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     }
     throw new Error(`Unexpected ${method}`);
   };
+  function expectTemplateImages(controlImage: string) {
+    const template = objects.get("ActorTemplate") as {
+      containers: { name: string; image: string }[];
+    };
+    expect(template.containers.map(({ name, image }) => ({ name, image }))).toEqual([
+      { name: "factory-control", image: controlImage },
+      ...nativeProjectDefinition.containers.map(({ name, image }) => ({ name, image })),
+    ]);
+  }
   const controller = (provisioner: SubstrateCall = call) =>
     createRuntimeController(f.database, f.hub, "owned-native-secret", {
       configuration: config,
@@ -277,14 +305,17 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     );
     expect(creates.size).toBe(0);
     await f.database
-      .client`UPDATE factory.project_setup_readiness SET state='ready' WHERE project_id=${f.projectID}`;
+      .client`UPDATE factory.operation SET state='ready',completed_at=now(),updated_at=now() WHERE kind='projects.setup_readiness' AND scope_type='project' AND scope_id=${f.projectID}`;
     await expect(c.ensureStaging(f.projectID, f.userID)).rejects.toThrow(
       ".factory/system.json is required for Staging",
     );
-    expect(await f.database.client`SELECT project_id FROM factory.staging_preview`).toHaveLength(0);
+    expect(
+      await f.database
+        .client`SELECT scope_id AS project_id FROM factory.operation WHERE kind='delivery.staging_preview'`,
+    ).toHaveLength(0);
     expect(creates.size).toBe(0);
     await f.database
-      .client`UPDATE factory.project_setup_readiness SET state='pending' WHERE project_id=${f.projectID}`;
+      .client`UPDATE factory.operation SET state='pending',completed_at=NULL,updated_at=now() WHERE kind='projects.setup_readiness' AND scope_type='project' AND scope_id=${f.projectID}`;
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("lost provisioning reply");
     lose = "CreateAtespaceAccessPolicy";
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("lost provisioning reply");
@@ -330,8 +361,10 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
         to_regclass('factory.factorybox_worker') AS worker`),
     ]).toEqual([{ source: null, worker: null }]);
     const [saved] = await f.database
-      .client`SELECT intent,template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      .client`SELECT intent,resources->'template'->'value' AS template FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
     expect(saved?.["intent"].systemContract).toBeNull();
+    expect(saved?.["intent"].revision).toBe(revision);
+    expect(saved?.["intent"].projectTemplate).toEqual(nativeProjectTemplate);
     const bootstrap = JSON.parse(
       (objects.get("ActorTemplate") as { containers: { env: { value: string }[] }[] }).containers[0]
         ?.env[0]?.value ?? "null",
@@ -340,7 +373,11 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
       { name: "ide", kind: "ide", target: "", healthPath: "" },
     ]);
     expect(bootstrap.assignment.processes).toEqual([]);
-    expect(bootstrap.assignment.devcontainerPath).toBe(".devcontainer/devcontainer.json");
+    expect(bootstrap.assignment.actorTemplatePath).toBe(".factory/actor-template.json");
+    expect(bootstrap.projectTemplate).toEqual({
+      path: nativeProjectTemplate.path,
+      sha256: nativeProjectTemplate.sha256,
+    });
     const [attempt] = await f.database
       .client`SELECT declared_apps FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(attempt?.["declared_apps"]).toEqual([]);
@@ -351,7 +388,7 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     await expect(
       Promise.resolve(
         f.database
-          .client`UPDATE factory.substrate_workspace SET template=NULL WHERE workspace_id=${f.workspaceID}`,
+          .client`UPDATE factory.substrate_provision SET resources=jsonb_set(resources,'{template,value}','null'::jsonb) WHERE owner_id=${f.workspaceID} AND kind='workspace'`,
       ),
     ).rejects.toThrow("immutable");
     let retainedOwnerCalls = 0;
@@ -392,20 +429,20 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     config.workloadImage = `registry.test/native@sha256:${"b".repeat(64)}`;
     config.resources = { cpuMilli: 2000, memoryMiB: 4096 };
     expect((await controller().start(f.projectID, f.userID))?.id).toBe(f.attemptID);
-    expect(objects.get("ActorTemplate")).toMatchObject({ containers: [{ image: originalImage }] });
+    expectTemplateImages(originalImage);
     expect(creates.get("Actor")).toBe(1);
     expect(await computeAllocationIn(f.database.client, null)).toEqual({
       sandboxes: 1,
       cpuMilli: 1500,
-      memoryMiB: 1024,
+      memoryMiB: 3072,
     });
     expect(objects.get("ActorTemplate")).toMatchObject({
-      resources: { limits: { cpuMillicores: "1500", memoryBytes: "1073741824" } },
+      resources: { limits: { cpuMillicores: "1500", memoryBytes: "3221225472" } },
     });
     expect(
       (
         await f.database
-          .client`SELECT intent#>>'{configuration,workloadImage}' AS image FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`
+          .client`SELECT intent#>>'{configuration,workloadImage}' AS image FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`
       )[0]?.["image"],
     ).toBe(originalImage);
     // Every fresh Project uses this installation's native runtime. A new image
@@ -417,13 +454,13 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
     await f.database
       .client`INSERT INTO auth."user"(id,name,email) VALUES(${other},'Fresh image developer',${`${other}@factory.local`})`;
     await f.database
-      .client`INSERT INTO factory.project(id,name,slug,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${otherProjectID},'Second native Project',${`second-native-${otherProjectID}`},${`file://${repo}`},'main','.devcontainer/devcontainer.json',${other})`;
+      .client`INSERT INTO factory.project(id,name,slug,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${otherProjectID},'Second native Project',${`second-native-${otherProjectID}`},${`file://${repo}`},'main','.factory/actor-template.json',${other})`;
     await f.database
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${otherProjectID},${other},'developer',${other})`;
     for (const [cpuMilli, memoryMiB] of [
-      [3500, 5119],
-      [3499, 5120],
+      [3500, 7167],
+      [3499, 7168],
     ]) {
       await f.database.client`INSERT INTO factory.execution_policy(scope,version,policy,updated_by)
         VALUES('factory',1,${JSON.stringify({ ...defaultExecutionPolicy(), cpuMilli, memoryMiB })}::jsonb,${f.userID})
@@ -434,32 +471,32 @@ test("devcontainer-only Start needs no setup confirmation; lost replies keep the
       expect(creates.get("Actor")).toBe(1);
     }
     await f.database
-      .client`UPDATE factory.execution_policy SET policy=${JSON.stringify({ ...defaultExecutionPolicy(), cpuMilli: 3500, memoryMiB: 5120 })}::jsonb WHERE scope='factory'`;
+      .client`UPDATE factory.execution_policy SET policy=${JSON.stringify({ ...defaultExecutionPolicy(), cpuMilli: 3500, memoryMiB: 7168 })}::jsonb WHERE scope='factory'`;
     const installation = controller();
     extraAttemptID = (await installation.start(otherProjectID, other))?.id;
     expect(extraAttemptID).toBeDefined();
     expect(extraAttemptID).not.toBe(f.attemptID);
+    expectTemplateImages(config.workloadImage);
     expect(objects.get("ActorTemplate")).toMatchObject({
-      containers: [{ image: config.workloadImage }],
       resources: { limits: { cpuMillicores: "2000", memoryBytes: "4294967296" } },
     });
     expect(await computeAllocationIn(f.database.client, null)).toEqual({
       sandboxes: 2,
       cpuMilli: 3500,
-      memoryMiB: 5120,
+      memoryMiB: 7168,
     });
     expect(creates.get("Actor")).toBe(2);
     const [second] = await f.database.client`
       SELECT w.project_id AS "projectID",p.intent#>>'{configuration,projectID}' AS binding
       FROM factory.runtime_attempt a JOIN factory.development_workspace w ON w.id=a.workspace_id
-      JOIN factory.substrate_workspace p ON p.workspace_id=w.id WHERE a.id=${extraAttemptID ?? ""}`;
+      JOIN factory.substrate_provision p ON p.owner_id=w.id AND p.kind='workspace' WHERE a.id=${extraAttemptID ?? ""}`;
     expect(second).toEqual({ projectID: otherProjectID, binding: otherProjectID });
     objects.clear();
     for (const [kind, value] of originalObjects) objects.set(kind, value);
     expect((await installation.get(f.attemptID))?.native?.actorUID).toBe(
       nativeActor.parse(originalObjects.get("Actor")).metadata.uid,
     );
-    expect(objects.get("ActorTemplate")).toMatchObject({ containers: [{ image: originalImage }] });
+    expectTemplateImages(originalImage);
     const connectorURL = config.connectorURL;
     config.connectorURL = "wss://foreign.test/internal/runtime-connect";
     await expect(controller().start(f.projectID, f.userID)).rejects.toThrow("immutable");
@@ -574,7 +611,7 @@ test.each(["personal", "ticket"] as const)(
         expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
         throw new Error("owned-seeded-provisioning-boundary");
       };
-      sources.startupContract = async () => undefined;
+      sources.startupConfiguration = async () => undefined;
       const runtime = createSubstrateWorkspaces(
         f.database,
         f.hub,
@@ -599,7 +636,7 @@ test.each(["personal", "ticket"] as const)(
         },
         call,
         call,
-        async () => null,
+        async () => ({ systemContract: null, actorTemplate: nativeProjectTemplate }),
         sources,
       );
       await expect(
@@ -631,13 +668,13 @@ test("initial Source seed admission refuses missing history after any Runtime At
   const f = await substrateFixture();
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent)
         VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},
-          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
+          'create-intended',${"b".repeat(64)},now(),${f.userID},
+          ${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
     });
     for (const state of ["create-intended", "stopped"]) {
       await f.database.client`UPDATE factory.runtime_attempt
@@ -673,7 +710,7 @@ test("initial Source seed admission refuses missing history after any Runtime At
   }
 }, 60_000);
 
-test("devcontainer-only startPersisted retains commissioned Contributor, lost Actor create and native Source role fences", async () => {
+test("native-template-only startPersisted retains commissioned Contributor, lost Actor create and native Source role fences", async () => {
   await mkdir(".factory/test-results", { recursive: true });
   const directory = await mkdtemp(resolve(".factory/test-results/native-ticket-controller-"));
   const repo = join(directory, "repository");
@@ -682,6 +719,8 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     filter: starterSourceFile,
   });
   await rm(join(repo, ".factory/system.json"));
+  await rm(join(repo, ".devcontainer"), { recursive: true, force: true });
+  await writeFile(join(repo, nativeProjectTemplate.path), nativeProjectTemplate.content);
   await Bun.$`git init -b main ${repo}`.quiet();
   await Bun.$`git -C ${repo} add .`.quiet();
   await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
@@ -762,9 +801,27 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
   };
   const blobs = memoryPrivateObjects();
   const sources = createSubstrateSources(f.database, f.hub, blobs);
+  let sourceResumes = 0;
   const runtime = createRuntimeController(f.database, f.hub, "owned-native-secret", {
     configuration: config,
-    sources,
+    sources: {
+      ...sources,
+      async resume(workspaceID, attemptID, sql, inputStop) {
+        expect(workspaceID).toBe(f.workspaceID);
+        expect(attemptID).toBe(f.attemptID);
+        expect(inputStop).toBe(false);
+        // This fixture publishes its controlled complete export below. Native
+        // allocation must leave the seed independent until the real v2 receipt.
+        expect(await sources.lease(workspaceID, sql)).toMatchObject({
+          actorUID: null,
+          owner: "service",
+          writable: true,
+          seedConfirmedAt: null,
+          seed: { workspaceID, projectID: f.projectID, revision },
+        });
+        sourceResumes++;
+      },
+    },
     call,
     provisionerCall: call,
   });
@@ -772,8 +829,8 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     await f.database
       .client`UPDATE factory.project SET repository_url=${`file://${repo}`} WHERE id=${f.projectID}`;
     await f.database
-      .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-      VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${f.projectID},${`projects.setup_readiness:${f.projectID}:configuration`},'pending',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${f.userID})`;
     await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID}`;
     await expect(runtime.startPersisted(f.changeID, f.userID)).rejects.toThrow(
@@ -835,6 +892,7 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     expect(started?.id).toBe(f.attemptID);
     expect(started?.native?.state).toBe("ACTOR_STATE_RUNNING");
     expect(creates.get("Actor")).toBe(1);
+    expect(sourceResumes).toBe(1);
     const readTicketSource = () =>
       f.database.client.begin((sql) => substrateWorkspaceSourceIn(f.database, sql, f.attemptID));
     expect(await readTicketSource()).toBe(`file://${repo}`);
@@ -865,8 +923,18 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
       ["agent"],
     );
     const [provision] = await f.database
-      .client`SELECT intent->'systemContract' AS contract FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      .client`SELECT intent->'systemContract' AS contract,intent->'projectTemplate' AS template,
+        intent->>'revision' AS revision
+      FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
     expect(provision?.["contract"]).toBeNull();
+    expect(provision?.["template"]).toEqual(nativeProjectTemplate);
+    expect(provision?.["revision"]).toBe(revision);
+    expect(bootstrap.assignment.actorTemplatePath).toBe(nativeProjectTemplate.path);
+    expect(bootstrap.assignment.revision).toBe(revision);
+    expect(bootstrap.projectTemplate).toEqual({
+      path: nativeProjectTemplate.path,
+      sha256: nativeProjectTemplate.sha256,
+    });
     expect(
       bootstrap.assignment.processes.find((p: { name: string }) => p.name === "agent").env
         .FACTORY_OPENCODE_TOKEN,
@@ -1037,7 +1105,10 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
     await f.database.client.begin(async (sql) => {
       const refusals = [
         () =>
-          sql`UPDATE factory.project_delivery_queue SET change_id=NULL WHERE project_id=${f.projectID}`,
+          sql`UPDATE factory.operation
+            SET active_key=NULL, state='idle',
+              payload=jsonb_build_object('projectId', ${f.projectID}::text, 'changeId', NULL)
+            WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`,
         () =>
           sql`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()} WHERE change_id=${f.changeID}`,
         () =>
@@ -1089,8 +1160,36 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
         }),
         f.attemptID,
       );
+    const sourceBefore = await sources.lease(f.workspaceID);
+    if (!sourceBefore) throw new Error("Owned retained Ticket Source is missing");
+    expect(sourceBefore).toMatchObject({
+      actorUID: started?.native?.actorUID,
+      owner: "actor",
+      writable: true,
+      checkpointID: null,
+    });
+    const currentIdentity = () =>
+      f.database.client`SELECT w.epoch::integer AS epoch,w.state,w.user_id,a.generation,a.actor_uid
+        FROM factory.change_writer w
+        JOIN factory.runtime_attempt a ON a.change_id=w.change_id
+        WHERE a.id=${f.attemptID}`;
+    const [writerBefore] = await currentIdentity();
+    if (!writerBefore) throw new Error("Owned current Ticket writer is missing");
+    expect(writerBefore).toMatchObject({ state: "human", user_id: developer });
     const handed = await currentRestore();
-    expect(handed.status).toBe(409); // A later writer must not replay the initial import.
+    expect(handed.status).toBe(200);
+    // Retained identity grants current writing authority, never another initial import.
+    expect(await handed.json()).toEqual({
+      version: 2,
+      retained: true,
+      actorUID: sourceBefore.actorUID,
+      writerEpoch: sourceBefore.writerEpoch,
+      changeWriterEpoch: writerBefore["epoch"],
+      readOnly: false,
+      checkpoint: null,
+    });
+    expect(await sources.lease(f.workspaceID)).toEqual(sourceBefore);
+    expect([...(await currentIdentity())]).toEqual([writerBefore]);
     const currentGrant = () =>
       f.database.client.begin((sql) =>
         substrateWorkspaceGrantIn(f.database, sql, f.workspaceID, developer, true),
@@ -1114,9 +1213,16 @@ test("devcontainer-only startPersisted retains commissioned Contributor, lost Ac
 test.each([
   "saved contract",
   "saved absence",
+  "saved template",
+  "saved missing template",
+  "saved invalid template",
+  "saved unconfirmed template",
   "no Source",
   "missing repository contract",
   "invalid repository contract",
+  "missing repository template",
+  "invalid repository template",
+  "oversized repository template",
   "Source failure",
   "unavailable revision",
   "unavailable repository",
@@ -1140,13 +1246,17 @@ test.each([
     };
     await Bun.$`git init -b main ${repository}`.quiet();
     await writeFile(join(repository, "README"), "Saved before setup\n");
-    await mkdir(join(repository, ".devcontainer"));
-    await writeFile(
-      join(repository, ".devcontainer/devcontainer.json"),
-      JSON.stringify({ image: "example.invalid/owned-development:fixture" }),
-    );
+    await mkdir(join(repository, ".factory"));
+    if (scenario !== "missing repository template")
+      await writeFile(
+        join(repository, nativeProjectTemplate.path),
+        scenario === "invalid repository template"
+          ? "{invalid JSON"
+          : scenario === "oversized repository template"
+            ? " ".repeat(65537)
+            : nativeProjectTemplate.content,
+      );
     if (!["saved contract", "missing repository contract"].includes(scenario)) {
-      await mkdir(join(repository, ".factory"));
       await writeFile(
         join(repository, ".factory/system.json"),
         scenario === "invalid repository contract" ? "{invalid JSON" : JSON.stringify(contract),
@@ -1161,7 +1271,6 @@ test.each([
     const f = await substrateFixture(revision);
     const sources = createSubstrateSources(f.database, f.hub);
     if (scenario === "saved contract") {
-      await mkdir(join(repository, ".factory"));
       await writeFile(join(repository, ".factory/system.json"), JSON.stringify(contract));
       await Bun.$`git -C ${repository} add .`.quiet();
       await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m setup`.quiet();
@@ -1171,13 +1280,42 @@ test.each([
     const ca = join(directory, "ca.pem");
     await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
     let canonicalReads = 0;
+    const savedTemplateContent = `${nativeProjectTemplate.content}\n`;
+    const savedTemplate = {
+      ...nativeProjectTemplate,
+      content: savedTemplateContent,
+      sha256: createHash("sha256").update(savedTemplateContent).digest("hex"),
+    };
     Object.assign(sources, {
-      async startupContract(workspaceID: string) {
+      async startupConfiguration(workspaceID: string, actorTemplatePath: string) {
         expect(workspaceID).toBe(f.workspaceID);
+        expect(actorTemplatePath).toBe(nativeProjectTemplate.path);
         canonicalReads++;
         if (scenario === "Source failure") throw new Error("owned-source-read-failure");
-        if (scenario === "saved contract") return contract;
-        if (scenario === "saved absence") return null;
+        if (scenario === "saved contract")
+          return { systemContract: contract, actorTemplate: nativeProjectTemplate };
+        if (scenario === "saved absence")
+          return { systemContract: null, actorTemplate: nativeProjectTemplate };
+        if (scenario === "saved template")
+          return { systemContract: contract, actorTemplate: savedTemplate };
+        if (scenario === "saved missing template")
+          return { systemContract: contract, actorTemplate: null };
+        if (scenario === "saved invalid template") {
+          const content = "{invalid JSON";
+          return {
+            systemContract: contract,
+            actorTemplate: {
+              ...nativeProjectTemplate,
+              content,
+              sha256: createHash("sha256").update(content).digest("hex"),
+            },
+          };
+        }
+        if (scenario === "saved unconfirmed template")
+          return {
+            systemContract: contract,
+            actorTemplate: { ...nativeProjectTemplate, sha256: "f".repeat(64) },
+          };
         return undefined;
       },
     });
@@ -1215,17 +1353,25 @@ test.each([
           ? "owned-source-read-failure"
           : scenario === "invalid repository contract"
             ? ".factory/system.json is not valid JSON"
-            : scenario.startsWith("unavailable")
-              ? "Cannot read .factory/system.json"
-              : null;
+            : scenario === "saved missing template" || scenario === "missing repository template"
+              ? "is required for Workspace Start"
+              : scenario === "saved invalid template" || scenario === "invalid repository template"
+                ? "Project ActorTemplate must be valid JSON"
+                : scenario === "oversized repository template"
+                  ? "Project ActorTemplate exceeds 64 KiB"
+                  : scenario === "saved unconfirmed template"
+                    ? "Project ActorTemplate version is unconfirmed"
+                    : scenario.startsWith("unavailable")
+                      ? "Cannot read .factory/system.json"
+                      : null;
       await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.toThrow(
         failure ?? "owned-provisioning-boundary",
       );
       expect(canonicalReads).toBe(1);
       const [provision] = await f.database.client<
-        { intent: { systemContract: unknown; revision: string } }[]
+        { intent: { systemContract: unknown; revision: string; projectTemplate: unknown } }[]
       >`
-      SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      SELECT intent FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
       if (failure) expect(provision).toBeUndefined();
       else {
         expect(provision?.intent.systemContract).toEqual(
@@ -1234,6 +1380,23 @@ test.each([
             : contract,
         );
         expect(provision?.intent.revision).toBe(revision);
+        expect(provision?.intent.projectTemplate).toEqual(
+          scenario === "saved template" ? savedTemplate : nativeProjectTemplate,
+        );
+        if (scenario === "saved template") {
+          // A lost Create reply retains the admitted bytes. Recovery must not
+          // rerun setup or replace the immutable template with later Source edits.
+          sources.startupConfiguration = async () => {
+            throw new Error("must-not-recapture-source");
+          };
+          await expect(runtime.start(f.projectID, f.userID, f.workspaceID)).rejects.not.toThrow(
+            "must-not-recapture-source",
+          );
+          expect(canonicalReads).toBe(1);
+          const [retained] = await f.database.client`
+            SELECT intent FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
+          expect(retained?.["intent"]).toEqual(provision?.intent);
+        }
       }
       expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     } finally {
@@ -1257,6 +1420,12 @@ test("Forge contract absence requires an available exact tree and never masks in
     fetch(request) {
       const url = new URL(request.url);
       reads.push(url.pathname);
+      if (url.pathname.endsWith("/contents/.factory/actor-template.json"))
+        return Response.json({
+          content: Buffer.from(nativeProjectTemplate.content).toString("base64"),
+          encoding: "base64",
+          sha: "c".repeat(40),
+        });
       if (url.pathname.endsWith("/contents/.factory/system.json")) {
         expect(url.searchParams.get("ref")).toBe("a".repeat(40));
         if (mode === "access") return new Response(null, { status: 403 });
@@ -1318,7 +1487,8 @@ test("Forge contract absence requires an available exact tree and never masks in
       );
       expect(nativeCalls).toBe(0);
       expect(
-        await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+        await f.database
+          .client`SELECT owner_id FROM factory.substrate_provision WHERE kind='workspace'`,
       ).toHaveLength(0);
     }
     mode = "absent";
@@ -1326,9 +1496,10 @@ test("Forge contract absence requires an available exact tree and never masks in
       "owned-provisioning-boundary",
     );
     const [provision] = await f.database
-      .client`SELECT intent->'systemContract' AS contract FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+      .client`SELECT intent->'systemContract' AS contract FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
     expect(provision?.["contract"]).toBeNull();
-    expect(reads.at(-1)).toEndWith(`/git/trees/${"a".repeat(40)}`);
+    expect(reads.at(-2)).toEndWith(`/git/trees/${"a".repeat(40)}`);
+    expect(reads.at(-1)).toEndWith("/contents/.factory/actor-template.json");
     expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
   } finally {
     await server.stop(true);
@@ -1378,7 +1549,8 @@ test("first Source access admits a personal Source owner without creating native
     ]).toEqual([{ id: f.workspaceID, source_revision: revision, source_branch: "main" }]);
     expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     expect(
-      await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+      await f.database
+        .client`SELECT owner_id FROM factory.substrate_provision WHERE kind='workspace'`,
     ).toHaveLength(0);
     expect(await source.ensurePersonal(f.projectID, f.userID)).toMatchObject({
       workspaceID: f.workspaceID,
@@ -1489,9 +1661,8 @@ test.each([
       const sessionID = `ses_owned_${crypto.randomUUID().replaceAll("-", "")}`;
       const actorUID = crypto.randomUUID();
       await f.database.client.begin(async (sql) => {
-        await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-        await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+        await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
         await sql`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
         await sql`INSERT INTO factory.change_agent_turn_intent(turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title,runtime_attempt_id) VALUES(${turn.id},${f.changeID},${sessionID},${`msg_owned_${turn.id.replaceAll("-", "")}`},'Owned bootstrap',${condition !== "reused"},'Owned native bootstrap',${f.attemptID})`;
@@ -1608,9 +1779,8 @@ test("native Build push and Delivery integration validate their admitted TLS des
     if (!leased?.ownerToken) throw new Error("Owned Build lease missing");
     await f.database.client.begin(async (sql) => {
       await sql`UPDATE factory.project SET repository_url=${repository} WHERE id=${f.projectID}`;
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(nativeIntent)}::jsonb,${crypto.randomUUID()},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(nativeIntent)}::jsonb,${crypto.randomUUID()},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.change_writer SET state='agent',turn_id=${turn.id},user_id=NULL,epoch=epoch+1 WHERE change_id=${f.changeID}`;
@@ -1762,7 +1932,7 @@ test("product Stop without independent Source refuses deletion rather than repor
     await expect(c.stop(f.attemptID)).rejects.toThrow("confirmed Source owner");
     expect(deletes).toBe(0);
     const [saved] = await f.database
-      .client`SELECT deleted_at,checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT deleted_at,checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(saved?.["deleted_at"]).toBeNull();
     expect(saved?.["checkpoint"]).toBeNull();
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("retired");

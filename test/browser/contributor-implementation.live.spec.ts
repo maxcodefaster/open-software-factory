@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { test } from "../fixtures/browser-test";
 import {
   recordedEditorIdentity,
@@ -81,9 +81,9 @@ for (const restore of [false, true])
         const { session } = await browserBootstrap(page);
         // Isolate the Ticket journey from registration's concurrent Staging and Knowledge startup.
         projectID = crypto.randomUUID();
-        await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+        await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
       VALUES (${projectID}, ${slug}, 'Contributor live journey',
-        'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
+        'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.factory/actor-template.json', ${session.user.id})`;
         for (const role of ["product-contributor", "developer"] as const) {
           const email = `${role}-${slug}@factory.local`;
           users.push(
@@ -323,7 +323,7 @@ for (const restore of [false, true])
           for (const [index, user] of users.entries()) {
             const [editor] = await db.client<
               Array<{ state: string }>
-            >`SELECT state FROM factory.developer_ide WHERE user_id=${user.id}`;
+            >`SELECT state FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${user.id}`;
             if (!editor) continue;
             const identity = await recordedEditorIdentity(db, user.id);
             expect(identity).toBeDefined();
@@ -338,13 +338,13 @@ for (const restore of [false, true])
               .poll(
                 async () =>
                   (
-                    await db.client`SELECT state FROM factory.developer_ide WHERE user_id=${user.id}`
+                    await db.client`SELECT state FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${user.id}`
                   )[0]?.["state"],
                 { timeout: 60_000 },
               )
               .toBe("stopped");
             if (namespace) await removeFixtureNamespace(namespace);
-            await db.client`DELETE FROM factory.developer_ide WHERE user_id=${user.id} AND state='stopped'`;
+            await db.client`DELETE FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${user.id} AND state='stopped'`;
           }
           await deleteFactoryProject(projectID);
           if (branch) {

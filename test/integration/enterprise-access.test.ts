@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createMembershipCommands } from "../../apps/factory/src/access/membership";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
@@ -49,8 +49,8 @@ test("Product leads manage without code, cannot self-upgrade, and serialize last
     const developer = await account("Developer");
     const otherLead = await account("Other lead");
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`enterprise-${projectID}`},'Enterprise access','https://example.invalid/repo.git','main','.devcontainer/devcontainer.json',${lead.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`enterprise-${projectID}`},'Enterprise access','https://example.invalid/repo.git','main','.factory/actor-template.json',${lead.id})`;
     // These are negative checks of retired adapters, not compatibility calls.
     for (const [path, method, body] of [
       ["/api/admin/users", "GET", undefined],
@@ -241,8 +241,8 @@ test("browser session termination leaves admitted work valid; account disablemen
       .join("; ");
     const projectID = crypto.randomUUID();
     const conversationID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`sessions-${projectID}`},'Sessions','https://example.invalid/session.git','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`sessions-${projectID}`},'Sessions','https://example.invalid/session.git','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${userID},'developer',${admin})`;
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by) VALUES(${conversationID},${projectID},${userID})`;
     const store = createAgentTurnStore(database);
@@ -327,8 +327,8 @@ test("personal App previews stay private until shared and current Project develo
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Preview member',${`${id}@factory.local`})`;
     const project = crypto.randomUUID();
     const workspace = personalWorkspaceIdentity(project, owner).workspaceID;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`preview-${project}`},'Preview','https://example.invalid/repo.git','main','.devcontainer/devcontainer.json',${owner})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`preview-${project}`},'Preview','https://example.invalid/repo.git','main','.factory/actor-template.json',${owner})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${owner},'developer',${owner}),(${project},${contributor},'product-contributor',${owner}),(${project},${collaborator},'developer',${owner})`;
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)

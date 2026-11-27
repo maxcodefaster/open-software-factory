@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
 import {
   requestedWorkspace,
   selectedWorkspaceLocation,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-location";
+import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
 
 test("Workspace switching restores the selected identity instead of the original query", () => {
   const selected = selectedWorkspaceLocation(

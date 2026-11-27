@@ -1,13 +1,11 @@
 import { expect, test } from "bun:test";
+import { environmentManifest, environmentMetadata } from "#project-domain/environment";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
 import type {
   EnvironmentSecrets,
   StoredEnvironment,
 } from "../../apps/factory/src/environments/openbao";
-import {
-  environmentManifest,
-  environmentMetadata,
-} from "../../packages/project-domain/src/environment";
+import { createEnvironmentService } from "../../apps/factory/src/environments/service";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -28,8 +26,8 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
       return stored.get(key);
     },
     async create(key, value) {
-      const [intent] =
-        await database.client`SELECT command_id FROM factory.environment_write WHERE secret_key=${key}`;
+      const [intent] = await database.client`SELECT id FROM factory.operation
+          WHERE kind='environments.write' AND idempotency_key=${`environments.write:${key}`}`;
       expect(intent).toBeDefined();
       writes += 1;
       stored.set(key, value);
@@ -44,9 +42,9 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
       for (const userID of [manager, developer, contributor, outsider])
         await sql`INSERT INTO auth."user"(id, name, email, email_verified)
           VALUES (${userID}, 'Owned environment test', ${`${userID}@environment.test`}, true)`;
-      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
         VALUES (${projectID}, ${`environment-${projectID}`}, 'Owned environment', 'https://example.invalid/owned.git',
-          'main', '.devcontainer/devcontainer.json', ${manager})`;
+          'main', '.factory/actor-template.json', ${manager})`;
       for (const [userID, role] of [
         [manager, "product-contributor"],
         [developer, "developer"],
@@ -60,6 +58,7 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
       secrets,
       "owned-environment-signing-key",
     );
+    const service = createEnvironmentService(controller);
     const input = {
       commandID: crypto.randomUUID(),
       version: 0,
@@ -68,15 +67,6 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
           name: "API_KEY",
           value: "secret-runtime-value",
           runtime: true,
-          build: false,
-          verification: false,
-        },
-      ],
-      registries: [
-        {
-          host: "registry.example.com",
-          username: "robot",
-          password: "secret-registry-value",
           verification: false,
         },
       ],
@@ -88,25 +78,24 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
     await expect(controller.get(projectID, contributor, "development")).rejects.toThrow(
       "Developer",
     );
-    const result = await controller.save(projectID, manager, "development", input);
+    const result = await service.save(projectID, manager, "development", input);
     expect(result.version).toBe(1);
     expect(result.pending).toBe(false);
+    expect(result).not.toHaveProperty("preparation");
     expect(JSON.stringify(result)).not.toContain("secret-");
     expect(writes).toBe(1);
-    expect((await controller.save(projectID, manager, "development", input)).version).toBe(1);
+    expect((await service.save(projectID, manager, "development", input)).version).toBe(1);
     expect(writes).toBe(1);
     expect((await controller.get(projectID, developer, "development")).canManage).toBe(false);
     expect((await controller.get(projectID, manager, "main-preview")).variables).toEqual([]);
-    const rows =
-      await database.client`SELECT row_to_json(row) AS value FROM factory.environment_write row WHERE project_id=${projectID}`;
+    const rows = await database.client`SELECT row_to_json(row) AS value FROM factory.operation row
+        WHERE kind='environments.write' AND scope_type='project_environment' AND scope_id LIKE ${`${projectID}:%`}`;
     expect(JSON.stringify(rows)).not.toContain("secret-runtime-value");
-    expect(JSON.stringify(rows)).not.toContain("secret-registry-value");
     const next = {
       ...input,
       commandID: crypto.randomUUID(),
       version: 1,
       variables: input.variables.map(({ value: _value, ...metadata }) => metadata),
-      registries: input.registries.map(({ password: _password, ...metadata }) => metadata),
     };
     const concurrent = await Promise.allSettled([
       controller.save(projectID, manager, "development", next),
@@ -120,11 +109,18 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
     expect([...stored.values()].at(-1)?.bundle.variables[0]?.value).toBe("secret-runtime-value");
     const [winner] = await database.client<
       Array<{ commandID: string }>
-    >`SELECT command_id AS "commandID" FROM factory.environment_write WHERE project_id=${projectID} AND base_version=1 AND state='committed'`;
+    >`SELECT id AS "commandID" FROM factory.operation
+      WHERE kind='environments.write' AND scope_type='project_environment'
+        AND scope_id=${`${projectID}:development`}
+        AND (payload->>'baseVersion')::bigint=1 AND state='committed'`;
     if (!winner) throw new Error("Concurrent winner missing");
-    await database.client`UPDATE factory.environment_write SET state='write-intended', committed_at=NULL
-      WHERE command_id=${winner.commandID}`;
-    await database.client`UPDATE factory.project_environment SET version=1 WHERE project_id=${projectID} AND environment='development'`;
+    await database.client`UPDATE factory.operation
+      SET state='write-intended', active_key=${`environments.write:${projectID}:development`}, completed_at=NULL
+      WHERE id=${winner.commandID} AND kind='environments.write'`;
+    await database.client`UPDATE factory.operation
+      SET payload=jsonb_set(payload,'{version}','1'::jsonb), updated_at=now()
+      WHERE kind='environments.environment' AND scope_type='project' AND scope_id=${projectID}
+        AND idempotency_key=${`environments.environment:${projectID}:development`}`;
     const recovered = createEnvironmentController(
       database,
       secrets,
@@ -176,10 +172,14 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
         `stored.get(\`projects/\${projectID}/development/\${winner.commandID}\`)`,
       );
       stored.set(secretKey, { ...previous, commandID });
-      await database.client`INSERT INTO factory.environment_write(command_id,project_id,environment,
-        base_version,fingerprint,manifest,secret_key,created_by)
-        SELECT ${commandID},project_id,environment,2,fingerprint,manifest,${secretKey},created_by
-        FROM factory.environment_write WHERE command_id=${winner.commandID}`;
+      await database.client`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by
+        )
+        SELECT ${commandID},kind,scope_type,scope_id,${`environments.write:${secretKey}`},
+          ${`environments.write:${projectID}:development`},'write-intended',
+          jsonb_set(jsonb_set(payload,'{baseVersion}','2'::jsonb),'{secretKey}',to_jsonb(${secretKey}::text)),
+          created_by
+        FROM factory.operation WHERE id=${winner.commandID} AND kind='environments.write'`;
       if (revoked === "management")
         await database.client`UPDATE factory.project_membership SET manage_project=false
           WHERE project_id=${projectID} AND user_id=${manager}`;
@@ -187,11 +187,12 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
         await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${manager}`;
       await recovered.recover();
       const [environment] = await database.client<Array<{ version: number }>>`
-        SELECT version::float8 AS version FROM factory.project_environment
-        WHERE project_id=${projectID} AND environment='development'`;
+        SELECT (payload->>'version')::float8 AS version FROM factory.operation
+        WHERE kind='environments.environment' AND scope_type='project' AND scope_id=${projectID}
+          AND idempotency_key=${`environments.environment:${projectID}:development`}`;
       expect(environment?.version).toBe(2);
       const [intent] = await database.client<Array<{ state: string }>>`
-        SELECT state FROM factory.environment_write WHERE command_id=${commandID}`;
+        SELECT state FROM factory.operation WHERE id=${commandID} AND kind='environments.write'`;
       expect(intent?.state).toBe("discarded");
       await database.client`UPDATE factory.project_membership SET manage_project=true
         WHERE project_id=${projectID} AND user_id=${manager}`;
@@ -230,8 +231,9 @@ test("environment retries preserve exact versions and manifests, and settlement 
     async create(key, value) {
       const [intent] = await database.client<
         Array<{ state: string; manifest: unknown; secretKey: string }>
-      >`SELECT state, manifest, secret_key AS "secretKey" FROM factory.environment_write
-        WHERE command_id=${value.commandID}`;
+      >`SELECT state, payload->'manifest' AS manifest, payload->>'secretKey' AS "secretKey"
+        FROM factory.operation
+        WHERE id=${value.commandID} AND kind='environments.write'`;
       expect(intent?.state).toBe("write-intended");
       expect(intent?.secretKey).toBe(key);
       expect(intent?.manifest).toEqual(environmentMetadata(value.bundle));
@@ -245,9 +247,9 @@ test("environment retries preserve exact versions and manifests, and settlement 
     await database.client.begin(async (sql) => {
       await sql`INSERT INTO auth."user"(id, name, email, email_verified)
         VALUES (${manager}, 'Owned retry manager', ${`${manager}@environment.test`}, true)`;
-      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
         VALUES (${projectID}, ${`environment-${projectID}`}, 'Owned retry environment',
-          'https://example.invalid/owned.git', 'main', '.devcontainer/devcontainer.json', ${manager})`;
+          'https://example.invalid/owned.git', 'main', '.factory/actor-template.json', ${manager})`;
       await sql`INSERT INTO factory.project_membership(project_id, user_id, role, manage_project, updated_by)
         VALUES (${projectID}, ${manager}, 'product-contributor', true, ${manager})`;
     });
@@ -260,26 +262,13 @@ test("environment retries preserve exact versions and manifests, and settlement 
           name: "RUNTIME_KEY",
           value: "protected-runtime-value",
           runtime: true,
-          build: false,
           verification: false,
         },
         {
-          name: "BUILD_KEY",
-          value: "protected-build-value",
+          name: "VERIFICATION_KEY",
+          value: "protected-verification-value",
           runtime: false,
-          build: true,
           verification: true,
-        },
-      ],
-      registries: [
-        {
-          host: "registry.example.com:5443",
-          username: "owned-robot",
-          password: "protected-password",
-          certificate:
-            "-----BEGIN CERTIFICATE-----\nprotected-certificate\n-----END CERTIFICATE-----",
-          verification: false,
-          publish: true,
         },
       ],
     };
@@ -287,30 +276,18 @@ test("environment retries preserve exact versions and manifests, and settlement 
     const originalKey = `projects/${projectID}/development/${initial.commandID}`;
     const original = fixtureValue(stored.get(originalKey), "original stored environment");
     const version = 4_294_967_299;
-    await database.client`UPDATE factory.project_environment SET version=${version}
-      WHERE project_id=${projectID} AND environment='development'`;
-    for (const [environment, environmentVersion, state, createdAt, revision] of [
-      ["development", version, "failed", "2026-01-01T00:00:00Z", "a"],
-      ["development", version, "unsupported", "2026-01-02T00:00:00Z", "b"],
-      ["development", version + 2, "running", "2026-01-03T00:00:00Z", "c"],
-      ["main-preview", version, "pending", "2026-01-04T00:00:00Z", "d"],
-    ] as const)
-      await database.client`INSERT INTO factory.project_image_preparation(
-        id, project_id, environment, revision, environment_version, state, created_at)
-        VALUES (${crypto.randomUUID()}, ${projectID}, ${environment}, ${revision.repeat(40)},
-          ${environmentVersion}, ${state}, ${createdAt})`;
+    await database.client`UPDATE factory.operation
+      SET payload=jsonb_set(payload,'{version}',to_jsonb(${version}::bigint)), updated_at=now()
+      WHERE kind='environments.environment' AND scope_type='project' AND scope_id=${projectID}
+        AND idempotency_key=${`environments.environment:${projectID}:development`}`;
     const active = await controller.get(projectID, manager, "development");
     expect(active.version).toBe(version);
-    expect(active.preparation).toBe("unsupported");
+    expect(active).not.toHaveProperty("preparation");
     expect(active.variables).toEqual(environmentMetadata(original.bundle).variables);
-    expect(active.registries).toEqual(environmentMetadata(original.bundle).registries);
     const next = {
       commandID: crypto.randomUUID(),
       version,
       variables: initial.variables.map(({ value: _value, ...metadata }) => metadata),
-      registries: initial.registries.map(
-        ({ password: _password, certificate: _certificate, ...metadata }) => metadata,
-      ),
     };
     await expect(
       controller.save(projectID, manager, "development", { ...next, version: version - 1 }),
@@ -323,7 +300,7 @@ test("environment retries preserve exact versions and manifests, and settlement 
     const pending = await controller.get(projectID, manager, "development");
     expect(pending.version).toBe(version);
     expect(pending.pendingCommandID).toBe(next.commandID);
-    expect(pending.preparation).toBe("unsupported");
+    expect(pending).not.toHaveProperty("preparation");
     expect((await controller.get(projectID, manager, "main-preview")).pending).toBe(false);
     await controller.recover();
     expect(writes).toHaveLength(2);
@@ -346,24 +323,17 @@ test("environment retries preserve exact versions and manifests, and settlement 
 
     await database.client`CREATE FUNCTION factory.reject_environment_commit() RETURNS trigger
       LANGUAGE plpgsql AS $$ BEGIN
-        IF NEW.state = 'committed' THEN RAISE EXCEPTION 'owned settlement rollback'; END IF;
+        IF NEW.kind = 'environments.write' AND NEW.state = 'committed' THEN RAISE EXCEPTION 'owned settlement rollback'; END IF;
         RETURN NEW;
       END $$`;
     await database.client`CREATE TRIGGER owned_environment_commit_failure
-      BEFORE UPDATE ON factory.environment_write
+      BEFORE UPDATE ON factory.operation
       FOR EACH ROW EXECUTE FUNCTION factory.reject_environment_commit()`;
     unconfirmed = false;
     const replay = {
-      registries: next.registries.map(({ host, username, verification, publish }) => ({
-        publish,
-        verification,
-        username,
-        host,
-      })),
-      variables: next.variables.map(({ name, runtime, build, verification }) => ({
+      variables: next.variables.map(({ name, runtime, verification }) => ({
         name,
         verification,
-        build,
         runtime,
       })),
       version,
@@ -377,8 +347,9 @@ test("environment retries preserve exact versions and manifests, and settlement 
     expect(stored.get(nextKey)?.bundle).toEqual(original.bundle);
     const [unchanged] = await database.client<
       Array<{ version: number; secretKey: string; manifest: unknown }>
-    >`SELECT version::float8 AS version, secret_key AS "secretKey", manifest
-      FROM factory.project_environment WHERE project_id=${projectID} AND environment='development'`;
+    >`SELECT (payload->>'version')::float8 AS version, payload->>'secretKey' AS "secretKey", payload->'manifest' AS manifest
+      FROM factory.operation WHERE kind='environments.environment' AND scope_type='project'
+        AND scope_id=${projectID} AND idempotency_key=${`environments.environment:${projectID}:development`}`;
     expect(unchanged?.version).toBe(version);
     expect(unchanged?.secretKey).toBe(originalKey);
     expect(environmentManifest.parse(unchanged?.manifest)).toEqual(
@@ -386,18 +357,17 @@ test("environment retries preserve exact versions and manifests, and settlement 
     );
     const [intent] = await database.client<
       Array<{ state: string; committedAt: Date | null }>
-    >`SELECT state, committed_at AS "committedAt" FROM factory.environment_write
-      WHERE command_id=${next.commandID}`;
+    >`SELECT state, completed_at AS "committedAt" FROM factory.operation
+      WHERE id=${next.commandID} AND kind='environments.write'`;
     expect(intent).toEqual({ state: "write-intended", committedAt: null });
-    await database.client`DROP TRIGGER owned_environment_commit_failure ON factory.environment_write`;
+    await database.client`DROP TRIGGER owned_environment_commit_failure ON factory.operation`;
     await database.client`DROP FUNCTION factory.reject_environment_commit()`;
     await controller.recover();
     const result = await controller.get(projectID, manager, "development");
     expect(result.version).toBe(version + 1);
     expect(result.pending).toBe(false);
-    expect(result.preparation).toBeNull();
+    expect(result).not.toHaveProperty("preparation");
     expect(result.variables).toEqual(active.variables);
-    expect(result.registries).toEqual(active.registries);
     expect(JSON.stringify(result)).not.toContain("protected-");
     expect((await controller.save(projectID, manager, "development", replay)).version).toBe(
       version + 1,
@@ -406,8 +376,8 @@ test("environment retries preserve exact versions and manifests, and settlement 
     expect(stored.get(originalKey)).toEqual(original);
     const [committed] = await database.client<
       Array<{ state: string; committedAt: Date | null }>
-    >`SELECT state, committed_at AS "committedAt" FROM factory.environment_write
-      WHERE command_id=${next.commandID}`;
+    >`SELECT state, completed_at AS "committedAt" FROM factory.operation
+      WHERE id=${next.commandID} AND kind='environments.write'`;
     expect(committed?.state).toBe("committed");
     expect(committed?.committedAt).not.toBeNull();
   } finally {

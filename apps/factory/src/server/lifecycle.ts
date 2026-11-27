@@ -18,7 +18,6 @@ type LifecycleServices = Pick<
   | "mcpConnections"
   | "monitoringWorker"
   | "observeRecoveredRuntimes"
-  | "projectPreparation"
   | "projectAgentController"
   | "projectSetup"
   | "setupReadiness"
@@ -54,7 +53,6 @@ export function startFactoryLifecycle(
     mcpConnections,
     monitoringWorker,
     observeRecoveredRuntimes,
-    projectPreparation,
     projectAgentController,
     projectSetup,
     releaseController,
@@ -133,7 +131,6 @@ export function startFactoryLifecycle(
     true,
   );
   jobs.every("Wiki event admission failed", () => wikiSourceUpdates.drain(), 2_000);
-  jobs.every("Project image preparation needs retry", () => projectPreparation.drain(), 2_000);
   jobs.every("MCP credential recovery is unavailable", () => mcpConnections.recover(), 30_000);
   jobs.every(
     "Shared submission observation is unavailable",

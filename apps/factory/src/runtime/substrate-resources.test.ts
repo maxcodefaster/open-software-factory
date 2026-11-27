@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import {
+  nativeProjectBootstrap,
+  nativeProjectDefinition,
+} from "../../../../test/fixtures/native-project";
 import { substrateResourceReservation } from "./substrate-resources";
 import { renderSubstrateTemplate } from "./substrate-template";
 
@@ -8,12 +12,18 @@ test("native templates keep legacy limits or freeze explicit positive finite res
     workerSelector: { "factory.dev/deployment": "owned" },
   };
   expect(substrateResourceReservation({})).toEqual({ cpuMilli: 1500, memoryMiB: 1024 });
-  expect(renderSubstrateTemplate("owned", config, {}).resources.limits).toEqual({
+  expect(
+    renderSubstrateTemplate("owned", config, nativeProjectBootstrap(), nativeProjectDefinition)
+      .resources.limits,
+  ).toEqual({
     cpuMillicores: "1500",
     memoryBytes: "1073741824",
   });
   const selected = { ...config, resources: { cpuMilli: 2000, memoryMiB: 4096 } };
-  expect(renderSubstrateTemplate("owned", selected, {}).resources.limits).toEqual({
+  expect(
+    renderSubstrateTemplate("owned", selected, nativeProjectBootstrap(), nativeProjectDefinition)
+      .resources.limits,
+  ).toEqual({
     cpuMillicores: "2000",
     memoryBytes: "4294967296",
   });

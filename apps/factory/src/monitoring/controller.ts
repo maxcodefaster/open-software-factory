@@ -1,24 +1,14 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, lt, or, sql as query } from "drizzle-orm";
 import type { z } from "zod";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
   defaultAutofixInstructions,
   monitoringChange,
   monitoringSave,
   monitoringView,
-} from "../../../../packages/conversation-domain/src/monitoring";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  monitoringCommand,
-  monitoringHook,
-  monitoringIncident,
-  monitoringPolicy,
-} from "../../../../packages/db/src/schema";
+} from "#conversation-domain/monitoring";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { auditEvent, monitoringHook, monitoringIncident, monitoringPolicy } from "#db/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import {
@@ -62,21 +52,19 @@ export function createMonitoringController(
     );
     const [old] = await db
       .select({
-        userId: monitoringCommand.actorId,
-        projectId: monitoringCommand.projectId,
-        hookId: monitoringCommand.hookId,
-        action: monitoringCommand.action,
-        digest: monitoringCommand.inputDigest,
+        userId: auditEvent.actorId,
+        projectId: auditEvent.scopeId,
+        payload: auditEvent.payload,
       })
-      .from(monitoringCommand)
-      .where(eq(monitoringCommand.id, commandId));
+      .from(auditEvent)
+      .where(eq(auditEvent.dedupeKey, `monitoring.command:${commandId}`));
     if (
       old &&
       (old.userId !== userId ||
         old.projectId !== projectId ||
-        old.hookId !== hookId ||
-        old.action !== action ||
-        old.digest !== monitoringDigest(input))
+        old.payload["hookId"] !== hookId ||
+        old.payload["action"] !== action ||
+        old.payload["inputDigest"] !== monitoringDigest(input))
     )
       throw new CommandError(
         "conflict",
@@ -94,14 +82,19 @@ export function createMonitoringController(
     input: unknown,
   ) {
     await drizzleTransaction(sql)
-      .insert(monitoringCommand)
+      .insert(auditEvent)
       .values({
         id: commandId,
-        projectId,
-        hookId,
+        kind: "monitoring.command",
+        scopeType: "project",
+        scopeId: projectId,
+        dedupeKey: `monitoring.command:${commandId}`,
         actorId: userId,
-        action,
-        inputDigest: monitoringDigest(input),
+        payload: {
+          hookId,
+          action,
+          inputDigest: monitoringDigest(input),
+        },
       });
   }
   const authorityIn = (sql: DatabaseTransaction, incidentId: string) =>
@@ -128,7 +121,6 @@ export function createMonitoringController(
             enabled: monitoringHook.enabled,
             delegatedBy: monitoringPolicy.delegatedBy,
             policyId: monitoringPolicy.id,
-            assignment: monitoringPolicy.assignment,
             sourceAssignments: monitoringPolicy.sourceAssignments,
             connectionIds: monitoringPolicy.sourceIds,
             instructions: query<string>`coalesce(${monitoringPolicy.instructions},${defaultAutofixInstructions})`,
@@ -140,6 +132,9 @@ export function createMonitoringController(
           .orderBy(asc(monitoringHook.name), asc(monitoringHook.id));
         const checked = [];
         for (const hook of hooks) {
+          const assignments = retainedInputAssignments({
+            sourceAssignments: hook.sourceAssignments,
+          });
           let delegationCurrent = false;
           if (hook.enabled) {
             try {
@@ -154,10 +149,7 @@ export function createMonitoringController(
               await validateInputAssignmentsIn(
                 database,
                 sql,
-                retainedInputAssignments({
-                  sourceAssignments: hook.sourceAssignments as MCPAssignment[] | null,
-                  assignment: hook.assignment as MCPAssignment | null,
-                }),
+                assignments,
                 projectId,
                 hook.delegatedBy,
               );
@@ -166,17 +158,10 @@ export function createMonitoringController(
               if (!(cause instanceof CommandError)) throw cause;
             }
           }
-          const assignments = retainedInputAssignments({
-            sourceAssignments: hook.sourceAssignments as MCPAssignment[] | null,
-            assignment: hook.assignment as MCPAssignment | null,
-          });
           checked.push({
             ...hook,
             sourceIds: assignments.map((source) => source.connectionId),
-            connectionIds:
-              hook.sourceAssignments === null
-                ? assignments.map((source) => source.connectionId)
-                : hook.connectionIds,
+            connectionIds: hook.connectionIds,
             delegationCurrent,
           });
         }
@@ -275,8 +260,6 @@ export function createMonitoringController(
         await db.insert(monitoringPolicy).values({
           id: policyId,
           hookId: input.id,
-          connectionId: null,
-          assignment: null,
           delegatedBy: userId,
           delegation: input.delegation,
           instructions: input.instructions,

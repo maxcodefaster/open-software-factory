@@ -97,7 +97,6 @@ test.each(["/workspaces/project", "/code/python/backend"])(
       undefined,
       undefined,
       undefined,
-      undefined,
       directory,
     );
     const sessionID = `ses_owned_${crypto.randomUUID().replaceAll("-", "")}`;

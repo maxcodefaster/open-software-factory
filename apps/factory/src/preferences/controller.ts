@@ -1,11 +1,13 @@
-import { eq } from "drizzle-orm";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { userUIPreference } from "../../../../packages/db/src/schema";
+import { and, eq } from "drizzle-orm";
+import type { createDatabase } from "#db/client";
+import { operation } from "#db/schema";
 import {
   type DesktopBackgroundKey,
   defaultDesktopBackgroundKey,
   isDesktopBackgroundKey,
-} from "../../../../packages/interface-domain/src/background";
+} from "#interface-domain/background";
+
+const UI_PREFERENCE_KIND = "user.ui_preference";
 
 export type UIPreference = {
   desktopBackgroundKey: DesktopBackgroundKey;
@@ -15,10 +17,17 @@ export function createUIPreferenceController(database: ReturnType<typeof createD
   return {
     async get(userID: string): Promise<UIPreference> {
       const rows = await database.db
-        .select({ desktopBackgroundKey: userUIPreference.desktopBackgroundKey })
-        .from(userUIPreference)
-        .where(eq(userUIPreference.userId, userID));
-      const key = rows[0]?.desktopBackgroundKey;
+        .select({ payload: operation.payload })
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, UI_PREFERENCE_KIND),
+            eq(operation.scopeType, "user"),
+            eq(operation.scopeId, userID),
+            eq(operation.idempotencyKey, `${UI_PREFERENCE_KIND}:${userID}`),
+          ),
+        );
+      const key = rows[0]?.payload["desktopBackgroundKey"];
       return {
         desktopBackgroundKey: isDesktopBackgroundKey(key) ? key : defaultDesktopBackgroundKey,
       };

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import { CommandError } from "../command-error";
 import { createDeveloperIDEEdge } from "./developer-ide-edge";
 

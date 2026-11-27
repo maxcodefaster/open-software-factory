@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { parse } from "yaml";
-import { attachmentLimits } from "../../../../packages/conversation-domain/src/attachments";
+import { attachmentLimits } from "#conversation-domain/attachments";
 
 test("operator configuration examples and Helm use the same attachment defaults", async () => {
   const values = parse(

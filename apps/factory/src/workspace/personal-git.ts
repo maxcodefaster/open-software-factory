@@ -1,15 +1,8 @@
-import { and, desc, eq, inArray, isNull, sql as query } from "drizzle-orm";
+import { and, desc, eq, isNull, sql as query } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  authUser,
-  developmentWorkspace,
-  personalGitOperation,
-  project,
-  runtimeAttempt,
-  substrateBinding,
-} from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { authUser, developmentWorkspace, operation, project, runtimeAttempt } from "#db/schema";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
@@ -42,40 +35,43 @@ type Source = {
   binding: unknown;
 };
 
+const PERSONAL_GIT_KIND = "workspace.personal_git";
+
 export function personalGitCapability(commandID: string) {
   return runtimeSourceCapability(`personal-git:${commandID}`);
 }
 
 export async function personalGitRepository(database: Database, commandID: string) {
-  const [operation] = await database.db
+  const [record] = await database.db
     .select({
       repository: project.repositoryUrl,
       projectID: developmentWorkspace.projectId,
-      userID: personalGitOperation.userId,
+      userID: operation.createdBy,
+      workspaceID: operation.scopeId,
     })
-    .from(personalGitOperation)
-    .innerJoin(developmentWorkspace, eq(developmentWorkspace.id, personalGitOperation.workspaceId))
+    .from(operation)
+    .innerJoin(developmentWorkspace, query`${developmentWorkspace.id}::text = ${operation.scopeId}`)
     .innerJoin(project, eq(project.id, developmentWorkspace.projectId))
-    .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, personalGitOperation.runtimeAttemptId))
+    .innerJoin(
+      runtimeAttempt,
+      query`${runtimeAttempt.id}::text = ${operation.payload}->>'runtimeAttemptId'`,
+    )
     .where(
       and(
-        eq(personalGitOperation.id, commandID),
-        eq(personalGitOperation.state, "attempted"),
-        inArray(personalGitOperation.action, ["fetch", "pull"]),
+        eq(operation.id, commandID),
+        eq(operation.kind, PERSONAL_GIT_KIND),
+        eq(operation.state, "attempted"),
+        query`${operation.payload}->>'action' IN ('fetch', 'pull')`,
         eq(developmentWorkspace.kind, "personal"),
         eq(runtimeAttempt.workspaceId, developmentWorkspace.id),
         eq(runtimeAttempt.state, "ready"),
         isNull(runtimeAttempt.stopIntendedAt),
       ),
     );
-  if (!operation) return null;
-  const [scope] = await database.db
-    .select({ id: personalGitOperation.workspaceId })
-    .from(personalGitOperation)
-    .where(eq(personalGitOperation.id, commandID));
-  if (!scope) return null;
-  await database.client.begin((sql) => workspaceAuthorityIn(sql, scope.id, operation.userID, true));
-  return operation.repository;
+  if (!record?.userID) return null;
+  const userID = record.userID;
+  await database.client.begin((sql) => workspaceAuthorityIn(sql, record.workspaceID, userID, true));
+  return record.repository;
 }
 
 export function createPersonalGit(
@@ -91,7 +87,7 @@ export function createPersonalGit(
         attemptID: runtimeAttempt.id,
         authorName: authUser.name,
         authorEmail: authUser.email,
-        binding: substrateBinding.intent,
+        binding: runtimeAttempt.bindingIntent,
       })
       .from(developmentWorkspace)
       .innerJoin(project, eq(project.id, developmentWorkspace.projectId))
@@ -104,7 +100,6 @@ export function createPersonalGit(
           isNull(runtimeAttempt.stopIntendedAt),
         ),
       )
-      .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
       .where(
         and(eq(developmentWorkspace.id, workspaceID), eq(developmentWorkspace.kind, "personal")),
       )
@@ -196,60 +191,72 @@ export function createPersonalGit(
       try {
         const db = drizzleTransaction(connection);
         await connection`SELECT pg_advisory_lock(hashtext(${`personal-git:${workspaceID}`}))`;
+        const idempotencyKey = `${PERSONAL_GIT_KIND}:${input.commandID}`;
         await db
-          .insert(personalGitOperation)
+          .insert(operation)
           .values({
             id: input.commandID,
-            workspaceId: workspaceID,
-            runtimeAttemptId: saved.attemptID,
-            userId: userID,
-            action,
-            expectedHead: input.expectedHead,
-            branch: saved.branch,
-            message: input.message,
+            kind: PERSONAL_GIT_KIND,
+            scopeType: "workspace",
+            scopeId: workspaceID,
+            idempotencyKey,
+            state: "intended",
+            createdBy: userID,
+            payload: {
+              runtimeAttemptId: saved.attemptID,
+              action,
+              expectedHead: input.expectedHead,
+              branch: saved.branch,
+              message: input.message,
+            },
           })
           .onConflictDoNothing();
-        const [operation] = await db
+        const [record] = await db
           .select({
-            workspaceID: personalGitOperation.workspaceId,
-            attemptID: personalGitOperation.runtimeAttemptId,
-            userID: personalGitOperation.userId,
-            action: personalGitOperation.action,
-            expectedHead: personalGitOperation.expectedHead,
-            branch: personalGitOperation.branch,
-            message: personalGitOperation.message,
-            state: personalGitOperation.state,
-            result: personalGitOperation.result,
-            failure: personalGitOperation.failure,
+            workspaceID: operation.scopeId,
+            attemptID: query<string>`${operation.payload}->>'runtimeAttemptId'`,
+            userID: operation.createdBy,
+            action: query<string>`${operation.payload}->>'action'`,
+            expectedHead: query<string>`${operation.payload}->>'expectedHead'`,
+            branch: query<string>`${operation.payload}->>'branch'`,
+            message: query<string>`${operation.payload}->>'message'`,
+            state: operation.state,
+            result: operation.result,
+            failure: operation.error,
           })
-          .from(personalGitOperation)
-          .where(eq(personalGitOperation.id, input.commandID));
+          .from(operation)
+          .where(and(eq(operation.id, input.commandID), eq(operation.kind, PERSONAL_GIT_KIND)));
         if (
-          !operation ||
-          operation.workspaceID !== workspaceID ||
-          operation.userID !== userID ||
-          operation.action !== action ||
-          operation.expectedHead !== input.expectedHead ||
-          operation.message !== input.message
+          !record ||
+          record.workspaceID !== workspaceID ||
+          record.userID !== userID ||
+          record.action !== action ||
+          record.expectedHead !== input.expectedHead ||
+          record.message !== input.message
         )
           throw new CommandError("conflict", "Git command identity belongs to another request");
-        if (operation.state === "succeeded") return personalGitStatus.parse(operation.result);
-        if (operation.state !== "intended")
+        if (record.state === "succeeded") return personalGitStatus.parse(record.result);
+        if (record.state !== "intended")
           throw new CommandError(
             "conflict",
-            operation.failure ?? "The previous Git outcome is unconfirmed. Inspect Git status",
+            record.failure ?? "The previous Git outcome is unconfirmed. Inspect Git status",
           );
         // Recheck authority and execution after waiting for the Workspace lock.
         const current = await source(workspaceID, userID, true);
-        if (current.attemptID !== operation.attemptID || current.branch !== operation.branch)
+        if (current.attemptID !== record.attemptID || current.branch !== record.branch)
           throw new CommandError("conflict", "Workspace execution or default branch changed");
         await db
-          .update(personalGitOperation)
-          .set({ state: "attempted", attemptedAt: query`now()` })
+          .update(operation)
+          .set({
+            state: "attempted",
+            payload: query`${operation.payload} || jsonb_build_object('attemptedAt', now())`,
+            updatedAt: query`now()`,
+          })
           .where(
             and(
-              eq(personalGitOperation.id, input.commandID),
-              eq(personalGitOperation.state, "intended"),
+              eq(operation.id, input.commandID),
+              eq(operation.kind, PERSONAL_GIT_KIND),
+              eq(operation.state, "intended"),
             ),
           );
         try {
@@ -278,9 +285,14 @@ export function createPersonalGit(
           // source_revision is the immutable initialization basis, not the
           // moving Git HEAD. Retain the new HEAD only in this operation outcome.
           await db
-            .update(personalGitOperation)
-            .set({ state: "succeeded", result: status, completedAt: query`now()` })
-            .where(eq(personalGitOperation.id, input.commandID));
+            .update(operation)
+            .set({
+              state: "succeeded",
+              result: status,
+              completedAt: query`now()`,
+              updatedAt: query`now()`,
+            })
+            .where(and(eq(operation.id, input.commandID), eq(operation.kind, PERSONAL_GIT_KIND)));
           return status;
         } catch (cause) {
           const known =
@@ -289,13 +301,14 @@ export function createPersonalGit(
             ? cause.message
             : "Git outcome is unconfirmed. Inspect Git status before issuing another command";
           await db
-            .update(personalGitOperation)
+            .update(operation)
             .set({
               state: known ? "failed" : "uncertain",
-              failure,
+              error: failure,
               completedAt: known ? new Date() : null,
+              updatedAt: query`now()`,
             })
-            .where(eq(personalGitOperation.id, input.commandID));
+            .where(and(eq(operation.id, input.commandID), eq(operation.kind, PERSONAL_GIT_KIND)));
           throw new CommandError(known ? "conflict" : "unavailable", failure);
         }
       } finally {

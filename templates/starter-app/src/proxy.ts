@@ -17,11 +17,14 @@ export function appProxyContext(headers: IncomingHttpHeaders | Headers) {
   const path = prefix.match(
     /^\/runtime\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/(app|preview\/app(?:-[a-z][a-z0-9-]{0,26})?)$/,
   );
-  if (!path?.[1]) return;
+  const identity =
+    path?.[1]?.replaceAll("-", "") ??
+    (prefix === "" ? host.match(/^([a-f0-9]{32})-app\.runtime\./)?.[1] : undefined);
+  if (!identity) return;
   try {
     const origin = new URL(`${protocol}://${host}`);
     if (origin.host !== host || origin.pathname !== "/" || origin.search || origin.hash) return;
-    const label = `${path[1].replaceAll("-", "")}-app.runtime.`;
+    const label = `${identity}-app.runtime.`;
     if (!origin.hostname.startsWith(label) || origin.hostname.length > 253) return;
     const domain = origin.hostname.slice(label.length);
     if (

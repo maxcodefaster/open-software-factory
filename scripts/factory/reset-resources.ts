@@ -1,13 +1,13 @@
 import { z } from "zod";
-import type { createDatabase } from "../../packages/db/src/client";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import type { createDatabase } from "#db/client";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import {
   createSubstrateControl,
   type SubstrateCall,
   SubstrateRPCError,
   substrateConnection,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+} from "#runtime-kubernetes/substrate-control";
+import { developerIDEIdentity } from "#workspace-domain/developer-ide";
 
 const kubernetesName = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,252}$/);
 export const resetResources = z.strictObject({
@@ -35,26 +35,17 @@ export async function readResetResources(database: ReturnType<typeof createDatab
       WHERE state NOT IN ('succeeded','failed') LIMIT 1`;
     if (pending.length || unsettled.length)
       throw new Error("Reset refused: finish active runtimes and unconfirmed Coding Stop first");
-    const uncertain = await sql`SELECT 1 FROM factory.substrate_binding
-      WHERE create_attempted_at IS NOT NULL AND actor_uid IS NULL AND NOT create_rejected
-      UNION ALL SELECT 1 FROM factory.substrate_workspace
-      WHERE (atespace_attempted_at IS NOT NULL AND atespace IS NULL AND NOT atespace_rejected)
-        OR (policy_attempted_at IS NOT NULL AND policy IS NULL AND NOT policy_rejected)
-        OR (template_attempted_at IS NOT NULL AND template IS NULL AND NOT template_rejected)
-      UNION ALL SELECT 1 FROM factory.substrate_prebuild
-      WHERE (atespace_attempted_at IS NOT NULL AND atespace IS NULL AND NOT atespace_rejected)
-        OR (policy_attempted_at IS NOT NULL AND policy IS NULL AND NOT policy_rejected)
-        OR (template_attempted_at IS NOT NULL AND template IS NULL AND NOT template_rejected)
-      UNION ALL SELECT 1 FROM factory.substrate_verification
-      WHERE (atespace_attempted_at IS NOT NULL AND atespace IS NULL AND NOT atespace_rejected)
-        OR (policy_attempted_at IS NOT NULL AND policy IS NULL AND NOT policy_rejected)
-        OR (template_attempted_at IS NOT NULL AND template IS NULL AND NOT template_rejected)
-      UNION ALL SELECT 1 FROM factory.substrate_isolated
-      WHERE (atespace_attempted_at IS NOT NULL AND atespace IS NULL AND NOT atespace_rejected)
-        OR (policy_attempted_at IS NOT NULL AND policy IS NULL AND NOT policy_rejected)
-        OR (template_attempted_at IS NOT NULL AND template IS NULL AND NOT template_rejected)
-      UNION ALL SELECT 1 FROM factory.substrate_worker_capacity
-      WHERE attempted_at IS NOT NULL AND pool IS NULL AND NOT rejected LIMIT 1`;
+    const uncertain = await sql`SELECT 1 FROM factory.runtime_attempt
+      WHERE atespace IS NOT NULL AND create_attempted_at IS NOT NULL AND actor_uid IS NULL AND NOT create_rejected
+      UNION ALL SELECT 1 FROM factory.substrate_provision p,
+        LATERAL (VALUES (p.resources->'atespace'), (p.resources->'policy'), (p.resources->'template')) AS r(entry)
+      WHERE r.entry->>'attemptedAt' IS NOT NULL
+        AND NULLIF(r.entry->'value','null'::jsonb) IS NULL
+        AND NOT COALESCE((r.entry->>'rejected')::boolean, false)
+      UNION ALL SELECT 1 FROM factory.operation
+      WHERE kind='runtime.worker_capacity' AND scope_type='worker'
+        AND payload->>'attemptedAt' IS NOT NULL AND result->'pool' IS NULL
+        AND NOT COALESCE((payload->>'rejected')::boolean, false) LIMIT 1`;
     if (uncertain.length)
       throw new Error(
         "Reset refused: a native create outcome is unconfirmed; its original intent was retained",
@@ -62,26 +53,25 @@ export async function readResetResources(database: ReturnType<typeof createDatab
     // Include provisioning intents that never reached an Actor binding. An
     // uncertain create or partially created template is not an empty runtime.
     const scopes = await sql<{ name: string; connection: unknown }[]>`
-      SELECT atespace AS name,intent->'connection' AS connection FROM factory.substrate_binding
+      SELECT atespace AS name,binding_intent->'connection' AS connection FROM factory.runtime_attempt
+      WHERE atespace IS NOT NULL
       UNION
       SELECT 'fa-'||replace(runtime_attempt_id::text,'-',''),intent#>'{configuration,connection}'
-        FROM factory.substrate_prebuild
-      UNION
-      SELECT 'fa-'||replace(runtime_attempt_id::text,'-',''),intent#>'{configuration,connection}'
-        FROM factory.substrate_verification
-      UNION
-      SELECT 'fa-'||replace(runtime_attempt_id::text,'-',''),intent#>'{configuration,connection}'
-        FROM factory.substrate_isolated`;
+        FROM factory.substrate_provision WHERE runtime_attempt_id IS NOT NULL`;
     const workspaces = await sql<
       { workspaceID: string; generation: number; connection: unknown }[]
-    >`SELECT workspace_id::text AS "workspaceID",generation::float8 AS generation,
-      intent#>'{configuration,connection}' AS connection FROM factory.substrate_workspace`;
+    >`SELECT owner_id::text AS "workspaceID",generation::float8 AS generation,
+      intent#>'{configuration,connection}' AS connection FROM factory.substrate_provision
+      WHERE kind='workspace'`;
     const editors = await sql<{ userID: string; resourceID: string; epoch: number }[]>`
-      SELECT user_id::text AS "userID",resource_id::text AS "resourceID",
-        service_epoch::float8 AS epoch FROM factory.developer_ide`;
+      SELECT scope_id AS "userID",payload->>'resourceId' AS "resourceID",
+        (payload->>'serviceEpoch')::float8 AS epoch
+      FROM factory.operation
+      WHERE kind='workspace.developer_ide' AND scope_type='user'`;
     const pools = await sql<{ namespace: string; name: string }[]>`
-      SELECT intent#>>'{pool,metadata,namespace}' AS namespace,
-        intent#>>'{pool,metadata,name}' AS name FROM factory.substrate_worker_capacity`;
+      SELECT payload#>>'{intent,pool,metadata,namespace}' AS namespace,
+        payload#>>'{intent,pool,metadata,name}' AS name FROM factory.operation
+      WHERE kind='runtime.worker_capacity' AND scope_type='worker'`;
     return resetResources.parse({
       nativeScopes: [
         ...scopes,

@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
+import { moveKnowledgePage, setKnowledgePageIcon } from "#zero-schema/knowledge-server";
 import { factoryProcess } from "../fixtures/factory-process";
-import {
-  moveKnowledgePage,
-  setKnowledgePageIcon,
-} from "../../packages/zero-schema/src/knowledge-server";
 
 test("Wiki organization is authorized, race-safe and separate from text revisions", async () => {
   const owned = await factoryProcess();
@@ -28,7 +25,7 @@ test("Wiki organization is authorized, race-safe and separate from text revision
   try {
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${userId},'Owned Wiki Developer',${`wiki-tree-${userId}@factory.local`},true)`;
     for (const id of [projectId, otherProjectId])
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${id},${`wiki-tree-${id}`},'Wiki tree','https://example.invalid/tree.git','main','.devcontainer/devcontainer.json',${administrator})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${id},${`wiki-tree-${id}`},'Wiki tree','https://example.invalid/tree.git','main','.factory/actor-template.json',${administrator})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectId},${userId},'developer',${administrator})`;
     for (const [id, project, title, order] of [
       [a, projectId, "A", 0],

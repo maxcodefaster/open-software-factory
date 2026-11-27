@@ -6,6 +6,44 @@ const sha = "a".repeat(40);
 const response = (value: unknown, status = 200) => Response.json(value, { status });
 const branch = (name: string, headSha = sha) => ({ name, commit: { id: headSha } });
 
+test("confirmed setup file admission follows the native Project contract before any Forge effect", async () => {
+  for (const [path, admitted] of [
+    [".factory/actor-template.json", true],
+    [".factory/system.json", true],
+    [".forgejo/workflows/factory-verification.yml", true],
+    [".factory/images/work/Dockerfile", true],
+    [".devcontainer/devcontainer.json", false],
+    [".devcontainer/compose.yaml", false],
+    ["README.md", false],
+    [".factory/images/../Dockerfile", false],
+  ] as const) {
+    let reads = 0;
+    const client = createForgejoClient({
+      apiURL: "http://forge/api/v1/",
+      token: "owned-user",
+      fetch: async (_url, init) => {
+        expect(init?.method ?? "GET").toBe("GET");
+        reads++;
+        throw new TypeError("Owned read boundary; no external write admitted");
+      },
+    });
+    const result = client.applySetupFiles({
+      repository,
+      branch: "factory/setup-native",
+      baseCommit: sha,
+      files: [{ path, content: "{}" }],
+      proposalID: "owned-native-proposal",
+    });
+    if (admitted) {
+      await expect(result).rejects.toThrow();
+      expect(reads).toBe(1);
+    } else {
+      await expect(result).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(reads).toBe(0);
+    }
+  }
+});
+
 describe("complete repository file discovery", () => {
   const file = (path: string) => ({ path, type: "blob", sha, size: 12 });
   test("reads every page, including a short first page with a reported total", async () => {

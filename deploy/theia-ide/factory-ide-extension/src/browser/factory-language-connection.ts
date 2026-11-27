@@ -1,12 +1,12 @@
 import {
   AbstractMessageReader,
   AbstractMessageWriter,
+  type CancellationToken,
   createMessageConnection,
   type DataCallback,
-  type Message,
   type Disposable,
+  type Message,
   type MessageConnection,
-  type CancellationToken,
 } from "#factory-jsonrpc";
 
 const maxMessageBytes = 1 << 20;

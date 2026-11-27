@@ -1,23 +1,22 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factorySigningSecret } from "../../packages/auth/src/signing-secret";
-import type { createDatabase } from "../../packages/db/src/client";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
+import { factorySigningSecret } from "#auth/signing-secret";
+import type { createDatabase } from "#db/client";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
 import {
   nativeActor,
   type SubstrateCall,
   SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import {
-  type SystemContract,
-  systemContract,
-} from "../../packages/system-contract/src/system-contract";
+} from "#runtime-kubernetes/substrate-control";
+import { type SystemContract, systemContract } from "#system-contract/system-contract";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createSubstrateIsolated } from "../../apps/factory/src/runtime/substrate-isolated";
+import type { ProjectConfigurationReader } from "../../apps/factory/src/runtime/substrate-project-configuration";
 import { createSubstrateVerification } from "../../apps/factory/src/runtime/substrate-verification";
 import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { nativeInstallationFixture } from "./native-installation";
+import { nativeProjectTemplate } from "./native-project";
 
 type Database = ReturnType<typeof createDatabase>;
 
@@ -36,8 +35,11 @@ export async function nativeJobsFixture(
     ],
   },
 ) {
-  const [scope] = await database.client<{ database: string; id: string }[]>`
-    SELECT current_database() AS database,id FROM factory.project WHERE id=${projectID}`;
+  const [scope] = await database.client<
+    { database: string; id: string; repository: string; actorTemplatePath: string }[]
+  >`
+    SELECT current_database() AS database,id,repository_url AS repository,
+      actor_template_path AS "actorTemplatePath" FROM factory.project WHERE id=${projectID}`;
   if (!scope || !/^owned_[a-f0-9]{32}$/.test(scope.database))
     throw Error("Controlled native jobs require their owned database and Project");
   const forge = new URL(process.env["FACTORY_FORGEJO_PUBLIC_URL"] ?? "");
@@ -76,6 +78,29 @@ export async function nativeJobsFixture(
   };
   const secret = factorySigningSecret();
   const hub = new RuntimeHub(async () => {});
+  const projectReads: { repository: string; revision: string; actorTemplatePath: string }[] = [];
+  // The controlled repository has these same saved files at each exact fixture
+  // commit. Branches, another Project and the mutable checkout are not readers.
+  const projectConfiguration = {
+    systemContract: declaration,
+    actorTemplate: { ...nativeProjectTemplate, path: scope.actorTemplatePath },
+  };
+  const readConfiguration: ProjectConfigurationReader = async (
+    repository,
+    revision,
+    actorTemplatePath,
+  ) => {
+    if (
+      repository !== scope.repository ||
+      actorTemplatePath !== scope.actorTemplatePath ||
+      !/^[a-f0-9]{40}$/.test(revision)
+    )
+      throw Error(
+        "Controlled native Project reads require their exact repository, commit and path",
+      );
+    projectReads.push({ repository, revision, actorTemplatePath });
+    return structuredClone(projectConfiguration);
+  };
   const resources = new Map<string, Map<string, Record<string, unknown>>>();
   const calls: { method: string; scope: string }[] = [];
   const attempts = new Set<string>();
@@ -154,6 +179,9 @@ export async function nativeJobsFixture(
     configuration,
     call,
     call,
+    undefined,
+    undefined,
+    readConfiguration,
   );
   const isolated = createSubstrateIsolated(
     database,
@@ -163,9 +191,13 @@ export async function nativeJobsFixture(
     async () => structuredClone(declaration),
     call,
     call,
+    undefined,
+    undefined,
+    readConfiguration,
   );
   return {
     calls,
+    projectReads,
     resources,
     configuration,
     async startVerification(id: string, userID: string) {

@@ -13,7 +13,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { SourceCitation } from "../../../conversation-domain/src/conversation";
+import type { SourceCitation } from "#conversation-domain/conversation";
 import { authUser } from "./auth";
 import { change } from "./delivery";
 import { conversationActor, conversationEntryKind, conversationMode } from "./enums";
@@ -184,9 +184,9 @@ export const ticketConversation = factorySchema.table(
       name: "ticket_conversation_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.ticketId],
-      foreignColumns: [ticket.id],
-      name: "ticket_conversation_ticket_id_fkey",
+      columns: [table.ticketId, table.projectId],
+      foreignColumns: [ticket.id, ticket.projectId],
+      name: "ticket_conversation_ticket_id_project_id_fkey",
     }).onDelete("restrict"),
     check("ticket_conversation_version_check", sql`${table.version} > 0`),
   ],

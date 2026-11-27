@@ -1,10 +1,20 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import upstream from "../../upstream.json";
 import { gateSteps } from "../release/beta-gate";
+
+const publishedRuntimeRoles = [
+  "runtime-host",
+  "developer-ide",
+  "browser-tools",
+  "substrate-runtime",
+  "starter-work",
+  "starter-postgres",
+] as const;
 
 test("source-development Compose does not offer a second product installation", async () => {
   const compose = parse(
@@ -290,37 +300,30 @@ test("runtime publication compares config digests, not Docker's manifest ID", as
   }
 });
 
-test("native Actor publication builds same-architecture bootstrap and tools, proves each natively and combines the artifact", async () => {
+test("native Actor publication uses only same-architecture tools, proves the direct image and combines the artifact", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
   const build: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
     step.run?.includes("docker buildx build"),
   ).run;
-  expect(build).toContain(
-    "for role in runtime-host developer-ide browser-tools substrate-bootstrap substrate-runtime",
-  );
+  expect(build).toContain(`for role in ${publishedRuntimeRoles.join(" ")}; do`);
   expect(build).not.toContain("workspace-files");
   expect(build).not.toContain('[[ "$role" == substrate-* && "$ARCH" != amd64 ]]');
-  expect(build).toContain("dockerfile=deploy/substrate/rootless/Dockerfile");
+  expect(JSON.stringify(workflow)).not.toMatch(
+    /substrate-bootstrap|SUBSTRATE_BOOTSTRAP_IMAGE|substrate\/rootless/,
+  );
   expect(build).toContain("dockerfile=deploy/substrate/Runtime.Dockerfile");
   expect(build).toContain('release_require_revision "$tools" "$REVISION"');
-  expect(build).toContain('release_require_revision "$bootstrap" "$REVISION"');
   expect(build).toContain('tools="$IMAGE_ROOT/runtime-host:$RELEASE-$ARCH"');
-  expect(build).toContain('bootstrap="$IMAGE_ROOT/substrate-bootstrap:$RELEASE-$ARCH"');
   expect(build).toContain(
     'FACTORY_RUNTIME_HOST_IMAGE=$IMAGE_ROOT/runtime-host@$(release_digest "$tools")',
-  );
-  expect(build).toContain(
-    'FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE=$IMAGE_ROOT/substrate-bootstrap@$(release_digest "$bootstrap")',
   );
   expect(build).toContain('bash scripts/runtime/substrate-image-proof.sh "$image_id"');
   const manifest: string = workflow.jobs.manifests.steps.find(
     (step: { id?: string }) => step.id === "publish",
   ).run;
-  expect(manifest).toContain(
-    "for role in runtime-host developer-ide browser-tools substrate-runtime",
-  );
+  expect(manifest).toContain(`for role in ${publishedRuntimeRoles.join(" ")}; do`);
   expect(manifest).toContain('release_combine "$image" "$image-arm64" "$image-amd64"');
   expect(manifest).toContain('release_require_revision "$image-$arch" "$(git rev-parse HEAD)"');
   expect(manifest).not.toContain('image="$IMAGE_ROOT/substrate-runtime:$RELEASE-amd64"');
@@ -337,6 +340,304 @@ test("native Actor publication builds same-architecture bootstrap and tools, pro
   expect(workflow.jobs.chart.steps.at(-1).run).toContain("factory-runtime-artifacts-$RELEASE.json");
 });
 
+test("Starter roles use their existing Dockerfiles and common native revision/SBOM build arguments", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run;
+  const start = command.indexOf("dockerfile=deploy/runtime-host/Dockerfile");
+  const end = command.indexOf('\n    if [[ "$role" == runtime-host', start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const declaration = command.slice(start, end);
+  for (const architecture of ["arm64", "amd64"]) {
+    for (const recipe of ["work", "postgres"]) {
+      const role = `starter-${recipe}`;
+      const dockerfile = `templates/starter-app/.factory/images/${recipe}/Dockerfile`;
+      expect(await Bun.file(new URL(`../../${dockerfile}`, import.meta.url)).exists()).toBe(true);
+      const child = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          `set -eo pipefail
+# The CI jobs use modern Linux Bash; macOS Bash 3 rejects its empty arrays under nounset.
+release_require_revision() { exit 91; }
+release_digest() { exit 92; }
+${declaration}
+printf '%s\\0' "\${build[@]}" "\${attest[@]}"
+`,
+        ],
+        {
+          env: {
+            ...process.env,
+            role,
+            ARCH: architecture,
+            REVISION: "owned-revision",
+            RELEASE: "0.1.0-proof",
+            GITHUB_REPOSITORY: "owned/factory",
+            image: `registry.test/factory/${role}:0.1.0-proof-${architecture}`,
+            SBOM_GENERATOR: workflow.env.SBOM_GENERATOR,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [code, output, error] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(code, error).toBe(0);
+      expect(output.split("\0").filter(Boolean)).toEqual([
+        "docker",
+        "buildx",
+        "build",
+        "--platform",
+        `linux/${architecture}`,
+        "--label",
+        "org.opencontainers.image.source=https://github.com/owned/factory",
+        "--label",
+        "org.opencontainers.image.revision=owned-revision",
+        "--label",
+        "org.opencontainers.image.version=0.1.0-proof",
+        "--file",
+        dockerfile,
+        "--tag",
+        `registry.test/factory/${role}:0.1.0-proof-${architecture}`,
+        "--provenance=mode=max",
+        `--sbom=generator=${workflow.env.SBOM_GENERATOR}`,
+      ]);
+    }
+  }
+  expect(command).toContain(`"\${build[@]}" "\${attest[@]}" --push .`);
+  expect(command).toContain('release_require_revision "$image" "$REVISION"');
+  expect(command).toContain('release_sign "$IMAGE_ROOT/$role@$digest"');
+  expect(workflow.jobs.roles.needs).toEqual(["release", "verify"]);
+});
+
+test("runtime and Starter publication prove the loaded native config and refuse proof or config failure before signing", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command: string = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  ).run;
+  const declarationStart = command.indexOf("dockerfile=deploy/runtime-host/Dockerfile");
+  const branchStart = command.indexOf('if [[ "$role" == runtime-host ||', declarationStart);
+  const branchEnd = command.indexOf("\n  fi\n  digest=", branchStart);
+  expect(declarationStart).toBeGreaterThan(0);
+  expect(branchStart).toBeGreaterThan(declarationStart);
+  expect(branchEnd).toBeGreaterThan(branchStart);
+  const signingStart = command.indexOf('digest="$(release_digest', branchEnd);
+  const signingEnd = command.lastIndexOf("\ndone");
+  expect(signingStart).toBeGreaterThan(branchEnd);
+  expect(signingEnd).toBeGreaterThan(signingStart);
+  const signing = command.slice(signingStart, signingEnd);
+  const directory = await mkdtemp(join(tmpdir(), "factory-runtime-proven-config-"));
+  const calls = join(directory, "calls");
+  const imageID = `sha256:${"b".repeat(64)}`;
+  const config = '{"owned":"configuration actually loaded for proof"}';
+  const configDigest = `sha256:${createHash("sha256").update(config).digest("hex")}`;
+  try {
+    for (const architecture of ["arm64", "amd64"]) {
+      for (const role of [
+        "runtime-host",
+        "substrate-runtime",
+        "starter-work",
+        "starter-postgres",
+      ]) {
+        const proofCommand = role.startsWith("starter-")
+          ? `scripts/runtime/starter-image-proof.sh ${imageID} ${role}`
+          : `scripts/runtime/substrate-image-proof.sh ${imageID}`;
+        for (const failure of ["", "proof", "config"]) {
+          await writeFile(calls, "");
+          const child = Bun.spawn(
+            [
+              "bash",
+              "-c",
+              `set -eo pipefail
+docker() {
+  printf 'docker|%s\\n' "$*" >> "$OWNED_CALLS"
+  if [[ "$1 $2" == "image inspect" ]]; then printf '%s\\n' "$OWNED_IMAGE_ID"
+  elif [[ "$1 $2" == "image save" ]]; then : > "$4"
+  elif [[ "$1 $2 $3" == "buildx imagetools inspect" ]]; then
+    if [[ "$4" == *"@"* ]]; then
+      printf '{"config":{"digest":"%s"}}\\n' "$OWNED_PUBLISHED_CONFIG"
+    else
+      printf '{"manifests":[{"platform":{"os":"linux","architecture":"%s"},"digest":"%s"}]}\\n' "$ARCH" "$OWNED_IMAGE_ID"
+    fi
+  else test "$1 $2" = "buildx build"; fi
+}
+tar() {
+  if [[ "\${!#}" == manifest.json ]]; then printf '[{"Config":"owned-config.json"}]\\n'
+  else test "\${!#}" = owned-config.json && printf '%s' "$OWNED_CONFIG"; fi
+}
+bash() {
+  printf 'proof|%s\\n' "$*" >> "$OWNED_CALLS"
+  test "$*" = "$OWNED_PROOF"
+  test "$OWNED_FAILURE" != proof
+}
+release_require_revision() { test "$1" = "$IMAGE_ROOT/runtime-host:$RELEASE-$ARCH" && test "$2" = "$REVISION"; }
+release_digest() { printf '%s\\n' "$OWNED_IMAGE_ID"; }
+release_sign() { printf 'sign|%s\\n' "$*" >> "$OWNED_CALLS"; }
+${command.slice(declarationStart, branchEnd)}
+${signing}
+`,
+            ],
+            {
+              env: {
+                ...process.env,
+                role,
+                ARCH: architecture,
+                REVISION: "owned-revision",
+                RELEASE: "0.1.0-proof",
+                IMAGE_ROOT: "registry.test/owned/factory",
+                GITHUB_REPOSITORY: "owned/factory",
+                image: `registry.test/owned/factory/${role}:0.1.0-proof-${architecture}`,
+                SBOM_GENERATOR: workflow.env.SBOM_GENERATOR,
+                RUNNER_TEMP: directory,
+                OWNED_CALLS: calls,
+                OWNED_IMAGE_ID: imageID,
+                OWNED_CONFIG: config,
+                OWNED_PUBLISHED_CONFIG: failure === "config" ? imageID : configDigest,
+                OWNED_FAILURE: failure,
+                OWNED_PROOF: proofCommand,
+              },
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          );
+          const [code, , error] = await Promise.all([
+            child.exited,
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+          ]);
+          expect(code, error).toBe(failure ? 1 : 0);
+          const observed = await readFile(calls, "utf8");
+          const proof = `proof|${proofCommand}`;
+          expect(observed).toContain("--load");
+          expect(observed).toContain(proof);
+          expect(observed.indexOf("--load")).toBeLessThan(observed.indexOf(proof));
+          if (failure === "proof") expect(observed).not.toContain("--push");
+          else {
+            expect(observed).toContain("--provenance=mode=max");
+            expect(observed).toContain(`--sbom=generator=${workflow.env.SBOM_GENERATOR}`);
+            expect(observed).toContain("--push --metadata-file");
+            expect(observed.indexOf(proof)).toBeLessThan(observed.indexOf("--push"));
+          }
+          expect(observed.includes("sign|")).toBe(failure === "");
+        }
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the signed six-role manifest reaches Factory unchanged and refuses either Starter's wrong architecture revision", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const command: string = workflow.jobs.manifests.steps.find(
+    (step: { id?: string }) => step.id === "publish",
+  ).run;
+  const start = command.indexOf("artifacts='{}'");
+  expect(start).toBeGreaterThan(0);
+  const directory = await mkdtemp(join(tmpdir(), "factory-six-role-manifest-"));
+  const digest = `sha256:${"c".repeat(64)}`;
+  const imageRoot = "registry.test/owned/factory";
+  const release = "0.1.0-proof";
+  try {
+    const library = join(directory, "release-lib.sh");
+    const output = join(directory, "output");
+    const calls = join(directory, "calls");
+    await writeFile(
+      library,
+      `release_require_revision() {
+  printf 'revision|%s|%s\\n' "$1" "$2" >> "$OWNED_CALLS"
+  test "$2" = owned-revision && test "$1" != "$REJECT_REF"
+}
+release_combine() {
+  printf 'combine|%s|%s|%s\\n' "$1" "$2" "$3" >> "$OWNED_CALLS"
+  printf '%s\\n' "$OWNED_DIGEST"
+}
+release_sign() { printf 'sign|%s\\n' "$1" >> "$OWNED_CALLS"; }
+`,
+    );
+    for (const reject of [
+      "",
+      ...["starter-work", "starter-postgres"].flatMap((role) =>
+        ["arm64", "amd64"].map((arch) => `${imageRoot}/${role}:${release}-${arch}`),
+      ),
+    ]) {
+      await writeFile(output, "");
+      await writeFile(calls, "");
+      const child = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          `set -euo pipefail
+source "$OWNED_LIBRARY"
+git() { printf 'owned-revision\\n'; }
+${command.slice(start)}
+`,
+        ],
+        {
+          env: {
+            ...process.env,
+            OWNED_LIBRARY: library,
+            OWNED_CALLS: calls,
+            OWNED_DIGEST: digest,
+            REJECT_REF: reject,
+            IMAGE_ROOT: imageRoot,
+            RELEASE: release,
+            GITHUB_ACTOR: "owned-user",
+            GHCR_TOKEN: "owned-unused-token",
+            GITHUB_OUTPUT: output,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [code, , error] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(code, error).toBe(reject ? 1 : 0);
+      const result = await readFile(output, "utf8");
+      if (reject) {
+        expect(result).toBe("");
+        continue;
+      }
+      expect(JSON.parse(result.trim().replace(/^artifacts=/, ""))).toEqual(
+        Object.fromEntries(
+          publishedRuntimeRoles.map((role) => [role, `${imageRoot}/${role}@${digest}`]),
+        ),
+      );
+      const events = (await readFile(calls, "utf8")).trim().split("\n");
+      expect(events).toHaveLength(publishedRuntimeRoles.length * 4);
+      for (const role of publishedRuntimeRoles) {
+        const image = `${imageRoot}/${role}:${release}`;
+        expect(events).toContain(`revision|${image}-arm64|owned-revision`);
+        expect(events).toContain(`revision|${image}-amd64|owned-revision`);
+        expect(events).toContain(`combine|${image}|${image}-arm64|${image}-amd64`);
+        expect(events).toContain(`sign|${imageRoot}/${role}@${digest}`);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+  const factory = workflow.jobs.factory.steps.find((step: { id?: string }) => step.id === "build");
+  expect(factory.env.FACTORY_RUNTIME_ARTIFACTS).toBe(`\${{ needs.manifests.outputs.artifacts }}`);
+  expect(factory.run).toContain(
+    "--file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS",
+  );
+  expect(factory.run).not.toContain("FACTORY_STARTER_IMAGES");
+});
+
 test("Kubernetes planning replicas use the observed namespace epoch without changing retained authority", async () => {
   const startup = await readFile(new URL("../kubernetes/start.ts", import.meta.url), "utf8");
   expect(startup).toContain(
@@ -346,17 +647,24 @@ test("Kubernetes planning replicas use the observed namespace epoch without chan
   expect(startup.indexOf("const planningCacheEpoch")).toBeLessThan(
     startup.indexOf("const child = Bun.spawn"),
   );
+  const serverConfig = await readFile(
+    new URL("../../apps/factory/src/server/config.ts", import.meta.url),
+    "utf8",
+  );
+  expect(serverConfig).toContain('env["FACTORY_PLANNING_CACHE_EPOCH"]');
   const application = await readFile(
     new URL("../../apps/factory/src/server/application.ts", import.meta.url),
     "utf8",
   );
-  expect(application).toContain('planningCacheEpoch: process.env["FACTORY_PLANNING_CACHE_EPOCH"]');
+  expect(application).toContain("planningCacheEpoch: config.planningCacheEpoch");
 });
 
 test("native startup uses the same artifact environment and checks storage with tool-image shell only", async () => {
   for (const file of ["./index.ts", "../kubernetes/start.ts"]) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");
-    expect(source).toContain("runtimeArtifactEnvironment(artifacts)");
+    expect(source).toMatch(
+      /runtimeArtifactEnvironment\(\s*artifacts,\s*nativeRuntimeArchitecture\(/,
+    );
     expect(source).toContain('image: artifacts["runtime-host"]');
     expect(source).not.toContain("workspace-files");
     expect(source).not.toContain("FACTORY_WORKSPACE_FILES_IMAGE");
@@ -729,48 +1037,38 @@ test("the pull request checks build the Factory image so a broken COPY fails bef
   expect(commands[1]).toContain("image-smoke.ts");
 });
 
-test("native Compose prebuild and required hooks gate runtime publication on both architectures", async () => {
+test("native tools and Actor publication gate on packages, not retired Compose component proofs", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
   const build = workflow.jobs.roles.steps.find((step: { run?: string }) =>
     step.run?.includes("docker buildx build"),
   );
-  expect(build.run).toContain(
-    'bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"',
+  const proof = 'bash scripts/runtime/substrate-image-proof.sh "$image_id"';
+  const packageBranches = build.run.slice(
+    build.run.indexOf('if [[ "$role" == runtime-host ]]; then'),
   );
-  expect(build.run.indexOf("project-compose-prebuild-proof.sh")).toBeLessThan(
-    build.run.indexOf("--push --metadata-file"),
+  for (const role of ["runtime-host", "substrate-runtime"]) {
+    const branch = packageBranches
+      .split(`[[ "$role" == ${role} ]]; then\n`)[1]
+      ?.split(/\n\s*(?:elif|else|fi)\b/)[0];
+    expect(branch?.trim()).toBe(proof);
+  }
+  expect(build.run.indexOf(proof)).toBeLessThan(build.run.indexOf("--push --metadata-file"));
+  expect(JSON.stringify(workflow)).not.toMatch(
+    /compose-inputs-proof|project-compose-prebuild-proof|NODE_PROOF_IMAGE|registry_proof_image|proof-tools|TestPrebuildComposeNative/,
   );
   expect(
-    workflow.jobs.roles.steps.find((step: { uses?: string }) =>
+    workflow.jobs.roles.steps.some((step: { uses?: string }) =>
       step.uses?.startsWith("actions/setup-go@"),
-    ).with,
-  ).toEqual({
-    "go-version": `\${{ steps.proof-tools.outputs.go }}`,
-    "cache-dependency-path": "services/runtime-connector/go.sum",
-  });
-  const proof = await readFile(
-    new URL("../runtime/project-compose-prebuild-proof.sh", import.meta.url),
+    ),
+  ).toBe(false);
+  for (const file of ["compose-inputs-proof.sh", "project-compose-prebuild-proof.sh"])
+    expect(await Bun.file(new URL(`../runtime/${file}`, import.meta.url)).exists()).toBe(false);
+  const packages = await readFile(
+    new URL("../runtime/substrate-image-proof.sh", import.meta.url),
     "utf8",
   );
-  expect(proof).toContain("--network=none --cpus=3 --memory=3g");
-  expect(proof).toContain('"nativeSubstrateProof":false');
-  expect(proof).toMatch(
-    /recipes="\$\{4:-build image-only build-no-features credential-free runtime-environment cold-prebuild\}"/,
-  );
-  expect(proof).toContain('if [ "$kind" = build ]; then');
-  expect(proof).toContain("export FACTORY_COMPOSE_PROOF_OPENCODE_ROOT=/opt/factory/opencode");
-  expect(proof).toContain(
-    "export FACTORY_COMPOSE_PROOF_CONNECTOR=/usr/local/bin/factory-runtime-connector",
-  );
-  expect(proof).toContain(
-    "unset FACTORY_COMPOSE_PROOF_OPENCODE_ROOT FACTORY_COMPOSE_PROOF_CONNECTOR",
-  );
-  expect(proof).not.toMatch(/dependency-seed|prepared-rootfs|prepared-image/);
-  const start = proof.indexOf("docker create");
-  const create = proof.slice(start, proof.indexOf("docker cp", start));
-  expect(create).toContain("--network=none");
-  // The fixture has its own Unix socket. It must not bind-mount the host's.
-  expect(create).not.toMatch(/--mount|--volume\b|\s-v\b/);
+  expect(packages).toContain('"nativeActorLifecycle":false');
+  expect(packages).not.toMatch(/go test|-test\.run|FACTORY_COMPOSE_|--privileged|--volume|--mount/);
 });

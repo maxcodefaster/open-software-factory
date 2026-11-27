@@ -29,7 +29,7 @@
 .mcp-card-meta {
   flex-wrap: wrap;
   column-gap: var(--space-3);
-  margin-top: var(--space-3);
+  margin-top: var(--space-2);
   font-size: var(--text-xs);
   color: var(--color-ink-muted);
 }
@@ -42,19 +42,19 @@
 }
 .mcp-library .mcp-detail-heading {
   grid-template-columns: 210px minmax(0, 1fr);
-  gap: var(--space-6);
+  gap: var(--space-5);
 }
 .mcp-library .mcp-editor {
   max-width: 680px;
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 .mcp-definition-settings {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 .mcp-definition-settings > :is(label, p) {
-  margin-top: var(--space-4);
+  margin-top: var(--space-3);
 }
 .mcp-definition-settings > summary {
   cursor: pointer;
@@ -89,28 +89,28 @@
   gap: var(--space-3);
 }
 .mcp-recommendations:has(> h3) {
-  margin-top: var(--space-8);
+  margin-top: var(--space-6);
 }
 .mcp-recommendations > h3 + .skill-gallery {
-  margin-top: var(--space-5);
+  margin-top: var(--space-4);
 }
 .mcp-recommendations > p {
-  margin-block: var(--space-2) var(--space-5);
+  margin-block: var(--space-2) var(--space-4);
   max-width: 65ch;
   color: var(--color-ink-muted);
 }
 .mcp-library :is(.mcp-connection, .mcp-tool-review, .mcp-grants) {
   display: grid;
-  gap: var(--space-4);
-  margin-top: var(--space-8);
+  gap: var(--space-3);
+  margin-top: var(--space-6);
   max-width: 65ch;
   width: 100%;
   margin-inline: auto;
 }
 .mcp-library .mcp-tool {
   display: grid;
-  gap: var(--space-2);
-  padding-block: var(--space-4);
+  gap: var(--space-1-5);
+  padding-block: var(--space-3);
   border-bottom: 1px solid var(--line-subtle);
   font-weight: var(--weight-regular);
 }
@@ -130,12 +130,12 @@
   margin-bottom: var(--space-3);
 }
 .mcp-monitoring-setup {
-  padding-block: 0 var(--space-5);
+  padding-block: 0 var(--space-4);
   border-bottom: 1px solid var(--line-subtle);
-  margin-bottom: var(--space-5);
+  margin-bottom: var(--space-4);
 }
 .mcp-monitoring-setup h2 {
-  margin-block: var(--space-4) var(--space-2);
+  margin-block: var(--space-3) var(--space-2);
   font-size: var(--text-2xl);
   font-weight: var(--weight-medium);
   overflow-wrap: anywhere;
@@ -155,8 +155,8 @@
   display: grid;
   gap: var(--space-3);
   max-width: 65ch;
-  margin: var(--space-6) auto 0;
-  padding-block: var(--space-5);
+  margin: var(--space-5) auto 0;
+  padding-block: var(--space-4);
   border-top: 1px solid var(--line-subtle);
 }
 .mcp-monitoring-next > button {

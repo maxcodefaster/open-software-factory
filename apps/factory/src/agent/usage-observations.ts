@@ -2,7 +2,7 @@ import {
   type TurnUsage,
   turnUsageInput,
   unavailableTurnUsage,
-} from "../../../../packages/conversation-domain/src/turn-usage";
+} from "#conversation-domain/turn-usage";
 
 // Ephemeral observations, not accounting records. A restart/expiry means unknown, not zero.
 export function createUsageObservations(now: () => number = Date.now) {

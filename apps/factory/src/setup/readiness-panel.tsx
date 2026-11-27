@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { SetupTask, SetupTaskView } from "../../../../packages/project-domain/src/setup";
+import type { SetupTask, SetupTaskView } from "#project-domain/setup";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
@@ -11,8 +11,6 @@ const labels = {
   protection: "Protected main branch",
   hook: "Automatic repository updates",
   wiki: "Project Wiki",
-  development: "Development image preparation",
-  "preview-image": "Preview image preparation",
   "main-preview": "Main Preview",
 } as const satisfies Record<SetupTask, string>;
 
@@ -80,14 +78,7 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
               </span>
               <span>
                 {labels[row().task]}
-                <Show
-                  when={
-                    row().failure &&
-                    (row().state === "failed" ||
-                      (row().state === "ready" &&
-                        (row().task === "development" || row().task === "preview-image")))
-                  }
-                >
+                <Show when={row().failure && row().state === "failed"}>
                   <small>{plainErrorMessage(row().failure ?? "")}</small>
                 </Show>
               </span>

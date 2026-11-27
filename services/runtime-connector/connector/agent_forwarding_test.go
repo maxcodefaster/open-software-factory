@@ -91,7 +91,7 @@ func TestDetachedRecoveryReadReleasesAgentQueue(t *testing.T) {
 				})},
 			}
 			runtime.terminals = newTerminalManager(ctx, assignment, func(Message) error { return nil })
-			defer runtime.terminals.closeAll()
+			defer runtime.terminals.CloseAll()
 			done := make(chan struct{})
 			go func() {
 				runtime.forwardAgentRequests(ctx)

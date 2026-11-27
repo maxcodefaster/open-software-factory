@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { loadImage } from "@napi-rs/canvas";
-import { libraryCoverCatalog } from "../../../../packages/conversation-domain/src/library-covers";
+import { libraryCoverCatalog } from "#conversation-domain/library-covers";
 import { skillCover } from "../skills/cover";
 import { libraryCoverURL } from "./catalog";
 

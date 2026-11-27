@@ -1,8 +1,8 @@
 import { injectable } from "@theia/core/shared/inversify";
 import { FileNavigatorModel } from "@theia/navigator/lib/browser/navigator-model";
 import { WorkspaceNode } from "@theia/navigator/lib/browser/navigator-tree";
-import type { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
+import type { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 
 @injectable()
 export class FactoryWorkspaceNavigator extends FileNavigatorModel {

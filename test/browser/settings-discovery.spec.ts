@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import {
   browserBootstrap,
@@ -20,8 +20,8 @@ test.beforeEach(async ({ page }) => {
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   const { session } = await browserBootstrap(page);
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${projectID},${`settings-discovery-${projectID.slice(0, 8)}`},'Settings discovery','https://example.invalid/settings.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES(${projectID},${`settings-discovery-${projectID.slice(0, 8)}`},'Settings discovery','https://example.invalid/settings.git','main','.factory/actor-template.json',${session.user.id})`;
   await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
     VALUES(${projectID},${session.user.id},'developer',true,${session.user.id})`;
   await mockFactoryFunctions(page, {
@@ -52,10 +52,9 @@ for (const destination of ["Skills", "MCP connections"])
     const button = navigation.getByRole("button", { name: destination, exact: true });
     expect(await button.isVisible()).toBe(true);
     await expect(navigation.locator(".settings-scope-hint")).toHaveCount(0);
+    await expect(navigation.getByRole("combobox", { name: "Settings scope" })).toHaveCount(0);
+    await expect(navigation.getByRole("heading", { name: "Libraries", exact: true })).toBeVisible();
     await button.click();
-    await expect(navigation.getByRole("combobox", { name: "Settings scope" })).toHaveValue(
-      "libraries",
-    );
     await expect(button).toHaveAttribute("aria-current", "page");
     await expect(navigation.locator('[aria-current="page"]')).toHaveCount(1);
     // The lazy library replaces the temporary Settings heading with its own.
@@ -90,7 +89,10 @@ test("Monitoring does not load or show allowance editors until Usage & limits is
     if (compute(url)) reads.push("compute");
   });
   const navigation = page.getByRole("navigation", { name: "Settings navigation" });
-  await navigation.getByRole("button", { name: "Monitoring", exact: true }).click();
+  const projectSection = navigation.locator("section").filter({
+    has: page.getByRole("heading", { name: "Project · Settings discovery", exact: true }),
+  });
+  await projectSection.getByRole("button", { name: "Monitoring", exact: true }).click();
   await expect(page.getByRole("region", { name: "Factory monitoring", exact: true })).toBeVisible();
   await expect(page.getByRole("group", { name: "Optional limits", exact: true })).toHaveCount(0);
   expect(reads).toEqual([]);
@@ -113,7 +115,7 @@ test("Monitoring does not load or show allowance editors until Usage & limits is
     .getByRole("button", { name: /choose settings page$/i })
     .filter({ visible: true })
     .click();
-  await navigation.getByRole("button", { name: "Usage & limits", exact: true }).click();
+  await projectSection.getByRole("button", { name: "Usage & limits", exact: true }).click();
   await expect(page.getByRole("group", { name: "Optional limits", exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Factory monitoring", exact: true })).toHaveCount(
     0,

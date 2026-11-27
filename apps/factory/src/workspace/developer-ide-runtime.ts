@@ -1,22 +1,18 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  change,
-  developmentWorkspace,
-  runtimeAttempt,
-  ticket,
-} from "../../../../packages/db/src/schema";
+import type { createDatabase } from "#db/client";
+import { change, developmentWorkspace, runtimeAttempt, ticket } from "#db/schema";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import type { createRuntimeAccess } from "../access/runtime";
 import { workspaceAuthorityIn } from "../access/workspace";
-import { type createChangeWriterController } from "../access/writer-api";
+import type { createChangeWriterController } from "../access/writer-api";
 import { executeEditingCommand } from "../access/writer-command";
 import { CommandError } from "../command-error";
 import { json } from "../http";
-import { type createRuntimeController } from "../runtime/api";
-import { type RuntimeHub, type RuntimeSocketData } from "../runtime/transport-api";
+import type { createRuntimeController } from "../runtime/api";
+import type { RuntimeHub, RuntimeSocketData } from "../runtime/transport-api";
 import type { DeveloperIDEGrant } from "./developer-ide-access";
+import { createWorkspaceLifecycle } from "./lifecycle";
 import { createPersonalGit } from "./personal-git";
 
 type EditorAuthorization = { token: string; grant: DeveloperIDEGrant };
@@ -32,7 +28,13 @@ export function createDeveloperIDERuntime(
   database: ReturnType<typeof createDatabase>,
   runtimes: Pick<
     ReturnType<typeof createRuntimeController>,
-    "start" | "startPersisted" | "processOutput" | "processAction" | "closeTerminal"
+    | "start"
+    | "startPersisted"
+    | "pause"
+    | "get"
+    | "processOutput"
+    | "processAction"
+    | "closeTerminal"
   >,
   hub: RuntimeHub,
   access: ReturnType<typeof createRuntimeAccess>,
@@ -42,6 +44,7 @@ export function createDeveloperIDERuntime(
   >,
 ) {
   const git = createPersonalGit(database, hub);
+  const lifecycle = createWorkspaceLifecycle(database, runtimes);
   const terminalGrants = new Map<
     string,
     { editorToken: string; attemptID: string; token: string }
@@ -74,7 +77,7 @@ export function createDeveloperIDERuntime(
         kind: source.kind,
         attemptID: null,
         state: "unavailable",
-        failure: "This implementation is no longer active. Source files remain available.",
+        failure: "This implementation is no longer active. Its retained files are not replaced.",
       };
     const [attempt] = await database.db
       .select({
@@ -233,7 +236,7 @@ export function createDeveloperIDERuntime(
         return new Response(null, { status: 405 });
       }
       const selection = suffix.match(
-        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure|activity))?$/,
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure|activity|pause))?$/,
       );
       if (selection?.[1]) {
         const workspaceID = selection[1];
@@ -245,6 +248,13 @@ export function createDeveloperIDERuntime(
         const source = await workspace(workspaceID, authorized.grant.userID);
         if (!source.available)
           throw new CommandError("conflict", "This implementation is no longer active");
+        if (selection[2] === "pause") {
+          const input = z.strictObject({ requestID: z.uuid() }).parse(await request.json());
+          return json(
+            await lifecycle.pause(authorized.grant.userID, { workspaceID, ...input }),
+            202,
+          );
+        }
         await database.client.begin((sql) =>
           workspaceWriteAuthorityIn(sql, workspaceID, authorized.grant.userID),
         );

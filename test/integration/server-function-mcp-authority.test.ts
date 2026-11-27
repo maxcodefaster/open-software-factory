@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { mcpLibraryView } from "#conversation-domain/mcp-library";
+import { monitoringView } from "#conversation-domain/monitoring";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
@@ -11,8 +13,6 @@ import { createInputService } from "../../apps/factory/src/monitoring/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
-import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { factoryProcess } from "../fixtures/factory-process";
 import {
   decodeFactoryResponse as decodeResponse,
@@ -98,8 +98,8 @@ test("compiled MCP and Input commands enforce current SQL authority, exact revis
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${id},'Owned native SQL account',${`${id}@owned-native.test`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`native-${project}`},'Owned native SQL Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`native-${project}`},'Owned native SQL Project','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${project},${member},'product-contributor',false,${manager})`;
     expect(await call(member, "saveMCPDefinition", [definition])).toMatchObject({ ok: true });
@@ -242,7 +242,7 @@ test("compiled MCP and Input commands enforce current SQL authority, exact revis
       status: 403,
     });
     const [counts] = await database.client`SELECT
-      (SELECT count(*)::int FROM factory.monitoring_command WHERE hook_id=${inputID}) AS commands,
+      (SELECT count(*)::int FROM factory.audit_event WHERE kind='monitoring.command' AND payload->>'hookId'=${inputID}) AS commands,
       (SELECT count(*)::int FROM factory.agent_turn WHERE project_id=${project}) AS turns`;
     expect(counts).toMatchObject({ commands: 3, turns: 0 });
     expect(wake).toEqual([]);

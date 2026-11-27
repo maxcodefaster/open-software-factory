@@ -1,8 +1,8 @@
 import { and, eq, gt, notExists, sql as typedSQL } from "drizzle-orm";
 import type { Sql, TransactionSql } from "postgres";
-import { learningReviewWindowMs } from "../../../../packages/conversation-domain/src/learning";
-import { drizzleTransaction } from "../../../../packages/db/src/client";
-import { learningCommand, learningReview } from "../../../../packages/db/src/schema";
+import { learningReviewWindowMs } from "#conversation-domain/learning";
+import { drizzleTransaction } from "#db/client";
+import { auditEvent, learningReview } from "#db/schema";
 
 export type ReviewRequest = {
   id: string;
@@ -21,27 +21,30 @@ export function pendingReviewRequests(
   scope: { projectId: string; ownerId: string | null } | null = null,
 ) {
   const db = drizzleTransaction(sql);
-  const projectId = typedSQL<string>`(${learningCommand.input}->>'projectId')::uuid`;
+  const projectId = typedSQL<string>`(${auditEvent.payload}->'input'->>'projectId')::uuid`;
   const ownerId = typedSQL<
     string | null
-  >`case when ${learningCommand.input}->>'scope'='personal' then ${learningCommand.actorId} end`;
-  const developerOnly = typedSQL<boolean>`(${learningCommand.input}->>'developerOnly')::boolean`;
+  >`case when ${auditEvent.payload}->'input'->>'scope'='personal' then ${auditEvent.actorId} end`;
+  const developerOnly = typedSQL<boolean>`(${auditEvent.payload}->'input'->>'developerOnly')::boolean`;
   return db
     .select({
-      id: learningCommand.id,
-      actorId: learningCommand.actorId,
+      id: auditEvent.id,
+      actorId: auditEvent.actorId,
       projectId,
       ownerId,
       developerOnly,
-      cases: typedSQL<number>`(${learningCommand.input}->>'cases')::int`,
-      requestedAt: learningCommand.createdAt,
+      cases: typedSQL<number>`(${auditEvent.payload}->'input'->>'cases')::int`,
+      requestedAt: auditEvent.createdAt,
     })
-    .from(learningCommand)
+    .from(auditEvent)
     .where(
       and(
-        eq(typedSQL<string>`${learningCommand.input}->>'kind'`, "review-now"),
+        eq(auditEvent.kind, "learning.command"),
+        eq(auditEvent.scopeType, "learning"),
+        scope ? eq(auditEvent.scopeId, scope.projectId) : undefined,
+        eq(typedSQL<string>`${auditEvent.payload}->'input'->>'kind'`, "review-now"),
         gt(
-          learningCommand.createdAt,
+          auditEvent.createdAt,
           typedSQL`now()-make_interval(secs=>${learningReviewWindowMs / 1000})`,
         ),
         scope ? eq(projectId, scope.projectId) : undefined,
@@ -56,12 +59,12 @@ export function pendingReviewRequests(
                 eq(learningReview.projectId, projectId),
                 typedSQL`${learningReview.ownerId} is not distinct from ${ownerId}`,
                 eq(learningReview.developerOnly, developerOnly),
-                gt(learningReview.createdAt, learningCommand.createdAt),
+                gt(learningReview.createdAt, auditEvent.createdAt),
               ),
             ),
         ),
       ),
     )
-    .orderBy(learningCommand.createdAt)
+    .orderBy(auditEvent.createdAt)
     .limit(8);
 }

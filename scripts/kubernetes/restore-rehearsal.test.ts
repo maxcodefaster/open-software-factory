@@ -378,7 +378,7 @@ test.each([
     if (boundary === "witness set") f.witness.set = "20261118T100209Z";
     if (boundary === "destination witness")
       (f.witness as { provenance: string }).provenance = "restored-destination";
-    if (boundary === "native table") delete f.witness.postgres["factory.substrate_binding"];
+    if (boundary === "native table") delete f.witness.postgres["factory.runtime_attempt"];
     if (boundary === "writer table") delete f.witness.postgres["factory.change_writer"];
     if (boundary === "missing Forgejo snapshot witness")
       f.witness.forgejo.files = f.witness.forgejo.files.filter(
@@ -589,7 +589,7 @@ for (const [revision, observed] of [
       if (boundary === "excluded CA") f.witness.state.excludedProvisionerPaths.push(ca.path);
       if (boundary === "changed part") f.witness.parts["state.tar.gz"] = "0".repeat(64);
       if (boundary === "missing native witness")
-        delete f.witness.postgres["factory.substrate_binding"];
+        delete f.witness.postgres["factory.runtime_attempt"];
       if (boundary === "missing writer witness") delete f.witness.postgres["factory.change_writer"];
       await f.save();
       await expect(f.load()).rejects.toThrow();
@@ -1828,7 +1828,7 @@ test.each([
     if (boundary === "pin") f.value.images["postgres"] = "postgres:16";
     if (boundary === "owner") f.value.owner = "b".repeat(32);
     if (boundary === "overlap") f.value.retained.paths.push(f.value.evidenceDirectory);
-    if (boundary === "witness") delete f.witness.postgres["factory.substrate_binding"];
+    if (boundary === "witness") delete f.witness.postgres["factory.runtime_attempt"];
     if (boundary === "partial") await rm(join(f.value.privateRoot, f.value.set, "COMPLETE"));
     if (boundary === "credential")
       f.witness.state.files.push({

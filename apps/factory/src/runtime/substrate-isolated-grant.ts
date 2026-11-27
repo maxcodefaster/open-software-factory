@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import { runtimeAttempt } from "../../../../packages/db/src/schema";
-import { runtimeIdentity } from "../../../../packages/runtime-domain/src/identity";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { runtimeAttempt } from "#db/schema";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
@@ -13,7 +13,7 @@ export type SubstrateIsolatedOwner = {
 export type SubstrateIsolatedScope = {
   revision: string;
   repository: string;
-  devcontainerPath: string;
+  actorTemplatePath: string;
   runnerUUID: string | null;
   runnerToken: string | null;
   jobHandle: string | null;
@@ -38,16 +38,18 @@ export async function substrateIsolatedAuthorityIn(
     await projectDevelopmentAuthorityIn(sql, userID, projectID);
     const [scope] = await sql<SubstrateIsolatedScope[]>`
       SELECT release.commit_sha AS revision,project.repository_url AS repository,
-        project.devcontainer_path AS "devcontainerPath",publication.runner_uuid AS "runnerUUID",
-        publication.runner_token AS "runnerToken",publication.job_handle AS "jobHandle",release.version
-      FROM factory.release_attempt publication JOIN factory.project_release release ON release.id=publication.release_id
+        project.actor_template_path AS "actorTemplatePath",publication.payload->>'runnerUuid' AS "runnerUUID",
+        publication.payload->>'runnerToken' AS "runnerToken",publication.payload->>'jobHandle' AS "jobHandle",release.version
+      FROM factory.operation publication JOIN factory.project_release release ON release.id::text=publication.scope_id
       JOIN factory.project project ON project.id=release.project_id
-      WHERE publication.id=${owner.isolatedID} AND release.project_id=${projectID}
+      WHERE publication.id=${owner.isolatedID} AND publication.kind='releases.attempt' AND publication.scope_type='project_release'
+        AND release.project_id=${projectID}
         AND release.created_by=${userID} AND release.state='running' AND publication.state='running'
-        AND publication.dispatch_intended_at IS NOT NULL AND publication.run_id IS NOT NULL
-        AND publication.runner_uuid IS NOT NULL AND publication.runner_token IS NOT NULL AND publication.job_handle IS NOT NULL
-        AND publication.id=(SELECT id FROM factory.release_attempt WHERE release_id=release.id ORDER BY ordinal DESC LIMIT 1)
-        AND (publication.runtime_attempt_id IS NULL OR publication.runtime_attempt_id=${attemptID})
+        AND (publication.payload->>'dispatchIntendedAt') IS NOT NULL AND (publication.payload->>'runId') IS NOT NULL
+        AND (publication.payload->>'runnerUuid') IS NOT NULL AND (publication.payload->>'runnerToken') IS NOT NULL
+        AND (publication.payload->>'jobHandle') IS NOT NULL
+        AND publication.id=(SELECT id FROM factory.operation WHERE kind='releases.attempt' AND scope_type='project_release' AND scope_id=release.id::text ORDER BY (payload->>'ordinal')::int DESC LIMIT 1)
+        AND ((publication.payload->>'runtimeAttemptId') IS NULL OR publication.payload->>'runtimeAttemptId'=${attemptID})
       FOR UPDATE OF publication,release`;
     if (!scope)
       throw new CommandError("conflict", "Current exact native publication job is required");
@@ -58,26 +60,29 @@ export async function substrateIsolatedAuthorityIn(
     if (owner.isolatedID !== owner.promotionID)
       throw new CommandError("conflict", "Promotion execution identity is invalid");
     const [scope] = await sql<SubstrateIsolatedScope[]>`
-      SELECT promotion.commit_sha AS revision,project.repository_url AS repository,
-        project.devcontainer_path AS "devcontainerPath",NULL::text AS "runnerUUID",
+      SELECT promotion.payload->>'commitSha' AS revision,project.repository_url AS repository,
+        project.actor_template_path AS "actorTemplatePath",NULL::text AS "runnerUUID",
         NULL::text AS "runnerToken",NULL::text AS "jobHandle",NULL::text AS version
-      FROM factory.promotion_operation promotion JOIN factory.change change ON change.id=promotion.change_id
-      JOIN factory.ticket ticket ON ticket.id=change.ticket_id JOIN factory.project project ON project.id=promotion.project_id
-      JOIN factory.merge_operation merge ON merge.change_id=change.id AND merge.commit_sha=promotion.commit_sha
-        AND merge.state='succeeded' AND merge.observed_default_sha=merge.commit_sha
-      JOIN factory.delivery_approval approval ON approval.id=merge.delivery_approval_id
-        AND approval.change_id=change.id AND approval.commit_sha=merge.commit_sha
+      FROM factory.operation promotion JOIN factory.change change ON change.id::text=promotion.scope_id
+      JOIN factory.ticket ticket ON ticket.id=change.ticket_id JOIN factory.project project ON project.id::text=promotion.payload->>'projectId'
+      JOIN factory.operation merge ON merge.kind='delivery.merge' AND merge.scope_type='change' AND merge.scope_id=change.id::text
+        AND merge.payload->>'commitSha'=promotion.payload->>'commitSha'
+        AND merge.state='succeeded' AND merge.result->>'mergeSha'=merge.payload->>'commitSha'
+      JOIN factory.delivery_approval approval ON approval.id::text=merge.payload->>'approvalId'
+        AND approval.change_id=change.id AND approval.commit_sha=merge.payload->>'commitSha'
       JOIN factory.verification verification ON verification.id=approval.verification_id
-        AND verification.change_id=change.id AND verification.commit_sha=merge.commit_sha AND verification.state='succeeded'
+        AND verification.change_id=change.id AND verification.commit_sha=merge.payload->>'commitSha' AND verification.state='succeeded'
       JOIN factory.candidate_review review ON review.id=approval.candidate_review_id AND review.verification_id=verification.id
-        AND review.change_id=change.id AND review.commit_sha=merge.commit_sha AND review.state='passed'
-      LEFT JOIN factory.staging_preview preview ON preview.project_id=promotion.project_id
-      WHERE promotion.id=${owner.promotionID} AND promotion.project_id=${projectID} AND change.project_id=${projectID}
+        AND review.change_id=change.id AND review.commit_sha=merge.payload->>'commitSha' AND review.state='passed'
+      LEFT JOIN factory.operation preview ON preview.kind='delivery.staging_preview' AND preview.scope_type='project'
+        AND preview.scope_id=promotion.payload->>'projectId'
+      WHERE promotion.id=${owner.promotionID} AND promotion.kind='delivery.promotion' AND promotion.scope_type='change'
+        AND promotion.payload->>'projectId'=${projectID} AND change.project_id=${projectID}
         AND ticket.trashed_at IS NULL AND EXISTS(SELECT 1 FROM factory.current_promotion WHERE id=promotion.id)
         AND ((promotion.state IN ('pending','starting','switching') AND change.state='delivering' AND change.cancel_requested_at IS NULL)
-          OR (promotion.state='succeeded' AND change.state='delivered' AND preview.runtime_attempt_id=${attemptID}
-            AND preview.revision=promotion.commit_sha))
-        AND (promotion.replacement_runtime_attempt_id IS NULL OR promotion.replacement_runtime_attempt_id=${attemptID})
+          OR (promotion.state='succeeded' AND change.state='delivered' AND preview.payload->>'runtimeAttemptId'=${attemptID}
+            AND preview.payload->>'revision'=promotion.payload->>'commitSha'))
+        AND ((promotion.payload->>'replacementRuntimeAttemptId') IS NULL OR promotion.payload->>'replacementRuntimeAttemptId'=${attemptID})
       FOR UPDATE OF promotion,change,ticket`;
     if (!scope)
       throw new CommandError(
@@ -89,13 +94,14 @@ export async function substrateIsolatedAuthorityIn(
   if (owner.isolatedID !== substrateStagingOwner(projectID))
     throw new CommandError("conflict", "Initial Staging execution identity is invalid");
   const [scope] = await sql<SubstrateIsolatedScope[]>`
-    SELECT preview.revision,project.repository_url AS repository,project.devcontainer_path AS "devcontainerPath",
+    SELECT preview.payload->>'revision' AS revision,project.repository_url AS repository,project.actor_template_path AS "actorTemplatePath",
       NULL::text AS "runnerUUID",NULL::text AS "runnerToken",NULL::text AS "jobHandle",NULL::text AS version
-    FROM factory.staging_preview preview JOIN factory.project project ON project.id=preview.project_id
-    WHERE preview.project_id=${projectID} AND (preview.runtime_attempt_id IS NULL OR preview.runtime_attempt_id=${attemptID}
-      OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=predecessor.id
-        WHERE predecessor.id=preview.runtime_attempt_id
-          AND predecessor.state='stopped' AND binding.deleted_at IS NOT NULL))
+    FROM factory.operation preview JOIN factory.project project ON project.id::text=preview.scope_id
+    WHERE preview.kind='delivery.staging_preview' AND preview.scope_type='project' AND preview.scope_id=${projectID}
+      AND ((preview.payload->>'runtimeAttemptId') IS NULL OR preview.payload->>'runtimeAttemptId'=${attemptID}
+      OR EXISTS(SELECT 1 FROM factory.runtime_attempt predecessor
+        WHERE predecessor.id::text=preview.payload->>'runtimeAttemptId'
+          AND predecessor.state='stopped' AND predecessor.deleted_at IS NOT NULL))
     FOR UPDATE OF preview`;
   if (!scope)
     throw new CommandError("conflict", "Current native Staging Preview intent is required");
@@ -111,7 +117,7 @@ export async function substrateIsolatedGrantIn(
 ) {
   const scope = await substrateIsolatedAuthorityIn(sql, projectID, owner, userID, attemptID);
   const [confirmed] = await sql`
-    SELECT provision.runtime_attempt_id FROM factory.substrate_isolated provision
+    SELECT provision.runtime_attempt_id FROM factory.substrate_provision provision
     LEFT JOIN factory.runtime_attempt attempt ON attempt.id=${attemptID}
     WHERE provision.runtime_attempt_id=${attemptID} AND provision.project_id=${projectID}
       AND provision.owner_id=${owner.isolatedID} AND provision.kind=${owner.isolatedKind}
@@ -119,8 +125,12 @@ export async function substrateIsolatedGrantIn(
       AND (provision.intent->>'promotionID') IS NOT DISTINCT FROM ${owner.promotionID}
       AND provision.intent->>'revision'=${scope.revision} AND provision.intent->>'repository'=${scope.repository}
       AND (provision.intent->>'jobHandle') IS NOT DISTINCT FROM ${scope.jobHandle}
-      AND provision.atespace IS NOT NULL AND provision.policy IS NOT NULL AND provision.template IS NOT NULL
-      AND NOT provision.atespace_rejected AND NOT provision.policy_rejected AND NOT provision.template_rejected
+      AND jsonb_typeof(provision.resources->'atespace'->'value')='object'
+      AND jsonb_typeof(provision.resources->'policy'->'value')='object'
+      AND jsonb_typeof(provision.resources->'template'->'value')='object'
+      AND NOT COALESCE((provision.resources#>>'{atespace,rejected}')::boolean,false)
+      AND NOT COALESCE((provision.resources#>>'{policy,rejected}')::boolean,false)
+      AND NOT COALESCE((provision.resources#>>'{template,rejected}')::boolean,false)
       AND (attempt.id IS NULL OR (attempt.project_id=${projectID}
         AND attempt.isolated_kind::text=${owner.isolatedKind} AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
         AND attempt.verification_id IS NULL AND attempt.generation=provision.generation
@@ -167,16 +177,15 @@ export async function substrateIsolatedSourceIn(sql: DatabaseTransaction, attemp
     SELECT attempt.project_id AS "projectID",provision.owner_id AS "isolatedID",provision.kind AS "isolatedKind",
       provision.intent->>'promotionID' AS "promotionID",attempt.created_by AS "userID",project.repository_url AS repository
     FROM factory.runtime_attempt attempt JOIN factory.project project ON project.id=attempt.project_id
-    JOIN factory.substrate_isolated provision ON provision.runtime_attempt_id=attempt.id
+    JOIN factory.substrate_provision provision ON provision.runtime_attempt_id=attempt.id
       AND provision.project_id=attempt.project_id AND provision.generation=attempt.generation
       AND provision.kind=attempt.isolated_kind::text
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
     WHERE attempt.id=${attemptID} AND attempt.workspace_id IS NULL AND attempt.change_id IS NULL
       AND attempt.isolated_kind IN ('staging','publication') AND attempt.state IN ('create-intended','starting')
       AND attempt.ready_at IS NULL AND attempt.stop_intended_at IS NULL
       AND provision.intent->>'repository'=project.repository_url AND provision.intent->>'revision'=attempt.revision
-      AND binding.actor_uid IS NOT NULL AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
-      AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL`;
+      AND attempt.actor_uid IS NOT NULL AND attempt.create_attempted_at IS NOT NULL AND NOT attempt.create_rejected
+      AND attempt.delete_intended_at IS NULL AND attempt.deleted_at IS NULL`;
   if (!scope)
     throw new CommandError("forbidden", "Current native isolated Source grant is required");
   await substrateIsolatedGrantIn(sql, scope.projectID, scope, attemptID, scope.userID);

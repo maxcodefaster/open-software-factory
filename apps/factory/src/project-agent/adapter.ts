@@ -3,7 +3,7 @@ import {
   type ConversationMode,
   projectAgentAnswerOutput,
   projectAgentOutput,
-} from "../../../../packages/conversation-domain/src/conversation";
+} from "#conversation-domain/conversation";
 
 export const projectAgentStructuredOutput = z.object({ output: projectAgentOutput }).strict();
 

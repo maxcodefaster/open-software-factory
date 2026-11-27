@@ -8,7 +8,6 @@ import {
   integer,
   jsonb,
   type PgTableExtraConfigValue,
-  primaryKey,
   text,
   timestamp,
   unique,
@@ -19,11 +18,9 @@ import { authUser } from "./auth";
 import { ticketConversation } from "./conversations";
 import { change } from "./delivery";
 import { agentTurnState, changeAgentState } from "./enums";
-import { mcpConnection, mcpRevision } from "./mcp";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
 import { runtimeAttempt } from "./runtime";
-import { skillRevision } from "./skills";
 import { ticket } from "./tickets";
 
 export const agentTurn = factorySchema.table(
@@ -235,7 +232,6 @@ export const changeAgentTurnIntent = factorySchema.table(
     sessionTitle: text("session_title").notNull(),
     runtimeAttemptId: uuid("runtime_attempt_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    skillLoading: text("skill_loading").$type<"eager" | "native">().default("eager").notNull(),
     skillManifest: jsonb("skill_manifest"),
     skillAttachments: jsonb("skill_attachments").default([]).notNull(),
     modelRequestEpoch: bigint("model_request_epoch", { mode: "number" }).default(0).notNull(),
@@ -278,10 +274,6 @@ export const changeAgentTurnIntent = factorySchema.table(
     check(
       "change_agent_turn_intent_session_title_check",
       sql`(length(${table.sessionTitle}) >= 1) AND (length(${table.sessionTitle}) <= 200)`,
-    ),
-    check(
-      "change_agent_turn_intent_skill_loading_check",
-      sql`${table.skillLoading} = ANY (ARRAY['eager'::text, 'native'::text])`,
     ),
   ],
 );
@@ -329,11 +321,6 @@ export const changeAgentSession = factorySchema.table(
       name: "change_agent_session_created_by_fkey",
     }),
     foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "change_agent_session_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
       columns: [table.runtimeAttemptId, table.changeId],
       foreignColumns: [runtimeAttempt.id, runtimeAttempt.changeId],
       name: "change_agent_session_runtime_change_fk",
@@ -366,129 +353,5 @@ export const changeAgentSession = factorySchema.table(
       "change_agent_stop_pending_state",
       sql`(NOT ${table.stopPending}) OR (${table.state} = 'stopped'::change_agent_state)`,
     ),
-  ],
-);
-
-export const sessionArchive = factorySchema.table(
-  "session_archive",
-  {
-    turnId: uuid("turn_id").primaryKey().notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    sessionId: text("session_id").notNull(),
-    promptId: text("prompt_id").notNull(),
-    sourceRefs: jsonb("source_refs").notNull(),
-    state: text("state").$type<"pending" | "failed" | "saved">().default("pending").notNull(),
-    attempts: integer("attempts").default(0).notNull(),
-    manifestKey: text("manifest_key"),
-    manifestSha256: text("manifest_sha256"),
-    throughMessageId: text("through_message_id"),
-    producerVersion: text("producer_version"),
-    summary: jsonb("summary"),
-    lastError: text("last_error"),
-    retryAfter: timestamp("retry_after", { withTimezone: true }).defaultNow().notNull(),
-    savedAt: timestamp("saved_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    index("session_archive_pending")
-      .using("btree", table.retryAfter.asc().nullsLast())
-      .where(sql`(${table.state} <> 'saved'::text)`),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "session_archive_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "session_archive_turn_id_fkey",
-    }),
-    check("session_archive_attempts_check", sql`${table.attempts} >= 0`),
-    check(
-      "session_archive_check",
-      sql`(${table.state} = 'saved'::text) = (${table.savedAt} IS NOT NULL)`,
-    ),
-    check(
-      "session_archive_check1",
-      sql`(${table.state} <> 'saved'::text) OR ((${table.manifestKey} IS NOT NULL) AND (${table.manifestSha256} IS NOT NULL) AND (${table.throughMessageId} IS NOT NULL) AND (${table.producerVersion} IS NOT NULL) AND (${table.summary} IS NOT NULL))`,
-    ),
-    check("session_archive_last_error_check", sql`length(${table.lastError}) <= 2000`),
-    check(
-      "session_archive_manifest_sha256_check",
-      sql`${table.manifestSha256} ~ '^[a-f0-9]{64}$'::text`,
-    ),
-    check(
-      "session_archive_prompt_id_check",
-      sql`(length(${table.promptId}) >= 1) AND (length(${table.promptId}) <= 200)`,
-    ),
-    check(
-      "session_archive_session_id_check",
-      sql`(length(${table.sessionId}) >= 1) AND (length(${table.sessionId}) <= 200)`,
-    ),
-    check(
-      "session_archive_source_refs_check",
-      sql`(jsonb_typeof(${table.sourceRefs}) = 'object'::text) AND (octet_length((${table.sourceRefs})::text) <= 16384)`,
-    ),
-    check(
-      "session_archive_state_check",
-      sql`${table.state} = ANY (ARRAY['pending'::text, 'failed'::text, 'saved'::text])`,
-    ),
-    check(
-      "session_archive_summary_check",
-      sql`(jsonb_typeof(${table.summary}) = 'object'::text) AND (octet_length((${table.summary})::text) <= 16384)`,
-    ),
-  ],
-);
-
-export const agentTurnSkill = factorySchema.table(
-  "agent_turn_skill",
-  {
-    turnId: uuid("turn_id").notNull(),
-    revisionId: uuid("revision_id").notNull(),
-    loadedAt: timestamp("loaded_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.revisionId],
-      foreignColumns: [skillRevision.id],
-      name: "agent_turn_skill_revision_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "agent_turn_skill_turn_id_fkey",
-    }).onDelete("cascade"),
-    primaryKey({ columns: [table.turnId, table.revisionId], name: "agent_turn_skill_pkey" }),
-  ],
-);
-
-export const agentTurnMcp = factorySchema.table(
-  "agent_turn_mcp",
-  {
-    turnId: uuid("turn_id").notNull(),
-    connectionId: uuid("connection_id").notNull(),
-    credentialEpoch: uuid("credential_epoch").notNull(),
-    revisionId: uuid("revision_id").notNull(),
-    policyVersion: bigint("policy_version", { mode: "number" }).notNull(),
-    tools: jsonb("tools").notNull(),
-    required: boolean("required").notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.connectionId],
-      foreignColumns: [mcpConnection.id],
-      name: "agent_turn_mcp_connection_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.revisionId],
-      foreignColumns: [mcpRevision.id],
-      name: "agent_turn_mcp_revision_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "agent_turn_mcp_turn_id_fkey",
-    }),
-    primaryKey({ columns: [table.turnId, table.connectionId], name: "agent_turn_mcp_pkey" }),
   ],
 );

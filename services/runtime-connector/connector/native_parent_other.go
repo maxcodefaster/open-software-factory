@@ -35,6 +35,3 @@ func RunSourceMaterialize(string, string) error {
 func RunSubstrateSourceRestore(context.Context) error {
 	return errors.New("Source restore requires Linux")
 }
-func RunSubstrateBootstrapMode(io.Writer) error {
-	return errors.New("native cold mode requires Linux")
-}

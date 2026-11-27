@@ -82,9 +82,9 @@ test("Monitoring sweeps reach the tail and wrap to new arrivals while the first 
   async function seed(ordinal: number) {
     const id = projectId(ordinal);
     const hookId = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${id},${`owned-sweep-${ordinal}`},'Owned sweep Project','https://forge.example/owned/sweep.git',
-        'main','.devcontainer/devcontainer.json',${userId})`;
+        'main','.factory/actor-template.json',${userId})`;
     await controller.save(id, userId, {
       id: hookId,
       commandId: crypto.randomUUID(),
@@ -109,11 +109,12 @@ test("Monitoring sweeps reach the tail and wrap to new arrivals while the first 
     const initial: string[] = [];
     for (let ordinal = 10; ordinal <= 600; ordinal += 10) initial.push(await seed(ordinal));
     await worker.sweep();
+    // sweep schedules asynchronous database admissions; fairness is not a
+    // three-second throughput contract. Keep the fixture's normal bounded wait.
     await eventually(
       async () => starts.length,
       (count) => count === 50,
       "The first bounded sweep did not admit fifty projects",
-      3_000,
     );
     expect([...starts].sort()).toEqual(initial.slice(0, 50));
     const earlyArrival = await seed(15);
@@ -123,7 +124,6 @@ test("Monitoring sweeps reach the tail and wrap to new arrivals while the first 
       async () => starts.length,
       (count) => count === 62,
       "Persistent busy projects starved the tail or new arrivals",
-      3_000,
     );
     expect([...starts].sort()).toEqual([...initial, earlyArrival, lateArrival].sort());
     // Wrapping across running owners must not admit their second queued incident.

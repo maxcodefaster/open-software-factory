@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { modelSettingsView } from "#conversation-domain/model-settings";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
@@ -177,7 +177,6 @@ test.describe("touch settings", () => {
     for (const summary of await models.all())
       expect((await summary.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(43.5);
     await page.locator(".model-policy > summary").first().click();
-    await page.locator(".model-policy details > summary").first().click();
     const choices = page.locator(".model-policy .model-checkbox:visible");
     await expect(choices.first()).toBeVisible();
     for (const choice of await choices.all())

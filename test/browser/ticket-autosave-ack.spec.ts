@@ -3,9 +3,9 @@ import { resolve } from "node:path";
 import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -27,7 +27,7 @@ test.describe("local Ticket hydration", () => {
   const source = `
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
-import { TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
+import { TicketWorkspace } from "../../apps/factory/src/tickets/ticket-workspace";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
@@ -296,8 +296,8 @@ test("a newer background read cannot discard the exact autosave acknowledgement"
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Autosave acknowledgement','https://example.invalid/autosave.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Autosave acknowledgement','https://example.invalid/autosave.git','main','.factory/actor-template.json',${session.user.id})`;
     projectCreated = true;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
       VALUES(${ticketID},${projectID},'Retain my requirements','A settled checklist.','ready',${session.user.id})`;
@@ -405,8 +405,8 @@ for (const switchProject of [false, true])
       await signIn(page);
       const { session } = await browserBootstrap(page);
       for (const id of new Set([projectA, projectB])) {
-        await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-          VALUES(${id},${`owned-save-${id}`},'Owned autosave','https://example.invalid/autosave.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+        await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+          VALUES(${id},${`owned-save-${id}`},'Owned autosave','https://example.invalid/autosave.git','main','.factory/actor-template.json',${session.user.id})`;
         projects.push(id);
       }
       await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)

@@ -1,10 +1,7 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { executionPolicyCommand } from "../../../../packages/conversation-domain/src/execution-policy";
-import {
-  currentComputeView,
-  usageSettingsView,
-} from "../../../../packages/conversation-domain/src/usage-view";
+import { executionPolicyCommand } from "#conversation-domain/execution-policy";
+import { currentComputeView, usageSettingsView } from "#conversation-domain/usage-view";
 import { contractRateCommand } from "../usage/contract-rates";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

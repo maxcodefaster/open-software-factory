@@ -241,15 +241,15 @@ test.each([
     if (condition === "unknown-source-runtime") {
       expectedAttemptID = crypto.randomUUID();
       await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',
-          stop_intended_at=now(),stopped_at=now() WHERE id=${f.attemptID}`;
-      await f.database.client`WITH attempt AS (INSERT INTO factory.runtime_attempt(
+          stop_intended_at=now() WHERE id=${f.attemptID}`;
+      await f.database.client`INSERT INTO factory.runtime_attempt(
           id,project_id,change_id,workspace_id,generation,revision,state,
-          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          parent_connector_token_hash,create_intended_at,created_by,
+          atespace,actor_name,binding_intent)
           SELECT ${expectedAttemptID},project_id,change_id,workspace_id,generation+1,${f.commit},'create-intended',
-            parent_connector_token_hash,child_connector_token_hash,now(),created_by
-          FROM factory.runtime_attempt WHERE id=${f.attemptID} RETURNING id)
-          INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-            SELECT id,'fa-' || replace(id::text,'-',''),'runtime-' || replace(id::text,'-',''),'{}'::jsonb FROM attempt`;
+            parent_connector_token_hash,now(),created_by,
+            ${`fa-${expectedAttemptID.replaceAll("-", "")}`},${`runtime-${expectedAttemptID.replaceAll("-", "")}`},'{}'::jsonb
+          FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       await f.database.client`UPDATE factory.runtime_attempt SET state='ready'
         WHERE id=${expectedAttemptID}`;
       await f.database
@@ -310,8 +310,8 @@ test("a submitted Change stays warm for its review window and while Verification
       WHERE change_id=${f.changeID}`;
     await f.database
       .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
-      runner_name,created_by,state)
-      SELECT ${crypto.randomUUID()},${f.changeID},${"a".repeat(40)},1,'owned-runner',created_by,'pending'
+      created_by,state)
+      SELECT ${crypto.randomUUID()},${f.changeID},${"a".repeat(40)},1,created_by,'pending'
       FROM factory.change WHERE id=${f.changeID}`;
     await f.idle.sweep();
     expect(f.claims).toEqual([]);

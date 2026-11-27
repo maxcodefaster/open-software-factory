@@ -4,8 +4,8 @@ import {
   type InterviewQuestion,
   interviewAnswerInput,
   interviewQuestionInput,
-} from "../../../packages/conversation-domain/src/conversation";
-import { type AgentMessage } from "./agent/contracts";
+} from "#conversation-domain/conversation";
+import type { AgentMessage } from "./agent/contracts";
 import { composerKeyDown, resizeComposer } from "./assistant-interaction";
 import { attachmentText, readAttachmentContent } from "./attachments/composer";
 import { TextareaAttachments } from "./attachments/ui";
@@ -15,11 +15,16 @@ import {
   activityGroupSummary,
   activityStatus,
 } from "./conversation-activity";
+import { markdownHTML } from "./editor/client";
 import { Icon } from "./icon";
-import { interviewOptions } from "./interview-options";
-import { markdownHTML } from "./markdown";
-import { type ConversationEntry } from "./project-agent/contracts";
+import { interviewOptions, splitInlineCode } from "./interview-options";
+import type { ConversationEntry } from "./project-agent/contracts";
 import { CopyButton } from "./ui/feedback";
+
+function InlineCodeText(props: { text: string }) {
+  const parts = createMemo(() => splitInlineCode(props.text));
+  return <For each={parts()}>{(part) => (part.code ? <code>{part.text}</code> : part.text)}</For>;
+}
 
 function MessageCopy(props: { text: string; scope: string; user?: boolean }) {
   return (
@@ -106,9 +111,15 @@ function InterviewAnswerForm(props: {
                   onChange={(event) => choose(option.id, event.currentTarget.checked)}
                 />
                 <span>
-                  <strong>{option.label}</strong>
+                  <strong>
+                    <InlineCodeText text={option.label} />
+                  </strong>
                   <Show when={option.description}>
-                    <small>{option.description}</small>
+                    {(description) => (
+                      <small>
+                        <InlineCodeText text={description()} />
+                      </small>
+                    )}
                   </Show>
                 </span>
               </label>
@@ -373,7 +384,9 @@ export function ConversationEntryCard(props: {
               {(props.answerSummary ?? "Answered").slice(0, 88)}
               {(props.answerSummary?.length ?? 0) > 88 ? "…" : ""}
             </summary>
-            <p>{entry.body}</p>
+            <p>
+              <InlineCodeText text={entry.body} />
+            </p>
             <MessageCopy text={entry.body} scope={entry.id} />
             <div class="markdown-body" innerHTML={markdownHTML(props.answerSummary ?? "")} />
             <MessageCopy text={props.answerSummary ?? ""} scope={`${entry.id}:answer`} user />
@@ -382,9 +395,15 @@ export function ConversationEntryCard(props: {
       >
         <article class="conversation-question" id={`conversation-entry-${entry.id}`} tabindex="-1">
           <Show when={String(entry.payload["message"] ?? "")}>
-            <p>{String(entry.payload["message"] ?? "")}</p>
+            {(message) => (
+              <p>
+                <InlineCodeText text={message()} />
+              </p>
+            )}
           </Show>
-          <strong>{entry.body}</strong>
+          <strong>
+            <InlineCodeText text={entry.body} />
+          </strong>
           <MessageCopy
             text={[String(entry.payload["message"] ?? ""), entry.body].filter(Boolean).join("\n\n")}
             scope={entry.id}

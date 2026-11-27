@@ -11,7 +11,7 @@ const project = {
   slug: "owned",
   repositoryUrl: "https://git.restore.test/owned/repo.git",
   defaultBranch: "main",
-  devcontainerPath: ".devcontainer/devcontainer.json",
+  actorTemplatePath: ".factory/actor-template.json",
 };
 let directory: string, ca: string, cert: string, key: string, foreignCA: string;
 async function openssl(...args: string[]) {
@@ -235,7 +235,7 @@ async function server(mode: Mode) {
                   name: project.name,
                   repository_url: project.repositoryUrl,
                   default_branch: project.defaultBranch,
-                  devcontainer_path: project.devcontainerPath,
+                  actor_template_path: project.actorTemplatePath,
                   desktop_background_key: "river-landscape",
                   created_at: 1,
                   updated_at: 1,

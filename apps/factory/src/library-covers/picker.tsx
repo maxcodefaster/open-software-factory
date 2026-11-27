@@ -3,7 +3,7 @@ import {
   type LibraryCover,
   type LibraryCoverKey,
   libraryCoverCatalog,
-} from "../../../../packages/conversation-domain/src/library-covers";
+} from "#conversation-domain/library-covers";
 import { libraryCoverURL } from "./catalog";
 import "./picker.css";
 

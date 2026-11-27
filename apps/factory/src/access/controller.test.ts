@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
-import { emergencyAdministratorID } from "../../../../packages/auth/src/policy";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import type { ProjectRole } from "../../../../packages/project-domain/src/access";
+import { emergencyAdministratorID } from "#auth/policy";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import type { ProjectRole } from "#project-domain/access";
 import { createAccountCommands } from "./accounts";
 import {
   projectAuthorityIn,

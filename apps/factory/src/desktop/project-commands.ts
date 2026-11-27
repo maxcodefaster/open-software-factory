@@ -1,14 +1,10 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
-import {
-  type FactoryZeroContext,
-  type FactoryZeroSchema,
-  zeroMutators,
-} from "../../../../packages/zero-schema/src";
-import type { useZero } from "../../../../packages/zero-solid/src";
-import { type PersonalTicketDraft, type Ticket, type TicketDraft } from "../change/contracts";
+import { type FactoryZeroContext, type FactoryZeroSchema, zeroMutators } from "#zero-schema";
+import type { useZero } from "#zero-solid";
+import type { PersonalTicketDraft, Ticket, TicketDraft } from "../change/contracts";
 import { readPersonalTicketDraft } from "../change/drafts";
-import type { EpicEdit } from "../epic-controls";
-import { type Epic } from "../projects/contracts";
+import type { Epic } from "../projects/contracts";
+import type { EpicEdit } from "../tickets/epic-controls";
 import type { createWorkspaceState } from "../workspace/state";
 import type { WorkspaceTab } from "../workspace-tabs";
 import type { DesktopMutation, ReadTicketDetail, TicketDetail } from "./contracts";

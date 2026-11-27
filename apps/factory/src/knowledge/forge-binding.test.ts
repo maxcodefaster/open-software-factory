@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { drizzleTransaction } from "../../../../packages/db/src/client";
+import { drizzleTransaction } from "#db/client";
 import {
   forgeBinding,
   forgeBindingDatabase,

@@ -1,5 +1,5 @@
 import { createSignal, Show } from "solid-js";
-import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillContent } from "#conversation-domain/skills";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { previewRepositorySkill, previewSkillImport } from "../server-functions/skills";

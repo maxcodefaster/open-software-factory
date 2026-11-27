@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 
 // Real compiled functions, authenticated native streaming, Mastra and owned SQL.
 test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
@@ -75,8 +75,8 @@ test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
       const cookie = await isolated.signIn();
       const session = await authenticatedBootstrap(isolated.base, { cookie });
       const userID = session.session.user.id;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES (${projectID},${`stream-${projectID.slice(0, 8)}`},'Owned Streaming','https://example.invalid/stream.git','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES (${projectID},${`stream-${projectID.slice(0, 8)}`},'Owned Streaming','https://example.invalid/stream.git','main','.factory/actor-template.json',${userID})`;
       pending = streamConversation(
         (signal) =>
           serverCall(

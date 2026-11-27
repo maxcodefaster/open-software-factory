@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
+import { turnObservationInput } from "#conversation-domain/turn-observation";
 import { fixtureValue } from "../../../test/fixtures/value";
-import { type AgentView } from "./agent/contracts";
+import type { AgentView } from "./agent/contracts";
 import {
   buildAgentActivityNotice,
   buildAgentActivityStopped,

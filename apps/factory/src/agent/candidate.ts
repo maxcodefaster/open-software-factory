@@ -1,18 +1,9 @@
 import { and, eq, inArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  change,
-  changeCommitOperation,
-  changeWriter,
-  workspaceSubmission,
-} from "../../../../packages/db/src/schema";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { change, changeCommitOperation, changeWriter, operation } from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
+import { forgeRepositoryFromURL } from "#forge/repository";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
 
@@ -120,13 +111,24 @@ export async function recordWorkspaceCandidateIn(
       updatedAt: query`now()`,
     })
     .where(eq(changeWriter.changeId, intent.changeID));
-  await db.insert(workspaceSubmission).values({
+  await db.insert(operation).values({
     id: intent.id,
-    workspaceId: intent.workspaceID,
-    actorId: intent.actorID,
-    writerEpoch: query`${intent.writerEpoch}::bigint+1`,
-    remoteHead: intent.remoteHead,
-    repositoryUrl: intent.repositoryURL,
+    kind: "workspace.submission",
+    scopeType: "workspace",
+    scopeId: intent.workspaceID,
+    idempotencyKey: `workspace.submission:${intent.id}`,
+    activeKey: null,
+    state: "intended",
+    createdBy: intent.actorID,
+    payload: {
+      id: intent.id,
+      workspaceId: intent.workspaceID,
+      actorId: intent.actorID,
+      writerEpoch: Number(BigInt(intent.writerEpoch) + 1n),
+      remoteHead: intent.remoteHead,
+      repositoryUrl: intent.repositoryURL,
+      prepareAttemptedAt: null,
+    },
   });
 }
 

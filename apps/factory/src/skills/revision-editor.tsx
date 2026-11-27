@@ -1,13 +1,7 @@
 import { createPatch } from "diff";
 import { createSignal, For, Show, untrack } from "solid-js";
-import type {
-  SkillLibraryEntry,
-  SkillScope,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import {
-  type SkillContent,
-  skillContentInput,
-} from "../../../../packages/conversation-domain/src/skills";
+import type { SkillLibraryEntry, SkillScope } from "#conversation-domain/skill-library";
+import { type SkillContent, skillContentInput } from "#conversation-domain/skills";
 import { APIRequestError } from "../api-client";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";

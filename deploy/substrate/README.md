@@ -1,7 +1,8 @@
-# Substrate ROOTFS operator profile
+# Substrate native operator profile
 
-This is the concrete Substrate **v1.0.0** operator/bootstrap path for Linux amd64
-and arm64 and the accepted **ROOTFS cold restart** contract. Both architectures use
+This is the concrete Substrate **v1.0.0** operator path for Linux amd64
+and arm64, using direct native containers with MEMORY preference and ROOTFS cold fallback.
+Both architectures use
 the unchanged official worker and separately pinned official gVisor/CLI binaries.
 ARM artifact verification is not a native lifecycle or complete product proof.
 Factory's runtime controller now requires
@@ -23,45 +24,41 @@ execution intent, Source authority and the admitted Agent turn. Substrate owns t
 Actor's placement, lifecycle, routing and snapshots; it is not the coding agent.
 
 The supplied [OpenCode process](../../packages/runtime-kubernetes/src/agent-process.ts)
-runs inside the Project's actual Dev Container, as its development user. Its native
+runs inside the Project's native Work container, as its development user. Its native
 file and shell tools use that environment, alongside the Child Connector, terminals
-and Project processes. The Actor-private Docker daemon and Parent Connector provide
-infrastructure, not an alternative place to execute Project commands.
+and Project processes. Substrate starts the Project containers directly. The Parent
+Connector owns Factory control and Source, not a nested Docker daemon.
 
 The per-user Theia editor runs outside the Actor. It accesses the current canonical
 checkout through authenticated Source routes, rather than owning another clone.
 While compute runs, Source is served by the Actor's development-user subprocess.
-The current ROOTFS Pause and final Stop paths transfer the complete checkout to
-Factory's independent Source owner; owner epochs revoke the previous access.
-Explicit Start admits that same independent checkout even if the IDE has never been opened.
-Creating or allocating an Actor does not transfer Source.
+First Start admits the initial saved checkout even if the IDE has never been opened.
+Creating or allocating an Actor does not complete that first import.
+After admission, the same native Actor remains canonical Source owner across
+Pause and Resume. Routine halt does not export the checkout to another writer or delete the Actor.
+The editor can retain its tree and unsaved buffers while paused; actual current-file access
+may resume compute, independently of App health and without starting AI work.
 
-OpenCode packages are installed during the runtime image build. The current cold
-entrypoint copies the packaged tools into the Dev Container and starts their
-processes; it does not perform a new package installation for each Ticket.
-Project image preparation publishes a reusable image, not a fully initialized
-OpenCode process. The prepared image includes only the shipped server tree and
-libc-specific Bun executable. Their complete content, membership, modes and safe
-relative links are fingerprinted into the image input. Parent verifies those
-actual installed bytes with its freshly injected static Connector before
-omitting copies; image labels or a writable success marker cannot authorize reuse.
-Missing or changed tools are safely replaced and checked, without starting a
-Session or capturing model credentials, admitted Skills or Project process state.
-The pinned CLI's ordinary local Feature build carries an allowlisted archive so
-its Feature-file permission normalization cannot change the shipped tools.
+OpenCode packages are installed during the tools-image build and exposed through the
+native read-only tools image volume. The direct entrypoint uses that Connector and
+the packaged tools; it does not run the removed RootlessKit/Docker bootstrap.
+The ordinary private-container `parent` CLI, injection, deferred CLI hooks and
+private-daemon cleanup paths are retired. Current tools/Actor packages do not
+contain Docker/DinD, Compose, Dev Containers or the former producer executable.
+Projects supply their immutable Work/service images. Native Work preparation is
+the explicit command in the ActorTemplate, not a Factory image-build queue,
+a fully initialized OpenCode process or authorization to reuse a Session.
 Native `RUNNING`, Source availability, OpenCode readiness and
 App health are distinct observations, not interchangeable readiness claims.
 
-MEMORY is not qualified for this private-Docker profile. A separate native ARM
-component run retained an OpenCode process without Docker, but restoring the
-actual Dev Container stalled in gVisor's TCP loading barriers. The pinned
-upstream path does not restore saved child-network stacks; the matching
-[upstream proposal](https://github.com/gvisor/gvisor/pull/17026) is not merged.
-Do not enable MEMORY, promise warm Project continuity or substitute an unqualified
-runtime patch on the strength of the simpler process-only test.
+Earlier private-Docker MEMORY attempts stalled while restoring nested network state.
+Those receipts do not qualify the direct-native replacement. MEMORY preference
+does not promise RAM continuity: require the actual snapshot fidelity and restored
+process evidence. ROOTFS fallback restarts processes and connections; neither a
+preference nor a snapshot label proves successful restoration.
 
-An owned Linux arm64 infrastructure proof has exercised the unchanged official
-worker with this nightly and the current Factory Actor image: Docker 29.9.0
+An earlier owned Linux arm64 infrastructure proof exercised the unchanged official
+worker with this nightly and its then-current Factory Actor image: Docker 29.9.0
 created and ran an inner container, allowed HTTPS kept certificate verification,
 and an unadmitted hostname received native DNS `NXDOMAIN`. Synchronous ROOTFS
 Suspend returned a durable COMPLETED snapshot. A separate Get confirmed its
@@ -80,68 +77,335 @@ fingerprint preserves accounts, Source ownership, runtime identities and approva
 Unknown historical schemas or a different fingerprint are refused without modifying
 their data. This is not a database upgrade or Factorybox data-transfer path.
 
+### Retained Workspace lifecycle
+
+A **Workspace** is the retained development context. **Source** is its canonical saved checkout;
+the independent initial checkout is only the first-import owner. After admission the Actor owns
+that checkout for the Workspace. **Pause** means native synchronous durable Suspend, not disposal.
+**Continue** means native Resume of the same Actor. **App restart** controls the declared process,
+not the Source owner. Destructive removal and **Coding cancellation** are separate operations.
+
+Factory does not freeze guest writers, copy Source, switch canonical owners or request an
+additional Source checkpoint for ordinary Pause/Resume. Substrate owns the atomic native snapshot.
+MEMORY continuation leaves the live checkout in place. ROOTFS cold entry verifies the Actor's
+private initial-import identity and a current authenticated Source grant; it does not download the
+initial seed again, overwrite dirty files or replay inference. Unknown outcomes remain unknown.
+
+Current-file access may wake paused compute. Passive metadata/events and the retained editor tree
+are not proof that current files are connected, and a cached tree must not be presented as a fresh
+filesystem read. Source connection does not wait for the App or Work preparation to become healthy.
+Current membership, collaboration, writer/CAS and shared-buffer protections remain required.
+Ordinary halt refuses active or uncertain Coding input; file access must not resume admitted AI work.
+
+Qualification is bound to the tested source, images and installation, as scoped below.
+Earlier Source-handoff, final-Delete and replacement-Attempt receipts do not qualify
+this retained-Workspace contract.
+
 ## Qualification scope
 
-The final-Stop simplification has a separate owned Linux arm64 qualification on the unchanged
-pinned v1.0.0 worker and gVisor profile. The current Actor image and a UID/GID-1000 Factory process
-passed the targeted lifecycle proof with authenticated Workspace Start/Stop, Source and Terminal access:
+Current qualification consists of focused Linux arm64, same-node source-chart checkpoints
+on the pinned official Substrate worker and gVisor profile, using native ActorTemplates
+and direct Project containers. Each receipt applies only to its recorded source, images
+and installation; separate checkpoints are not one comprehensive acceptance run.
 
-- ROOTFS Pause/Resume retained the original Actor, private Docker state and dirty/ignored Source.
-  Offline reads, saves, search and watches did not wake paused compute.
-- Final Stop of running and paused Actors preserved independent Source without another Suspend.
-  A deliberate successor consumed saved offline edits in a fresh Docker environment.
-- A failed independent Source process left durable Stop intent and retained the original Actor.
-  Concurrent Start remained fenced while an owned transport withheld the successful Delete reply.
-  Startup cleanup confirmed the original Actor's absence without another Delete, Resume or Create.
+- **Starter delivery:** A new Project on the retained Helm installation completed explicitly
+  approved Coding, exact-commit native Verification, independent browser review and authorized
+  Delivery through merge and healthy replacement Staging. Review media were inspected, and
+  Staging signup, signout and login exercised the delivered change. Manual requirements and
+  personal Source reads before Workspace compute admitted no inference. This journey did not
+  requalify Source-before-App-health or MEMORY/ROOTFS restoration.
+- **Retained Workspace:** Ordinary durable Pause retained the original Actor and complete
+  canonical Source/writer identities while releasing its worker. Separate Starter and large
+  Source-I/O measurements exercised explicit Resume and real current-file demand wake without
+  Coding or new inference intent. Final passive checks found both original Actors suspended
+  without workers and their canonical Source unchanged. No per-Pause Source export, owner
+  transfer, Actor deletion or successor generation was used.
+- **MEMORY checkpoint:** An open IDE retained its tree and unsaved buffers across independently
+  observed durable MEMORY detach and Resume of the same Actor. Dirty, staged and untracked files,
+  the RAM-only process nonce and Source writer epoch continued. Passive watch reconnection did
+  not undo Pause; deliberate current-file access could wake compute without inference. Real
+  compiler rejection, clean build/tests, personal Preview authentication and App restart were
+  exercised. This is evidence for that observed continuation, not a general RAM guarantee.
+- **Explicit ROOTFS checkpoint:** A separate owned Starter declared native ROOTFS before its
+  first Start. Durable detach and cold continuation retained the Actor, dirty/staged/untracked
+  Source and an image-backed file's hash/nanosecond mtime, while sandbox boot and process
+  identities changed. Its compiler, build/tests and App health passed after cold wake, and the
+  editor retained its unsaved buffer. The explicit ROOTFS case does not qualify automatic
+  cross-runtime fallback. A snapshot label, reconnect or fast Resume alone cannot prove cold
+  restoration or RAM continuity; an attached sandbox can resume in place.
+- **Wiki:** The current Starter published pages at the delivered commit. A human edit saved
+  without inference remained separate from the generated baseline and survived an explicitly
+  requested update, reload and History inspection. The original failed generation remains
+  failed; later success does not establish its cause or repeated reliability.
+- **Large Source/I/O benchmark:** The actual Factory authored-source corpus contained 2,465
+  files and 33,204,315 bytes. Authenticated Source reads, first Start, Pause, Resume and demand
+  wake were measured; a real development-user command verified every file's bytes and
+  Git checkout mode plus 97 deleted paths after continuation. The native I/O profile declared
+  no App or preparation command. It does **not** qualify running or building the Factory App,
+  arbitrary host filesystem metadata, browser first paint or concurrent interactive load.
+  Images had already been used on that worker; these small same-node samples are neither
+  cache-cold/different-node restore measurements nor p95/p99, SLA or RAM-continuity evidence.
+- **IDE on the large corpus:** The actual editor displayed the tree and file contents on the
+  reused per-user IDE backend. Two unsaved markers, including one typed while compute was
+  independently suspended without a worker, survived native Resume. Saved file bytes remained
+  unchanged, no inference was admitted, and a second open Workspace's existing draft stayed
+  intact. Desktop and 900-pixel-wide screenshots were inspected. One warm explicit-open sample
+  took 5.26 seconds to acknowledge Workspace selection, including Source wake; it is not a
+  cold-IDE provisioning result or a first-paint SLA. This private-editing check does not
+  establish multi-user shared-buffer convergence.
+- **Shared IDE/MCP checkpoint:** An actual owner IDE and a separately authenticated Developer
+  MCP client exchanged unsaved edits through the same shared document, with authenticated
+  participant/cursor display. A real native shell write produced a preserved conflict; both
+  versions were inspected in the editor comparison dialog before explicit resolution.
+  The collaborator then saved the acknowledged edits after the owner's Project frontend
+  closed. Revocation refused further read/edit/save calls in the already-connected guest
+  MCP session. This is a mixed-client checkpoint, not simultaneous two-browser co-editing
+  or a guest IDE's local-buffer retention test.
+- **Native file transfers:** A deterministic 128-MiB binary completed raw HTTP upload,
+  checksum-verified commit, ordinary native Pause and same-Actor demand wake, then full
+  checksum-matching download. The 32-KiB MCP chunk tools also exchanged actual bytes.
+  Missing authentication, a foreign Origin and an oversized HTTP chunk were refused
+  without writing bytes. Partial release and checksum rejection left no published file;
+  exact owned handles/files were cleaned up and compute paused. Transfer results retained
+  compact metadata, not file content. This synthetic maximum-size boundary check is not
+  application throughput, an SLA, node-loss recovery or RAM-continuity evidence.
+- **Public Pause/Stop boundary:** An authenticated Workspace Stop request was refused
+  without admitting a native lifecycle RPC; the retained Actor stayed suspended.
+  Separately requested native Starter Staging reported primary-App health, then its
+  normal isolated Stop deleted only that exact Actor, independently confirmed absent.
+  All 14 observed canonical Source authority rows stayed unchanged. A saved Starter file
+  remained byte/version-identical after Staging removal; its current-file read woke the
+  same original Workspace Actor, which was then paused again. This does not expose or
+  qualify a public Workspace-deletion/Source-export operation.
+- **Coding observation loss:** An owned Project's active foreground shell was observed
+  before temporarily suspending only its OpenCode server process. After about 420 seconds
+  from the fault request, the admitted turn became uncertain and released its execution
+  owner/expiry; the UI required attention without reporting success. Canonical Source,
+  writer epoch, Actor binding, Runtime Attempt and native lifecycle RPC facts stayed
+  unchanged, and the same Actor remained running. The server was explicitly restored,
+  normal Coding Stop confirmed, and authenticated Workspace Pause retained the same
+  Actor/Source without a worker. This is one same-node server-observation outage, not
+  Connector loss, control-plane restart, node failure or proof of the controller's exact
+  last successful observation time.
 
-This targeted receipt has 194 assertions and is retained under
-`.factory/test-results/lifecycle-native-qualification/`. The broader native Git-push regression
-lost its Connector connection. An interrupted initial bootstrap also exposed a pinned native
-cleanup failure for a missing gVisor filestore. Those runs remain failed; the unfinished native
-fixture is retained. This proof does not extend paused-input settlement or qualify a published release.
+Local receipts, source/image/installation bindings and inspected media remain under
+`.factory/test-results/`, outside the source distribution. Failures and interrupted checks
+are not relabelled as passes by later successful runs. Deleted historical receipts are not
+retained evidence. Private-Docker/Dev-Containers and Source-export-on-Pause/final-Delete narratives
+do not qualify the current retained-Actor contract. Project OCI-image builds remain external
+to Factory.
 
-The product receipts below predate this simplification.
+The [native lifecycle proofs](../../scripts/runtime/README.md#native-lifecycle-proofs)
+describe separately owned adapter and Workspace lanes, including explicit ROOTFS cold witnesses.
+Controlled Source admission, controller fixtures, offline profile checks, package checks and lane
+declarations are not fresh live product receipts. Require actual restore observations rather than
+snapshot preferences or labels; MEMORY preference and ROOTFS cold fallback remain distinct.
 
-The Greenfield source-chart product path has been exercised on Linux arm64 with the
-unchanged pinned official worker, gVisor profile and original WorkerPool budget. This is
-not a published Factory release or a claim that every operator environment is qualified.
-The same fresh Helm installation covers:
+This scope is not full production or feature acceptance, a full amd64 product journey, a
+source-development-launcher qualification, signed release acceptance, independent disaster restore,
+cache-cold/different-node recovery or every queued-input Stop/manual-Continue case. It does not
+establish comprehensive role/permission coverage or native private-image pull qualification.
+The Starter journey needed an explicit Retry and ordinary Pauses for host capacity; it was
+neither first-attempt success nor a no-wait flow. Actor-level native resource limits remain
+the enforcement boundary.
 
-- Two ordinary Projects, the shipped Starter's signup/login/signout flow and healthy
-  Staging Apps, without Factorybox configuration or a retained-installation conversion.
-- Saved requirements, explicit Implement approval, real OpenCode implementation,
-  exact-commit native Verification, independent review and deliberate Delivery through
-  merge and healthy replacement Staging. Infrastructure changes still require human approval.
-- Independent Source reads and saved edits without waking compute, ROOTFS cold restart,
-  explicit Stop with UID-confirmed Delete and a new immutable generation retaining saved source.
-  IDE and real UID-1000 ARM terminal use, OAuth MCP and shared Source editing have live coverage.
-- Native build-only prebuild publication for both Project Environments, including mixed
-  private-registry credentials and certificate-only registry trust, followed by confirmed
-  producer cleanup. Runtime-interpolated Compose recipes remain unsupported for prebuilds;
-  that explicit skip retains normal Dev Container startup.
-- Source-only release publication and a native attested one-job artifact publication after
-  the normal approval/Verification/review/Delivery path. Actual downloaded artifact bytes
-  and SHA-256 match the recorded release; temporary access and compute are revoked afterward.
+## Native isolated-browser transport
 
-A separate fresh Linux arm64 installation also covers Stop-only cold settlement of a
-previously completed Coding input after normal idle Pause. The same original Actor produced
-an exact joined worker result, a new completed durable ROOTFS and independent writable Source.
-A deliberate follow-up continued Coding. An ordinary Starter change on that installation
-passed generated exact-commit Verification, independent browser review, explicit Delivery
-approval and replacement Staging, including a real Staging signup and logout. Historical
-failed Stops and paused inputs with running or queued work are not qualified.
+The direct-ActorTemplate work uses Bun's built-in mTLS WebSocket client through
+Substrate's ordinary Router ingress to Actor port 80. The fixed endpoint is
+`/internal/factory-browser`. There is no forwarding subprocess, internal SDK,
+Kubernetes exec, inner Docker or additional lifecycle controller. The client
+does not create, explicitly resume, suspend, delete or retry Actors. Router
+ingress can itself resume an Actor, so opening the transport is an execution
+action, never an inventory read.
 
-Local qualification receipts and inspected media copies stay under
-`.factory/test-results/substrate-only/` and `.factory/test-results/product-acceptance/`,
-not in the source distribution. Factory retains
-its normal approvals, exact-commit results and review media in the installation.
-Failed or interrupted receipts remain failed; later explicit fixture runs do not relabel them.
-Controller, package and ordinary Docker checks retain their narrower meaning below.
+The trusted Browser owner supplies the Router `routerURL`, absolute `caFile`
+and combined `credentialFile` projection paths, `atespace`, deterministic
+`actorName: "browser-<Session UUID without hyphens>"`, expected `actorUID`,
+frozen Session scope and browser-scoped capability. The client rereads trust
+and credentials for each connection, verifies the fixed TLS server name
+`atenet-router.ate-system.svc` and sends `ate-target-actor` on the Router request.
+The Browser gateway checks its projected UID, Session, capability and pinned
+protocol. Its first `browser-connected` frame must confirm the expected Actor
+UID and Session before any operation is sent. Credentials do not appear in
+argv, tool results or public diagnostics.
 
-This scope does not qualify a full amd64 product journey, the source-development launcher,
-different-node recovery, independent disaster restore or every offline queued-input
-Stop/manual-Continue case. ROOTFS cold restart is the contract, not warm memory continuity.
-Actor-level limits remain the enforcement boundary, not per-inner-container cgroups.
+The Router addresses Actors by **name**, not immutable UID. The product owner
+must still verify the original Actor/template binding before opening it, retain
+permanent name tombstones, and use a trusted Browser endpoint that checks its
+projected Actor UID. A returned header is not independent runtime attestation.
+The Router client's allowlisted SPIFFE identity is installation authority and
+must not be mounted in any Project or Browser Actor.
+
+Frames are bounded JSON. Connection loss and cancellation end the original
+transport without replaying a tool call. Each operation requires the owner's
+current authority check at the actual send. App HTTP and read-only Source
+inspection callbacks retain their frozen scope and declared App destination.
+App WebSocket upgrades are implemented through the existing Child transport,
+relaying bounded text and binary frames, including empty payloads. Opening and
+each Browser-to-App data send recheck current owner authority and the original
+Actor UID, Runtime Attempt/generation, Child connection and declared App target.
+Cancellation, Stop, suspension or changed bindings end the original stream
+without reconnecting or replaying it. Isolated App credentials use the dedicated
+`AppAuthorization` field (`appAuthorization` on the wire), bounded to 16 KiB.
+The Child rejects invalid values and use on non-App channels before dialing or
+attaching other capabilities. These credentials remain separate from generic
+headers and Factory/Parent/Child/Agent credentials; public Runtime WebSockets
+do not populate that App-only field.
+
+The isolated transport lane is component qualification: its App relay and Source
+observations use controlled fixtures. The focused live Starter independent-review checkpoint
+is scoped [above](#qualification-scope); it does not establish comprehensive per-send authority,
+credential-rotation or permission coverage. Component checks and removed private-Docker browser
+receipts do not extend that live scope.
+
+## Commission the Factory Router identity
+
+Router admission is **external operator configuration**, separate from Factory's native
+Owner/Editor API grants and the `ate.dev/api-access=true` Namespace label. The pinned
+v1.0.0 [Router manifest](https://github.com/agent-substrate/substrate/blob/b34fbee742906494b5eb4f1f36987176bf8770a4/manifests/ate-install/atenet-router.yaml)
+leaves its client allowlist unset. The official
+[installer overlay](https://github.com/agent-substrate/substrate/blob/b34fbee742906494b5eb4f1f36987176bf8770a4/cmd/ate-setup/internal/steps/overlay.go)
+sets the `atenet-router` container's `--ingress-allowed-spiffe-ids` from the installer's
+same-named option, or `ATE_INGRESS_ALLOWED_SPIFFE_IDS` when that option is absent.
+The [native flag owner](https://github.com/agent-substrate/substrate/blob/b34fbee742906494b5eb4f1f36987176bf8770a4/cmd/atenet/internal/router/cmd.go)
+accepts comma-separated or repeated values; repeated flags append. The Envoy
+[validation context](https://github.com/agent-substrate/substrate/blob/b34fbee742906494b5eb4f1f36987176bf8770a4/cmd/atenet/internal/router/xds.go)
+requires a Pod Identity CA client certificate and an **exact URI SAN** match. An admitted
+client can reach any Actor through this Router, not just one Project. Admit only the
+trusted Factory control-plane identity, never an Actor, editor or Project ServiceAccount.
+
+For a Router currently allowing only
+`spiffe://cluster.local/ns/ate-system/sa/atenet-client`, the missing entry for Helm release
+`factory` in Namespace `factory` is exactly `spiffe://cluster.local/ns/factory/sa/factory`.
+Other installations must use their actual Namespace and rendered `serviceAccountName`.
+The chart truncates the release name to 40 characters and removes a trailing hyphen;
+neither the release string nor a clean-room Namespace guess is sufficient.
+The API Editor principal for that same example is
+`user:system:serviceaccount:factory:factory`; it is not the Router's certificate identity.
+Do not borrow, copy or mint an `atenet-client` credential to stand in for Factory.
+
+The Factory container mounts the whole read-only `substrate-control` projected volume:
+
+| Purpose | Native projection | Factory path |
+| --- | --- | --- |
+| Router client identity, including private key | `podCertificate`, signer `podidentity.podcert.ate.dev/identity`, `ECDSAP256` | `/run/factory/substrate-control/credential-bundle.pem` |
+| Router/API serving trust | live `ClusterTrustBundle`, signer `servicedns.podcert.ate.dev/identity`, label `podcert.ate.dev/canarying=live` | `/run/factory/substrate-control/ca.pem` |
+| API Editor authentication, not Router mTLS | 600-second ServiceAccount token, audience `api.ate-system.svc` | `/run/factory/substrate-control/token` |
+
+Kubelet owns projection rotation. The Router client rereads CA and credential files on
+every connection and verifies `atenet-router.ate-system.svc`; do not freeze either with
+`subPath`, copied files, image layers or Secret substitutes. Router-side client trust remains
+the native live `podidentity` ClusterTrustBundle. No CA key, Factory client bundle, Owner
+token or Factory ServiceAccount belongs in a Project or Browser Actor. Actor egress public
+trust is separate. This commissioning changes no trust root, wildcard, TLS verification,
+WorkerPool, egress policy or Actor template.
+
+### Observe and prepare an append-only plan
+
+Run from the Factory root. Select explicit `KUBECONFIG`, `CONTEXT`, `NAMESPACE`, `RELEASE`,
+the installation's private `FACTORY_VALUES` file and a **new private** `OUT` directory.
+The following only renders local files and reads the selected Router; it makes no cluster
+changes. Render with the same chart/values as the intended installation. For an existing
+installation, independently confirm its actual Factory Pod Namespace/ServiceAccount and
+Deployment match this render before approving the plan.
+
+```sh
+(
+  set -euC
+  umask 077
+  mise exec -- helm template "$RELEASE" ./deploy/helm/factory --namespace "$NAMESPACE" \
+    --values "$FACTORY_VALUES" --show-only templates/factory.yaml > "$OUT/factory-rendered.yaml"
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+    get deployment atenet-router -o json > "$OUT/router-before.json"
+)
+SERVICE_ACCOUNT="$(mise exec -- bun --no-env-file --eval '
+  import { parseAllDocuments } from "yaml";
+  const apps = parseAllDocuments(await Bun.file(process.argv[1]).text())
+    .map(d => { if (d.errors.length) throw d.errors[0]; return d.toJSON(); })
+    .filter(d => d?.kind === "Deployment");
+  if (apps.length !== 1) throw new Error("Expected one rendered Factory Deployment");
+  const account = apps[0].spec.template.spec.serviceAccountName;
+  if (!account) throw new Error("Missing rendered Factory ServiceAccount");
+  console.log(account);
+' "$OUT/factory-rendered.yaml")"
+router_plan() {
+  mise exec -- bun --no-env-file --eval '
+    import { planSubstrateRouterAdmission } from "./scripts/runtime/substrate-profile";
+    console.log(JSON.stringify(planSubstrateRouterAdmission(
+      await Bun.file(process.argv[1]).json(), process.argv[2], process.argv[3]), null, 2));
+  ' "$1" "$NAMESPACE" "$SERVICE_ACCOUNT"
+}
+(set -euC; umask 077; router_plan "$OUT/router-before.json" > "$OUT/router-admission-plan.json")
+```
+
+Review `spiffeID`, **all** `allowedSPIFFEIDs` and `patch` in the plan against the selected
+installation. `planSubstrateRouterAdmission` is an offline bounded helper, not a Factory
+endpoint or automatic installer. It accepts the pinned Envoy layout and literal native Pod
+identities only; unfamiliar identities/layouts require operator review. It preserves all existing
+arguments and clients, appending one repeated native flag only when that exact identity is
+missing. Missing UID/resourceVersion, malformed identities, wildcards or changed expected
+CA/serving-certificate flags refuse a plan. It does not certify the whole deployment or live TLS.
+
+### Operator apply and live validation
+
+Only the selected installation's operator performs this step, with new admission withheld
+and in-flight Router traffic accounted for. The patch causes the ordinary Router rollout,
+which can interrupt connections. Do not rerun the full native installer just to change a
+retained Router's admission. If `patch` is empty, skip mutation and continue with validation.
+Otherwise extract and deliberately apply the reviewed patch:
+
+```sh
+(
+  set -euC
+  umask 077
+  mise exec -- bun --no-env-file --eval '
+    import { writeFile } from "node:fs/promises";
+    const { patch } = await Bun.file(process.argv[1]).json();
+    if (!patch.length) throw new Error("Already listed; skip mutation and validate");
+    await writeFile(process.argv[2], JSON.stringify(patch), { flag: "wx", mode: 0o600 });
+  ' "$OUT/router-admission-plan.json" "$OUT/router-admission-patch.json"
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+    patch deployment atenet-router --type=json --patch-file "$OUT/router-admission-patch.json"
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+    rollout status deployment/atenet-router --timeout=240s
+  mise exec -- kubectl --kubeconfig "$KUBECONFIG" --context "$CONTEXT" -n ate-system \
+    get deployment atenet-router -o json > "$OUT/router-after.json"
+  router_plan "$OUT/router-after.json" > "$OUT/router-admission-after.json"
+)
+```
+
+The JSON Patch tests the observed Deployment UID, resourceVersion, named container and full
+argv before appending. A concurrent change/replacement refuses the update. A lost reply is
+**unknown**: inspect the same original Deployment and rollout before any new plan; never
+blindly retry, force replacement or adopt another UID. Compare `router-after.json` with
+`router-before.json` and require the original Deployment UID. Require the after-plan's `patch` to
+be empty and its existing identity list to equal the original list plus this one exact
+Factory identity (unchanged if it was already listed). That is a configuration check,
+not installed acceptance.
+
+Persist the complete preserved list in the operator's official `ate-setup` configuration
+before its next regeneration. With only the previously described client and default Factory
+installation, the full installer setting is:
+
+```text
+--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-system/sa/atenet-client,spiffe://cluster.local/ns/factory/sa/factory
+```
+
+Retain every other actually configured client too. Never replace the list with Factory alone,
+change native trust, add a namespace prefix/wildcard or grant an Actor this authority.
+After every native installer regeneration, reobserve and replan admission as well as rechecking
+the existing egress/probe overlays.
+
+The remaining live gate belongs to the deployment owner: from the **actual trusted Factory
+Pod**, use its normal projected files and native Router client against an explicitly authorized,
+UID-verified Browser Actor. Require the expected Actor UID/Session handshake and a scoped
+operation, normal TLS hostname verification, and denial for an unlisted identity. Reconnect
+after native certificate/trust rotation to qualify rotation; never export the private bundle
+into a probe Pod or evidence. Router ingress may resume its target, so this is not a read-only
+inventory check. Record tested source/image, installation/Pod/Router UIDs, exact identity and
+outcomes without secrets. Neither an empty plan, `helm test`, Pod readiness nor local unit checks
+prove that live gate or the complete Browser-QA journey.
 
 ## Fresh Factory Workspace provisioning
 
@@ -152,7 +416,7 @@ No operator-copied bridge binary is needed. The authenticated
 provision its deterministic Atespace, editor grant, immutable ActorTemplate and
 Actor. Configuration
 is explicit and installation-scoped through `FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION`;
-all Projects use that selected native configuration. Each Workspace, Verification, prebuild,
+all Projects use that selected native configuration. Each Workspace, Verification,
 Staging and publication
 retains its own Project identity with the installation pins before provisioning.
 The owned adapter proof calls the native adapter directly; it is not a separate
@@ -167,28 +431,20 @@ The clean-room command sets this label on its new, exactly owned Factory Namespa
 The read-only Helm preflight refuses a missing or disabled label without modifying policy.
 
 The pinned native wakeup client has a 250ms deadline for each HTTP request.
-For Factory cold starts, the wakeup server checks the authenticated native cold
-mode and current process IDs; it does not wait for private Docker. The Parent
-starts after cold admission and serves initialized Source while its own Docker
-readiness check continues. An ordinary rootless workload without Factory bootstrap
-still requires a real Docker round trip. Native `RUNNING` means the bootstrap can
-continue, not that Source, OpenCode, the Dev Container or an App is ready.
-
-Checks run serially on demand outside the HTTP handler. The server starts unready,
-expires success after one second, and rechecks process IDs on every request.
-Checks stop when the native worker no longer requests readiness. Slow or stuck CLI
-reads cannot block HTTP responses or preserve an old success. Native wakeup
-deadlines, current Source ownership and later Agent/Project admission remain separate.
-The native ARM Workspace lane verifies authenticated Source reads before a
+Factory's direct Parent serves `/readyz` from its current control and Source readiness.
+It does not shell out to a cold-mode CLI, poll Docker or expose the removed Python
+bootstrap probe. Native `RUNNING` does not mean OpenCode or an App is ready.
+The standalone operator profile does not invent an application readiness endpoint:
+its supplied command must be valid in the selected image. Production Factory templates
+retain their own explicit control and Project probes.
+The earlier native ARM Workspace lane verified authenticated Source reads before a
 deliberately held Dev Container setup hook, followed by real Parent/Child readiness,
 ROOTFS Pause/Resume and running/paused final Stop with independent Source. This
 small Node fixture does not qualify Starter, browser interaction or first LLM-tool
 latency; the historical product receipts above do not establish those new timings.
 
-The private cold-mode watcher allows the pinned worker's five-minute wakeup window,
-including verified Source import before Docker starts. It no longer cuts that import
-off at the ordinary Docker check's 150-second limit. The worker still owns the overall
-wakeup deadline. Fixed Source lease, download and materialization timings are ephemeral
+The native worker still owns the overall wakeup deadline. Fixed Source lease,
+download and materialization timings are ephemeral
 diagnostics, not readiness or successful restoration evidence.
 Parent tool-injection timings separate fixed probes, payload copies, executable
 staging, permissions and Child launch. Per-tool and shared executable timings can
@@ -197,16 +453,14 @@ health or model readiness; new phases require rebuilt `runtime-host` and derived
 `substrate-runtime` artifacts.
 
 Connector transport reads Ping/Pong frames after its first startup message, including
-while Parent prepares images, Features and hooks. One socket reader keeps complete
+while native Project preparation runs. One socket reader keeps complete
 application frames in receive order in a bounded eight-frame queue; a full queue applies
 backpressure. Receiving a frame does not dispatch an operation, repeat startup work
 or announce App readiness. The existing application loop still owns execution, and
-closing the connection releases a reader blocked on that queue. Ten-second pings leave
-headroom inside the private proxy's unchanged 30-second idle timeout. TLS, protocol,
-attempt/Actor authentication and the normal 90-second read deadline are unchanged.
-Prebuild reconnect publishes the replacement transport together with its startup
-reports, so a concurrently completed producer reports through that same connection
-without another build or publication.
+closing the connection releases a reader blocked on that queue. Ten-second pings and
+their replies keep the transport observed while preparation runs; no private proxy
+is required. TLS, protocol, attempt/Actor authentication and the normal 90-second
+read deadline are unchanged.
 
 The Parent's authenticated Environment GET retries transient DNS, CONNECT and
 gateway failures inside its original fifteen-second read budget. Every read keeps
@@ -225,70 +479,69 @@ still requires the current Developer writer. The native bootstrap uses the same
 Controller fixtures alone do not qualify Coding, QA or Delivery. The live ARM
 journey is listed in the qualification scope; reading or saving requirements never
 implicitly starts an AI Interview.
-Native Project prebuilds now enter the existing preparation queue. Each producer
-retains its exact revision, Environment version,
-private checkout, native create outcomes and publication repository; it allocates
-no Workspace, canonical Source writer or legacy worker. Set `prebuildRegistry` to
-an explicitly admitted TLS registry hostname on port 443 (the Connector's port
-must also be 443). Credentials and any registry CA come only from that frozen
-Project Environment, never the Factory/Forge administrator. Missing publication
-configuration or a missing committed Project Environment registry publication grant fails
-closed before provisioning. Registry credentials grant image pulls by default, not pushes.
-A Project manager must explicitly enable **Allow publishing prepared images for this Project**
-and save that Environment revision before a new producer can publish. Use a push-capable token
-limited to the Project's prepared-image repository. Verification access remains a separate choice.
-A committed Development Environment save queues only that environment's image preparation, even
-before optional App/QA configuration is confirmed. Factory rechecks the saving manager and exact
-current Environment revision before admission; the save does not approve Preview or inference.
-Background preparation and Preview Environment saves still require confirmed Project setup.
-Without an admitted registry or that grant, Factory records an unstarted preparation as skipped
-and keeps normal Dev Container startup available; it creates no native producer resources.
-Project setup reports normal startup instead of waiting for a prepared image. Existing provisioning
-intents and producers keep their original identities and still require normal observation and cleanup.
-The publication decision stays in Factory; the Connector receives only its selected registry
-credentials, not that control-plane permission. Lost replies observe the same
-names, and a published result releases the producer only after exact-UID Delete
-is confirmed. Registry/image selection changes do not rewrite retained owners.
-Additional installation-level egress admissions apply only to fresh owners. Retained
-owners keep their exact original host list; adding an admitted download host does not block
-their observation or a new generation after confirmed Stop. Removing an original admission
-or changing native trust/placement still fails closed rather than rebinding the old Actor.
-Native prebuild recipe checks run Git against canonical Source as development UID 1000;
-their temporary build checkout stays private. Consumer image inspection uses the same
-Actor-private Docker connection as acquisition, and still checks the exact input label and platform.
-A successful prepared-image consumer records its immutable image/input and public configuration
-fingerprint in the existing private Parent state. Same-Actor cold startup checks that original
-Attempt, generation, primary container, image metadata and configuration before recreating its
-temporary CLI override. Ordinary offline application edits do not turn continuation into a new
-cache-compatibility decision. Missing ownership, a changed configuration or an unavailable original
-image fails without silently selecting another image or rebuilding the container. Runtime grants
-and generated overrides are not saved in that state. Real-CLI component checks remain separate
-from the native Workspace lifecycle proof.
-The Connector has no reserve, template-fork activation, prepared Child or private
-primary-container capture mode. Parent authenticates the current Runtime environment,
-selects the confirmed prebuild or native dependencies and starts the assigned Child.
-Registry-digest prebuilds and same-Actor continuation remain separate from the removed
-captured-process path. Source initialization and service subprocesses use development
-UID 1000, without the former shifted host UID.
-The baseline keeps isolated generations local to each Verification or preparation
-owner, without a shared Project counter.
-Controller regressions are separate from live native prebuild qualification. Runtime-only
-Compose service environments are omitted from the private producer snapshot without
-resolving their values; consumers retain the original files and fresh Runtime grants.
-Image/build/file-selection interpolation remains refused. The Connector component lane
-checks a real pinned CLI build, completed-result reuse and a cache-independent consumer;
-the shipped Starter's runtime-interpolated Compose recipe deliberately skips preparation. Unsupported
-recipes keep normal startup available without exporting Runtime secrets. A dispatched
-build with no positively observed original image is retained as uncertain, never rerun.
-Native producers use only the verified Actor-private Docker socket and proxy.
-Image-only Compose primaries reuse the bundled networkless HTTPS/CA preparation
-before Features build. Public transport is hashed into the recipe; local image and
-Actor identities stay private and are not needed to match a cached artifact.
-Native prebuilds hash and embed a canonical public certificate set. PEM ordering,
-whitespace and duplicates cannot separate otherwise identical producer/consumer inputs.
-Different certificates or transport code still produce a different identity. Existing
-results are not rewritten to match the new transport contract. Native producer coverage is
-listed above; component consumer checks do not broaden that coverage.
+
+### Project images and native preparation
+
+The approved `.factory/actor-template.json` supplies exact immutable Work and service
+images. Build and publish those images through the Project's normal OCI-image workflow;
+Factory does not build arbitrary Dockerfiles, install Dev Container Features, translate
+Compose or publish a cached development image. The shipped Starter already supplies its
+release's prepared Work and PostgreSQL images. Imported Projects must establish real
+image digests before execution; an AI-proposed recipe or invented digest is not a built image.
+
+The Project declaration optionally accepts the native-shaped
+`"snapshotConfig": {"preferredFidelity": "SNAPSHOT_FIDELITY_ROOTFS"}`. The only other
+supported value is `"SNAPSHOT_FIDELITY_MEMORY"`, which remains the default when
+`snapshotConfig` is omitted. This strict object accepts only `preferredFidelity`;
+VOLUMES, `storageLocation`, golden snapshot configuration and unknown fields are rejected.
+Factory always renders golden snapshots explicitly disabled.
+
+This setting selects the preference for a newly admitted immutable ActorTemplate, not a
+per-Pause switch. An existing Actor retains its original template; editing the Project
+declaration does not mutate a retained binding. To exercise a full Starter ROOTFS cold flow
+from first Start, declare ROOTFS before creating that Project's first Actor. A preference or
+snapshot label alone proves neither fallback nor successful restoration. This setting offers
+no performance or RAM-continuity guarantee and does not qualify a Starter or native lifecycle flow.
+
+Substrate's node-side `atelet` pulls these images before the Project process exists.
+Private image access must therefore be commissioned by the operator through the pinned
+upstream `--image-credential-provider-config` and `--image-credential-provider-bin-dir`
+contract, with the corresponding registry trust. Factory supplies no custom credential provider
+or per-Project registry UI. Private images remain unavailable until that operator prerequisite
+is met: missing pull authority, registry trust or image content surfaces as a native pull/start
+failure, not successful setup, an anonymous fallback or substitution of a public image.
+Do not copy credentials into ActorTemplate JSON or add a Factory image proxy to conceal an
+unconfigured native pull. Qualify private access against the exact admitted native image and
+original Actor binding; saving Project settings or passing a registry-credential fixture is
+not proof that the native worker can pull it.
+
+The Work container's optional command/args performs explicit repository preparation after
+the canonical Source checkpoint is admitted. Factory waits for its actual successful result
+before Project execution. A failure remains a failure, not a skipped image job or a claim that
+the App is healthy. Native cold continuation can run preparation again, so commands must
+tolerate it. Services use their explicit native entrypoints and separate durable directories.
+
+Project Environment settings accept only
+`{variables:[{name,value?,runtime,verification}]}`. Runtime grants support application variables
+and private-package tokens inside Project processes, including explicit Work preparation.
+Verification receives only variables explicitly opted in with `verification: true`; Runtime
+access alone does not grant Verification access. There is no build-time flag or registry bundle.
+Image-build credentials belong to the Project's external OCI workflow, not Factory Environment.
+
+Saving Environment settings persists the exact secret revision. It does not enqueue a build,
+publish an image, start inference or qualify the next native start. Settings and signed source
+events have no image-producer side effect. Setup reports approved configuration, Environment
+settings and actual Main Preview independently; it has no synthetic image-preparation steps.
+The image-result endpoint, global producer scheduler, producer grants and producer-only
+Greenfield tables are removed rather than retained as compatibility paths.
+
+Registry authentication, public certificate trust, explicit egress and immutable native
+provisioning checks remain required. Adding an admitted download host affects fresh owners;
+retained owners keep their original exact policy. Removing an original admission or changing
+trust/placement fails closed rather than rebinding a retained Actor. Release publication
+remains its separately authorized exact-job workflow, not a replacement development-image builder.
+
+### Model and browser callbacks
 
 Native model and browser callbacks use the exact Connector HTTPS origin, with
 their existing attempt-scoped tokens. Legacy internal-host URL settings do not
@@ -314,12 +567,15 @@ These paths use the Greenfield baseline's `substrate_isolated` provisioning fact
 tests prove authority, original creates, scope, readiness gating and cleanup against controlled
 native responses, not live runtime or human-approved release qualification.
 
-Workspace Stop keeps the existing Workspace lock throughout complete Source export,
+Internal final Workspace cleanup, not the public Workspace halt action, keeps the
+existing Workspace lock throughout complete Source export,
 confirmed independent Source handoff and UID-bound Delete. It records final Stop intent before
 exporting and never captures a new ROOTFS merely to delete that Actor. Missing independent Source
 blocks Delete. Lost replies retain the original intent until the same Actor is independently
 absent; concurrent Start cannot wake it. Startup recovery and the bounded Stop-cleanup sweep
 continue that recorded operation without new compute, hooks or input.
+Public Workspace halt uses Pause; `stopRuntimeAttempt` refuses Workspace-bound Attempts
+and is reserved for isolated execution. There is no public Workspace-delete command.
 During startup, the authenticated Source drain cancels and joins preparation instead of
 waiting behind a blocked Dev Container command. The same queued checkpoint request then
 reaches the retained Source owner; cancellation alone is not a drain acknowledgement.
@@ -450,6 +706,17 @@ retry decision has confirmed exact predecessor cleanup; a lost or still-live
 outcome cannot select a successor. Controller regressions remain separate from real
 native CI qualification; the live ARM coverage is listed above.
 
+The pinned host runner keeps its scratch workspace under `/tmp/factory-actions`; that is
+not the prepared checkout. For Verification and publication, Factory supplies
+`FACTORY_CHECKOUT_ROOT` from the Work process's actual cwd after native path remapping.
+Source-based `run` steps use the standard
+`working-directory: ${{ env.FACTORY_CHECKOUT_ROOT }}` field. Keep commands relative;
+monorepo checks may append an established relative subdirectory to that field.
+Generated Verification workflows set it on each step; the assigned-commit check stays at
+the checkout root. Only `run` steps are supported:
+do not add `uses`/checkout steps. Factory neither overrides authored step directories
+with a wrapper nor copies or links the checkout into runner scratch space.
+
 An initial Verification refused native worker capacity waits on the same Actor.
 The existing owner may re-enter official Resume only while the original UID and
 dispatch version are unchanged, with no assignment, checkpoint, snapshot or canonical Source.
@@ -504,7 +771,9 @@ port (normally 443), for example the chosen image registry and its authenticatio
 and blob origins. No host Docker socket, Kubernetes credentials or global native
 credentials are projected into an Actor.
 Updating `workloadImage` or optional `resources` (`cpuMilli`, `memoryMiB`) selects
-new pins only for fresh owners. Existing
+new pins only for fresh owners. An omitted installation selection now freezes explicit
+1,500m CPU / 3,072 MiB limits before creating a new owner; these are finite defaults, not a
+claim that every Project fits. Existing
 Workspaces keep their saved image, template and provisioning intent for observation,
 Stop and continuation. The update never replaces an Actor or reinterprets its
 snapshot. Changes to trust, scope, placement or egress still fail closed against
@@ -515,14 +784,11 @@ Factory/Project allowances; old native bindings retain their original 1500m CPU 
 dependency hook, which Substrate killed for exceeding memory. No failed Actor is
 resized or restarted to hide that outcome. WorkerPool capacity admission still applies.
 
-Project Registry image acquisition has one ten-minute deadline for cold downloads and
-private image extraction. Both download workers and all transport retries share that
-window; a shorter caller deadline still applies. Cancellation joins the clients, and
-exact image digests must be confirmed before Dev Container hooks can run.
-Prebuild metadata and recipe matching have a separate thirty-second read window. Once those
-match, acquiring the exact prepared image uses the same ten-minute cold image budget, not the
-spent read window. The original caller's shorter deadline and cancellation still apply, and
-the consumer rechecks the saved checkout before selecting the downloaded image.
+Native image acquisition and container startup belong to Substrate. Factory does not retain
+the previous private-Docker download workers, prepared-image lookup deadline or CLI hook path.
+Exact image identities are validated before template admission; runtime preparation and App
+health still need their own observed results. Earlier private-image acquisition timings are
+not performance evidence for direct native startup.
 
 For `fresh-workspaces`, installation capacity admission observes the one original
 WorkerPool selected by those installation labels and its exact pinned SandboxConfig.
@@ -593,58 +859,28 @@ An Ingress must allow the normal WSS and
 read-only Git bootstrap routes while preserving serving TLS/SNI/SAN.
 
 Build the Actor image with [`Runtime.Dockerfile`](Runtime.Dockerfile), supplying
-immutable `FACTORY_RUNTIME_HOST_IMAGE` and `FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE`
-digests. The former is the normal Factory runtime bundle, built from
-`deploy/runtime-host/Dockerfile`; the latter is the qualified rootless bootstrap
-above. This intentionally replaces its old Docker 29.0.0 engine with Factory's
-**29.9.0** binaries and retains Compose **5.7.0-dev.1e1c577**, Node **24.22.3**,
-Dev Containers CLI **0.89.0**, Connector and the packaged OpenCode **2.3.2** tools.
-The image build checks executable versions. It does not substitute newer packages
-or qualify every Dev Container feature or Coding/Verification workflow.
-The distribution workflow builds this Actor image natively on amd64 and arm64 after
-the same-commit tools and same-architecture rootless bootstrap have been published
-by digest. Each package proof refuses an emulated host/image mismatch. It signs the
-combined image and includes it as the required `substrate-runtime` artifact in both
-control-plane image architectures and the chart catalog. Normal installation
-checks that `workloadImage` matches this exact reference. Existing native owners
-keep their immutable original image and template.
+the immutable `FACTORY_RUNTIME_HOST_IMAGE` digest from `deploy/runtime-host/Dockerfile`.
+It starts `factory-runtime-connector native-parent` directly and checks the shipped
+Connector and Git executables. There is no rootless bootstrap image input or
+`native-bootstrap-mode` command. Project containers use their separately admitted
+immutable images, not a private Docker engine. Normal installation checks that
+`workloadImage` matches the exact `substrate-runtime` artifact.
 `scripts/runtime/substrate-image-proof.sh` checks only the networkless image
 packages and explicitly reports no native lifecycle proof. Its successful result
-does not qualify gVisor, Source handoff, private Docker or the full Ticket journey.
+does not qualify gVisor, Source handoff or the full Ticket journey.
 
-For image-only native primaries, the Connector prepares a private, networkless
-dependency layer before Features run. It supplements the image's public trust,
-keeps those roots through `ca-certificates` installation, and changes APT repository
-schemes to HTTPS without changing hosts, paths or signature settings. The original
-image identity, required Features, lifecycle hooks, Source and Compose data remain
-authoritative. Docker build proxies and lifecycle environment use the Actor-private
-proxy; no Parent credentials or additional egress ports enter the layer. Lost build
-outcomes are observed under their original creation intent, never blindly rebuilt.
-Required Features consume its owned local tag rather than a bare image ID, which
-BuildKit would interpret as a registry repository. Factory verifies that tag's exact
-image ID and ownership again before startup; Source cannot supply this bypass.
-Native startup defers user lifecycle commands with the pinned CLI's
-`--skip-post-create`, inspects the exact primary and its one private bridge, then
-uses `run-user-commands` once with that bridge's observed proxy gateway. Child
-transport uses the same observation; Compose never inherits another bridge's
-unreachable default address. Missing, changed or ambiguous networks fail closed.
-The earlier Alpine Workspace proof alone does not qualify this path. The current
-ARM Starter coverage uses the rebuilt image and is listed above.
-The Factory-specific child bootstrap lets Docker 29.9 manage its own matching
-containerd. The Docker bundle supplies shim **2.4.1** but omits the standalone
-daemon. The image therefore intentionally replaces the bootstrap's **2.1.5** daemon
-with the official **2.4.1 static** binary (no injected glibc compatibility layer), exact release/revision/checksum in
-[`runtime-pins.json`](runtime-pins.json). It never combines the new shim API with
-the older daemon. The standalone qualified Docker 29.0 profile and its child script stay
-unchanged; only the explicitly new Factory image selects `runtime-child.sh`.
-Fresh Factory images use Docker's `overlay2` graph at
-`/home/rootless/persist/docker/graph` in the native durable directory. A separate
-root-owned 0700 parent blocks development-UID access even though Docker sets its
-own data root to 0710. Source remains the separate `project` tree; its archives
-and cold imports never include or replace Docker storage. Bootstrap refuses
-symlinks, non-directories, foreign ownership or changed private-parent permissions
-without repairing them. The Stop-only branch runs before storage creation.
-No existing graph is converted, and old Actors keep their immutable image.
+### Historical private-container storage and Source qualification
+
+This entire subsection records an older private-Docker and Source-handoff design
+and its scoped receipts. It is not the current retained-Workspace contract or an
+entrypoint supported by current native templates; do not implement its Pause/Stop
+ownership transfer as a compatibility path. The current contract is
+[retained Workspace lifecycle](#retained-workspace-lifecycle).
+
+The removed dependency-layer builder, Dev Container Features, Docker build proxy and
+deferred CLI hooks are not native image-preparation options. Current Projects supply
+immutable OCI images and explicit Work commands as described
+[above](#project-images-and-native-preparation); the storage receipt below does not qualify them.
 
 An owned arm64 storage proof loaded the exact shipped Node and PostgreSQL images
 into an empty Overlay graph within the existing ten-minute acquisition window,
@@ -686,13 +922,8 @@ System Contract remain pinned; native RUNNING alone is never App/Connector ready
 The owned native Factory lane proves initial checkout, Parent/Child, App and
 Terminal readiness, synchronous durable ROOTFS suspend and renewed workflow
 readiness with fresh authenticated Connector connections and dirty-Source readback.
-ROOTFS cold restart can retain the private build-secret symlink while replacing
-`/dev/shm`. Under the existing exclusive lock, the Connector removes only its owned,
-exactly bounded orphaned pointer and rematerializes the authenticated environment
-in fresh memory. Existing targets still require a private, owned directory; foreign
-or malformed pointers remain refused. Workspace and private Docker data are not
-reset. This is the pinned same-node cold-restart proof, not different-node recovery,
-complete toolchain qualification or retained cutover.
+This historical same-node cold-restart proof does not qualify different-node recovery,
+the current toolchain or retained cutover.
 
 Initial Source uses the existing atomic checkout initializer inside the Actor's
 durable directory, assigning development UID 1000 inside the existing private
@@ -890,16 +1121,18 @@ tag. Never overwrite an existing compatibility name with another binary.
 
 [internal_flags.json](internal_flags.json) is copied into the unchanged release
 worker. **`--tar-timestamp-resolution=nanoseconds` is required**: this nightly's
-default still rounds timestamps. The other packet/raw/SUID flags are the retained
-rootless bootstrap configuration, not security-policy source modifications.
+default still rounds timestamps. The other packet/raw/SUID flags remain the pinned
+worker configuration from earlier rootless qualification; removing that bootstrap
+does not silently change the worker flags or claim a newly qualified sandbox profile.
 
 Fresh Actors/snapshots must use `nightly-20261109-975fb172241c`. ROOTFS means
 restarting processes, PTYs, connections and in-memory state, not MEMORY continuity.
-`preferredFidelity` is only a request. Before releasing source-node data, the later
+`preferredFidelity` is only a request. Before releasing source-node data, the
 Factory adapter must explicitly call SuspendActor with
 `options.mode=DURABILITY_MODE_SYNCHRONOUS` (**1**, not the asynchronous default),
 then verify the actual snapshot UUID/generation, ActorUID, ActorTemplateUID,
-sandbox runtime/version and **fidelity ROOTFS (2, never VOLUMES=1)**, with
+sandbox runtime/version and actual fidelity **MEMORY (3) or ROOTFS (2), never
+VOLUMES (1)**, with
 `durableSnapshot.state=COMPLETED`. `SUSPENDED`, a successful RPC or a local snapshot
 alone is insufficient, including an already-suspended Actor returned by a sync call.
 Factory's runtime adapter owns those lifecycle calls; this operator profile pins the native
@@ -922,8 +1155,6 @@ mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts asse
 mise exec -- bun --no-env-file scripts/runtime/substrate-profile-command.ts verify-assets "$OUT/gvisor.tar.zstd" "$ARCH"
 docker build --platform "linux/$ARCH" -f deploy/substrate/Worker.Dockerfile -t "$REGISTRY/worker:rootfs-ns" .
 docker push "$REGISTRY/worker:rootfs-ns"
-docker build --platform "linux/$ARCH" -f deploy/substrate/rootless/Dockerfile -t "$REGISTRY/rootless:bootstrap" .
-docker push "$REGISTRY/rootless:bootstrap"
 ```
 
 The asset command verifies SHA256 **and** SHA512 before saving the official
@@ -935,38 +1166,19 @@ is never overwritten. SandboxConfig uses the same content-checked official
 `gs://gvisor/...` URL through native asset synchronization; the downloaded copy is
 an operator verification artifact, not a custom distribution server.
 
-The rootless image is a **bootstrap**, not the qualified Factory toolchain.
-Its immutable Docker 29.0.0 rootless base is the retained probe base. Alpine
-packages are resolved by APK at build time (not claimed bit-reproducible); retain
-the built image digest and package inventory, and requalify any changed packages.
-The Dockerfile checks the selected Docker/Tinyproxy versions. It supplies legacy
-iptables, SUID newuidmap/newgidmap (file capabilities removed, as required by the
-retained gVisor bootstrap), RootlessKit/slirp namespaces, Tinyproxy, normal HTTP(S)
-proxy/CA
-environment, a private containerd with bounded readiness, vfs Docker storage,
-transient process cleanup and a real `/readyz` wakeupProbe. Cleanup never removes
-the persistent Docker graph/database. No host socket or host cgroup mount is
-included. Only SETUID/SETGID are added by the native ActorTemplate.
+The profile renderer starts the exact supplied command in the immutable workload
+image. It adds no shell, RootlessKit namespace, daemon, SUID capability, persistent
+Docker graph, private proxy or fabricated wakeup probe. It drops all capabilities
+and projects native egress/system public roots, selected by normal TLS environment
+variables. Destinations still require native EgressPolicy admission; TLS verification
+must remain enabled. This operator smoke template is not the Factory Project-template
+renderer and does not initialize Source, prepare Project images or run an Agent.
+The removed rootless bootstrap is not a compatibility option.
 
-The explicit workload command starts only after Docker readiness; `/readyz`
-checks the current daemon and workload process, not an old saved marker. This is
-runtime-bootstrap readiness, **not application/Connector protocol readiness**.
-An application-specific readiness gate belongs to its later adapter. No Source
-initializer or saved agent command queue is replayed. HTTP(S) in inner containers
-needs the normal proxy variables and projected CA passed into those containers
-too; use `http://172.17.0.1:8888` from the default Docker bridge, not its own
-loopback. Explicitly mount/copy the Actor's trust bundle into inner builds and
-containers, keep strict certificate checks enabled, and allow only intended
-destinations through native EgressPolicy. Never replace public roots with a
-diagnostic CA. Arbitrary transparent TCP/UDP/IPv6, per-inner-container resource
-enforcement and all Dev Container features are not qualified.
-
-Factory currently pins Docker **29.9.0**, Compose **5.7.0-dev.1e1c577**, Dev
-Containers CLI **0.89.0**, Node **24.22.3** and OpenCode **2.3.2** in
-[the RuntimeHost Dockerfile](../runtime-host/Dockerfile). The prior probe's
-Docker29.0/Compose2.40.3/CLI0.90 results do **not** qualify these Factory tools.
-These are source packaging pins. A previous native acceptance receipt does not qualify
-the refreshed Node, OpenCode, IDE, browser or Go artifacts.
+Build and publish the selected tools/Project images separately and supply their immutable
+digests. Profile rendering does not build or publish those images, and Factory has no automatic
+Project-image producer. A previous native acceptance receipt does not qualify refreshed Node,
+OpenCode, IDE, browser or Go artifacts.
 
 ## Render, install and apply
 
@@ -982,7 +1194,7 @@ an explicit workload argv. Example shape (replace angle-bracket values):
   "pool": "factory-profile-worker",
   "node": "joined-worker-hostname",
   "workerImage": "registry.example/worker@sha256:<64 lowercase hex>",
-  "workloadImage": "registry.example/rootless@sha256:<64 lowercase hex>",
+  "workloadImage": "registry.example/workload@sha256:<64 lowercase hex>",
   "template": "factory-profile-workload",
   "command": ["sleep", "infinity"]
 }

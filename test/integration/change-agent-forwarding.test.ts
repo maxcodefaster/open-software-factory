@@ -1,6 +1,6 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import type { DatabaseTransaction } from "#db/client";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentTransport } from "../../apps/factory/src/agent/change-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";

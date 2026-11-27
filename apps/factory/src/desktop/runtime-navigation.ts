@@ -1,10 +1,10 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
-import { type AgentMessage } from "../agent/contracts";
-import { type Change } from "../change/contracts";
+import type { AgentMessage } from "../agent/contracts";
+import type { Change } from "../change/contracts";
 import { plainErrorMessage, untilReachable } from "../command-error";
 import type { ActivityNavigationRequest } from "../ide-messages";
-import { type ConversationView } from "../project-agent/contracts";
-import { type RuntimeAttempt, type RuntimeDockTarget } from "../runtime/contracts";
+import type { ConversationView } from "../project-agent/contracts";
+import type { RuntimeAttempt, RuntimeDockTarget } from "../runtime/contracts";
 import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
 import { ensureStaging, startPersonalWorkspace } from "../server-functions/runtime";

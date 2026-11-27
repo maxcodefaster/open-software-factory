@@ -9,10 +9,10 @@ jobs:
     runs-on: factory-verification
     steps:
       - name: Confirm the assigned commit
+        working-directory: ${{ env.FACTORY_CHECKOUT_ROOT }}
         run: |
-          test "$(cat /workspace/project/.git/HEAD)" = "${{ forgejo.event.pull_request.head.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ forgejo.event.pull_request.head.sha }}"
       - name: Run project checks
+        working-directory: ${{ env.FACTORY_CHECKOUT_ROOT }}
         run: |
-          node --check /workspace/project/src/server.mjs
-          node --check /workspace/project/src/worker.mjs
-          test -s /workspace/project/src/version.txt
+          npm run check

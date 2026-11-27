@@ -1,14 +1,14 @@
 import { expect } from "bun:test";
 import { createHash } from "node:crypto";
+import type { createDatabase, DatabaseTransaction } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { ticketWorkspaceIdentity } from "#workspace-domain/workspace";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { createDatabase, DatabaseTransaction } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import upstream from "../../upstream.json";
 import { factoryProcess } from "./factory-process";
 import { fixtureValue } from "./value";
@@ -28,9 +28,13 @@ export async function disableStarterSkillsIn(
   for (const choice of view.choices.filter(
     (item) => item.scope === "system" && item.state === "enable",
   ))
-    await sql`INSERT INTO factory.skill_library_choice(library_id,scope,context_id,user_id,role,state,revision_id,version)
-      VALUES(${choice.libraryId},'project',${projectID},'00000000-0000-0000-0000-000000000000',
-        ${choice.role},'disable',${choice.revisionId},1) ON CONFLICT DO NOTHING`;
+    await sql`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'skills.choice','project',${projectID},
+        ${`skills.choice:${choice.libraryId}:project:${projectID}:00000000-0000-0000-0000-000000000000:${choice.role}`},
+        'disable',
+        ${JSON.stringify({ libraryId: choice.libraryId, scope: "project", contextId: projectID, userId: "00000000-0000-0000-0000-000000000000", role: choice.role, state: "disable", revisionId: choice.revisionId, version: 1 })}::jsonb)
+      ON CONFLICT (idempotency_key) DO NOTHING`;
 }
 
 // Actual controller, published OpenCode client and PostgreSQL. External acceptance is injected.
@@ -93,9 +97,9 @@ export async function fixture(
       }
       await sql`INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userID}, 'Owned Build Admission', ${`build-turn-${suffix}@factory.local`}, true)`;
-      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
       VALUES (${projectID}, ${`build-turn-${suffix}`}, 'Owned Build Admission',
-        'https://owned-build.factory.invalid/owned/owned-build.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
+        'https://owned-build.factory.invalid/owned/owned-build.git', 'main', '.factory/actor-template.json', ${userID})`;
       await sql`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
         VALUES (${projectID}, ${userID}, 'developer', ${userID})`;
       if (host) await disableStarterSkillsIn(sql, userID, projectID, database);
@@ -115,18 +119,26 @@ export async function fixture(
       VALUES (${workspaceID}, ${projectID}, 'ticket', ${ticketID}, ${changeID}, ${`factory/change-${suffix}`},
         ${baseSHA}, ${userID})`;
       if (deferredRuntime) {
-        await sql`INSERT INTO factory.branch_create_operation(
-          id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-          VALUES(${crypto.randomUUID()},${changeID},'owned','owned-build',${`factory/change-${suffix}`},
-            ${baseSHA},${`owned-native-branch:${changeID}`},'succeeded',${baseSHA},now())`;
+        await sql`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+          VALUES(${crypto.randomUUID()},'delivery.branch_create','change',${changeID},
+            ${`delivery.branch_create:change:${changeID}:create-branch`},NULL,'succeeded',
+            ${JSON.stringify({
+              changeId: changeID,
+              repositoryOwner: "owned",
+              repositoryName: "owned-build",
+              branchName: `factory/change-${suffix}`,
+              startSha: baseSHA,
+              attemptCount: 1,
+              leaseGeneration: 1,
+              reconcileAfter: null,
+            })}::jsonb,
+            ${JSON.stringify({ observedHeadSha: baseSHA })}::jsonb,${userID},now())`;
         return;
       }
-      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'create-intended', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
       // Controlled ready state only. No native Create has been dispatched.
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},
-          '{"connectorURL":"wss://owned-build.factory.invalid/internal/runtime-connect","egressHosts":[]}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, create_intended_at, created_by, atespace, actor_name, binding_intent)
+        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'create-intended', ${connectorHash ?? "b".repeat(64)}, now(), ${userID}, ${`fa-${attemptID.replaceAll("-", "")}`}, ${`runtime-${attemptID.replaceAll("-", "")}`}, '{"connectorURL":"wss://owned-build.factory.invalid/internal/runtime-connect","egressHosts":[]}')`;
       await freezeRuntimeEnvironment(sql, attemptID);
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptID} WHERE id = ${changeID}`;
@@ -533,68 +545,80 @@ export async function fixture(
           >`SELECT project.id FROM factory.project project
             WHERE project.id = ${projectID} AND project.created_by = ${userID} AND project.slug = ${`build-turn-${suffix}`}
               AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt attempt
-                JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
                 WHERE attempt.project_id=project.id
-                  AND (binding.create_attempted_at IS NOT NULL OR binding.actor_uid IS NOT NULL))
+                  AND (attempt.create_attempted_at IS NOT NULL OR attempt.actor_uid IS NOT NULL))
               AND NOT EXISTS(SELECT 1 FROM factory.development_workspace workspace
-                JOIN factory.substrate_workspace provision ON provision.workspace_id=workspace.id
-                WHERE workspace.project_id=project.id AND (provision.atespace_attempted_at IS NOT NULL
-                  OR provision.policy_attempted_at IS NOT NULL OR provision.template_attempted_at IS NOT NULL)) FOR UPDATE`;
+                JOIN factory.substrate_provision provision ON provision.owner_id=workspace.id AND provision.kind='workspace'
+                WHERE workspace.project_id=project.id AND (provision.resources#>>'{atespace,attemptedAt}' IS NOT NULL
+                  OR provision.resources#>>'{policy,attemptedAt}' IS NOT NULL
+                  OR provision.resources#>>'{template,attemptedAt}' IS NOT NULL)) FOR UPDATE`;
           if (!safe[0]) throw new Error("Owned non-created Build fixture cleanup refused");
-          await sql`DELETE FROM factory.execution_policy_command
-            WHERE scope=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
           await sql`DELETE FROM factory.usage_operation WHERE project_id=${projectID} AND user_id=${userID}`;
           await sql`SET LOCAL session_replication_role = replica`;
-          await sql`DELETE FROM factory.implementation_order WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.project_delivery_queue WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.change_editing_request WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.change_editing_decision WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE kind='usage.policy_command' AND scope_type='execution_policy'
+              AND scope_id=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
+          await sql`DELETE FROM factory.operation
+            WHERE (kind IN ('project.delivery_queue','project.delivery_policy','delivery.staging_preview','environments.environment') AND scope_type='project' AND scope_id=${projectID})
+               OR (kind='tickets.implementation_order' AND payload->>'projectId'=${projectID})
+               OR (kind='access.change_editing_request' AND scope_type='change' AND scope_id=${changeID})
+               OR (kind='review.scenario' AND scope_type='candidate_review' AND scope_id IN
+                    (SELECT id::text FROM factory.candidate_review WHERE change_id=${changeID}))`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE (kind='access.change_editing_decision' AND scope_type='change' AND scope_id=${changeID})
+               OR (kind='review.feedback_message' AND scope_type='review_feedback' AND scope_id IN
+                    (SELECT id::text FROM factory.review_feedback WHERE change_id=${changeID}))`;
           await sql`UPDATE factory.ticket_conversation SET active_coding_context_id=NULL WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.conversation_context WHERE conversation_id IN
             (SELECT id FROM factory.ticket_conversation WHERE project_id=${projectID})`;
-          await sql`DELETE FROM factory.monitoring_evidence WHERE incident_id IN
-            (SELECT id FROM factory.monitoring_incident WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE (kind='monitoring.evidence' AND scope_type='incident' AND scope_id IN
+              (SELECT id::text FROM factory.monitoring_incident WHERE project_id=${projectID}))
+               OR (kind='monitoring.command' AND scope_type='project' AND scope_id=${projectID})`;
           await sql`DELETE FROM factory.monitoring_incident WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.monitoring_command WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.monitoring_policy WHERE hook_id IN
             (SELECT id FROM factory.monitoring_hook WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.monitoring_hook WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.review_feedback_message WHERE feedback_id IN
-            (SELECT id FROM factory.review_feedback WHERE change_id=${changeID})`;
-          await sql`DELETE FROM factory.review_feedback_command WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE kind='review.feedback_command' AND payload->>'changeId'=${changeID}`;
           await sql`DELETE FROM factory.review_feedback WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.review_media WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.review_scenario WHERE review_id IN
-            (SELECT id FROM factory.candidate_review WHERE change_id=${changeID})`;
-          await sql`DELETE FROM factory.promotion_operation WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.merge_operation WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.operation
+            WHERE kind IN ('delivery.promotion','delivery.merge','delivery.pull_request','delivery.branch_create')
+              AND scope_type='change' AND scope_id=${changeID}`;
           await sql`DELETE FROM factory.delivery_approval WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.project_delivery_policy WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.pull_request_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
           await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.substrate_verification WHERE verification_id IN
+          await sql`DELETE FROM factory.substrate_provision WHERE kind='verification' AND owner_id IN
             (SELECT id FROM factory.verification WHERE change_id=${changeID})`;
           await sql`DELETE FROM factory.verification WHERE change_id=${changeID}`;
-          await sql`DELETE FROM factory.mcp_observation WHERE turn_id IN
-            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
-          await sql`DELETE FROM factory.agent_turn_mcp WHERE turn_id IN
-            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
-          await sql`DELETE FROM factory.attachment_turn_context WHERE turn_id IN
-            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE kind='mcp.observation' AND payload->>'turnId' IN
+              (SELECT id::text FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.operation
+            WHERE kind IN ('coding.turn_mcp','coding.turn_skill','coding.session_archive','attachment.turn_context','learning.source_artifact')
+              AND scope_type='agent_turn' AND scope_id IN
+                (SELECT id::text FROM factory.agent_turn WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.attachment_reference WHERE attachment_id IN
             (SELECT id FROM factory.attachment WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.attachment WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.attachment_draft WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.operation
+            WHERE kind='attachments.draft' AND payload->>'projectId'=${projectID}`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE (kind='mcp.access_decision' AND (payload->>'projectId'=${projectID} OR scope_id IN
+              (SELECT id::text FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})))
+               OR (kind='mcp.policy_approval' AND scope_id IN
+              (SELECT id::text FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID}))`;
+          await sql`DELETE FROM factory.operation
+            WHERE kind IN ('mcp.secret_write','mcp.token_refresh','mcp.connect','mcp.oauth_flow')
+              AND scope_type='connection' AND scope_id IN
+                (SELECT id::text FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})`;
           await sql`DELETE FROM factory.mcp_connection WHERE id IN
             (SELECT id FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})`;
           await sql`DELETE FROM factory.mcp_revision WHERE library_id IN
             (SELECT id FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})`;
           await sql`DELETE FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID}`;
-          await sql`DELETE FROM factory.mcp_access_decision WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.mcp_project_grant WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.session_archive WHERE turn_id IN
-            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`UPDATE factory.mcp_connection SET project_grants = project_grants - ${projectID}::text WHERE project_grants ? ${projectID}::text`;
           await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = replica`;
@@ -602,16 +626,27 @@ export async function fixture(
           await sql`DELETE FROM factory.change_commit_operation WHERE change_id = ${changeID}`;
           // Recovery may create another immutable attempt in this exact owned
           // Project. The guard above rejects every actually created runtime.
-          await sql`DELETE FROM factory.substrate_binding WHERE runtime_attempt_id IN
-            (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
-          await sql`DELETE FROM factory.runtime_environment_intent WHERE runtime_attempt_id IN
-            (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
-          await sql`DELETE FROM factory.staging_preview WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.operation
+            WHERE scope_type='runtime_attempt' AND scope_id IN
+              (SELECT id::text FROM factory.runtime_attempt WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
-          await sql`DELETE FROM factory.project_environment WHERE project_id=${projectID}`;
-          await sql`DELETE FROM factory.environment_write WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.operation
+            WHERE kind='workspace.terminal_op' AND scope_type='operation' AND scope_id IN
+              (SELECT id::text FROM factory.operation WHERE kind='workspace.command' AND scope_id=${workspaceID})`;
+          await sql`DELETE FROM factory.operation
+            WHERE created_by=${userID}
+               OR (kind='environments.write' AND payload->>'projectID'=${projectID})
+               OR (kind='forge.grant' AND (payload->>'projectId'=${projectID} OR payload->>'userId'=${userID}))
+               OR (kind='forge.branch' AND payload->>'projectId'=${projectID})
+               OR (kind='forge.account' AND scope_type='user' AND scope_id=${userID})
+               OR (scope_type='project' AND scope_id=${projectID})
+               OR (scope_type='workspace' AND scope_id=${workspaceID})`;
+          await sql`DELETE FROM factory.audit_event
+            WHERE actor_id=${userID}
+               OR (scope_type IN ('project','learning') AND scope_id=${projectID})
+               OR (scope_type='workspace' AND scope_id=${workspaceID})`;
           await sql`DELETE FROM factory.substrate_source WHERE workspace_id=${workspaceID}`;
-          await sql`DELETE FROM factory.substrate_workspace WHERE workspace_id=${workspaceID}`;
+          await sql`DELETE FROM factory.substrate_provision WHERE kind='workspace' AND owner_id=${workspaceID}`;
           await sql`DELETE FROM factory.development_workspace WHERE id = ${workspaceID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.change WHERE id = ${changeID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.requirement_approval WHERE id = ${approvalID} AND approved_by = ${userID}`;
@@ -621,17 +656,11 @@ export async function fixture(
           await sql`DELETE FROM factory.ticket_conversation WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.ticket WHERE id = ${ticketID} AND project_id = ${projectID}`;
-          // Tests may temporarily promote this owned user to System Manager,
-          // which creates grants outside its fixture Project too.
-          await sql`DELETE FROM factory.forge_grant_intent WHERE project_id=${projectID} OR user_id=${userID}`;
-          await sql`DELETE FROM factory.forge_branch_intent WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.project WHERE id = ${projectID} AND created_by = ${userID}`;
-          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${userID}`;
           // Published installation guidance retains its author until the owned database
           // is disposed. Do not rewrite provenance or delete shared guidance to remove a user.
           await sql`DELETE FROM auth."user" WHERE id = ${userID} AND email = ${`build-turn-${suffix}@factory.local`}
-            AND NOT EXISTS(SELECT 1 FROM factory.skill_revision WHERE created_by=${userID})
-            AND NOT EXISTS(SELECT 1 FROM factory.skill_publication WHERE updated_by=${userID})`;
+            AND NOT EXISTS(SELECT 1 FROM factory.skill_revision WHERE created_by=${userID} OR published_updated_by=${userID})`;
         });
         if (stopFailure) throw stopFailure;
       } finally {

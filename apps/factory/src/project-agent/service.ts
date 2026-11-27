@@ -4,9 +4,9 @@ import type {
   conversationModeCommandInput,
   interviewAnswerCommandInput,
   newConversationInput,
-} from "../../../../packages/conversation-domain/src/conversation";
-import type { confirmEpicProposalInput } from "../../../../packages/conversation-domain/src/epic-proposal";
-import { type createAccessController } from "../access/api";
+} from "#conversation-domain/conversation";
+import type { confirmEpicProposalInput } from "#conversation-domain/epic-proposal";
+import type { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { conversationReadInput } from "./commands";
 import { conversationViewSchema } from "./contracts";

@@ -1,4 +1,14 @@
-import { and, eq, exists, sql as expression, isNotNull, isNull, lt, notExists } from "drizzle-orm";
+import {
+  and,
+  eq,
+  exists,
+  sql as expression,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notExists,
+} from "drizzle-orm";
 import { z } from "zod";
 import {
   estimateUsage,
@@ -6,14 +16,14 @@ import {
   usageCounters,
   usagePurpose,
   usageRate,
-} from "../../../../packages/conversation-domain/src/usage";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import { usageEntry, usageOperation, usageReplayCursor } from "../../../../packages/db/src/schema";
+} from "#conversation-domain/usage";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { operation as operationTable, usageEntry, usageOperation } from "#db/schema";
 import { lockUsageIn } from "./policy";
+
+export const USAGE_REPLAY_CURSOR_KIND = "usage.replay_cursor";
+export const usageReplayCursorKey = (operationID: string, sessionID: string) =>
+  `${USAGE_REPLAY_CURSOR_KIND}:${encodeURIComponent(operationID)}:${encodeURIComponent(sessionID)}`;
 
 const identity = z.string().min(1).max(400);
 const operation = z.object({
@@ -47,11 +57,28 @@ export function createUsageJournal(database: Database) {
     sequence: number,
   ) {
     await db
-      .insert(usageReplayCursor)
-      .values({ operationId: operationID, sessionId: sessionID, sequence })
+      .insert(operationTable)
+      .values({
+        id: crypto.randomUUID(),
+        kind: USAGE_REPLAY_CURSOR_KIND,
+        scopeType: "usage_operation",
+        scopeId: operationID,
+        idempotencyKey: usageReplayCursorKey(operationID, sessionID),
+        activeKey: null,
+        state: "active",
+        payload: {
+          operationId: operationID,
+          sessionId: sessionID,
+          sequence,
+          startSequence: 0,
+        },
+      })
       .onConflictDoUpdate({
-        target: [usageReplayCursor.operationId, usageReplayCursor.sessionId],
-        set: { sequence: expression`GREATEST(${usageReplayCursor.sequence},${sequence})` },
+        target: operationTable.idempotencyKey,
+        set: {
+          payload: expression`jsonb_set(${operationTable.payload}, '{sequence}', to_jsonb(GREATEST((${operationTable.payload}->>'sequence')::bigint, ${sequence}::bigint)))`,
+          updatedAt: expression`now()`,
+        },
       });
   }
   async function begin(
@@ -81,11 +108,20 @@ export function createUsageJournal(database: Database) {
         for (const baseline of baselines) {
           identity.parse(baseline.sessionID);
           z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).parse(baseline.sequence);
-          await db.insert(usageReplayCursor).values({
-            operationId: value.id,
-            sessionId: baseline.sessionID,
-            sequence: baseline.sequence,
-            startSequence: baseline.sequence,
+          await db.insert(operationTable).values({
+            id: crypto.randomUUID(),
+            kind: USAGE_REPLAY_CURSOR_KIND,
+            scopeType: "usage_operation",
+            scopeId: value.id,
+            idempotencyKey: usageReplayCursorKey(value.id, baseline.sessionID),
+            activeKey: null,
+            state: "active",
+            payload: {
+              operationId: value.id,
+              sessionId: baseline.sessionID,
+              sequence: baseline.sequence,
+              startSequence: baseline.sequence,
+            },
           });
         }
       const [row] = await db
@@ -199,14 +235,11 @@ export function createUsageJournal(database: Database) {
     },
     async cursor(operationID: string, sessionID: string) {
       const [row] = await database.db
-        .select({ sequence: usageReplayCursor.sequence })
-        .from(usageReplayCursor)
-        .where(
-          and(
-            eq(usageReplayCursor.operationId, operationID),
-            eq(usageReplayCursor.sessionId, sessionID),
-          ),
-        );
+        .select({
+          sequence: expression<number>`(${operationTable.payload}->>'sequence')::bigint::float8`,
+        })
+        .from(operationTable)
+        .where(eq(operationTable.idempotencyKey, usageReplayCursorKey(operationID, sessionID)));
       return row ? Number(row.sequence) : 0;
     },
     async prune(now = new Date()) {
@@ -235,6 +268,17 @@ export function createUsageJournal(database: Database) {
             ),
           )
           .returning({ id: usageOperation.id });
+        if (removed.length)
+          await db.delete(operationTable).where(
+            and(
+              eq(operationTable.kind, USAGE_REPLAY_CURSOR_KIND),
+              eq(operationTable.scopeType, "usage_operation"),
+              inArray(
+                operationTable.scopeId,
+                removed.map((row) => row.id),
+              ),
+            ),
+          );
         await db.delete(usageEntry).where(
           and(
             lt(usageEntry.occurredAt, cutoff),

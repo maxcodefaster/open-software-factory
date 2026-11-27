@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { utf8TextPage } from "#workspace-domain/text-page";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceContainerFiles } from "../../apps/factory/src/workspace/container-files";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { createWorkspaceTransferRoutes } from "../../apps/factory/src/workspace/transfer-routes";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { utf8TextPage } from "../../packages/workspace-domain/src/text-page";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 const sha256 = (content: Uint8Array) => createHash("sha256").update(content).digest("hex");
@@ -332,7 +332,7 @@ test("container transfers retain exact intent, not file bytes, and never recreat
     );
     const [retained] = await f.database.client<
       { value: string }[]
-    >`SELECT row_to_json(transfer)::text AS value FROM factory.workspace_file_transfer transfer WHERE id=${input.requestID}`;
+    >`SELECT row_to_json(transfer)::text AS value FROM factory.operation transfer WHERE id=${input.requestID} AND kind='workspace.file_transfer'`;
     expect(retained?.value).not.toContain(content.toString());
     await f.files.release(f.owner, input.requestID);
     expect((await f.files.begin(f.owner, input)).state).toBe("released");
@@ -407,10 +407,10 @@ test("large files use bounded chunks and verify the assembled download without r
     expect(Buffer.concat(chunks).equals(content)).toBe(true);
     const [retained] = await f.database.client<
       { bytes: number }[]
-    >`SELECT max(octet_length(result::text))::int AS bytes FROM factory.workspace_file_transfer`;
+    >`SELECT max(octet_length(result::text))::int AS bytes FROM factory.operation WHERE kind='workspace.file_transfer'`;
     expect(retained?.bytes ?? Infinity).toBeLessThan(1024);
     await f.database
-      .client`UPDATE factory.workspace_file_transfer SET expires_at=now()-interval '1 second' WHERE id=${download.transferID}`;
+      .client`UPDATE factory.operation SET lease_expires_at=now()-interval '1 second' WHERE id=${download.transferID} AND kind='workspace.file_transfer'`;
     await expect(f.files.download(f.owner, download.transferID, 0)).rejects.toThrow("expired");
   } finally {
     await f.dispose();
@@ -578,13 +578,12 @@ test("file mutation IDs do not replay and an old transfer cannot wake replacemen
     // Controlled state for stale-transfer fencing, not a native Stop/Start proof.
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent)
         SELECT ${successorID},project_id,workspace_id,2,revision,'create-intended',
-          'replacement-parent','replacement-child',now(),created_by
+          'replacement-parent',now(),created_by,
+          ${`fa-${successorID.replaceAll("-", "")}`},${`runtime-${successorID.replaceAll("-", "")}`},'{}'::jsonb
         FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${successorID},${`fa-${successorID.replaceAll("-", "")}`},
-          ${`runtime-${successorID.replaceAll("-", "")}`},'{}')`;
       await sql`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${successorID}`;
     });
     const before = f.actions.length;

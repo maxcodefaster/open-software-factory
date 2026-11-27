@@ -1,7 +1,7 @@
 import { type Accessor, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import type { z } from "zod";
-import type { MCPLibraryView } from "../../../../packages/conversation-domain/src/mcp-library";
-import type { monitoringView } from "../../../../packages/conversation-domain/src/monitoring";
+import type { MCPLibraryView } from "#conversation-domain/mcp-library";
+import type { monitoringView } from "#conversation-domain/monitoring";
 import { plainErrorMessage } from "../command-error";
 import { getProjectInputs } from "../server-functions/inputs";
 import { getMCPLibrary } from "../server-functions/mcp";
@@ -10,6 +10,49 @@ import { observeFactoryRead } from "../zero/reads";
 
 type View = z.infer<typeof monitoringView>;
 
+function createReadChannel<T>(options: {
+  scope: Accessor<string | undefined>;
+  getGeneration: () => number;
+  fetch: (id: string, signal?: AbortSignal) => Promise<T>;
+  fallbackError: string;
+}) {
+  const [data, setData] = createSignal<{ projectID: string; view: T }>();
+  const [error, setError] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  let version = 0;
+
+  async function read(id: string, signal?: AbortSignal) {
+    const epoch = options.getGeneration();
+    const request = ++version;
+    const current = () =>
+      epoch === options.getGeneration() &&
+      request === version &&
+      untrack(options.scope) === id &&
+      !signal?.aborted;
+    setBusy(true);
+    try {
+      const view = await options.fetch(id, signal);
+      if (current()) {
+        setData({ projectID: id, view });
+        setError("");
+      }
+    } catch (cause) {
+      if (current()) {
+        setError(cause instanceof Error ? plainErrorMessage(cause.message) : options.fallbackError);
+      }
+    } finally {
+      if (current()) setBusy(false);
+    }
+  }
+
+  function reset() {
+    setError("");
+    setBusy(false);
+  }
+
+  return { data, error, busy, read, reset };
+}
+
 // Activity and source configuration invalidate independently. Neither observer
 // admits a command, repeats a failed command or discards an editable Input draft.
 export function createInputReads(
@@ -17,95 +60,56 @@ export function createInputReads(
   active: Accessor<boolean>,
 ) {
   const scope = createMemo(() => (active() ? projectID() : undefined));
-  const [inputs, setInputs] = createSignal<{ projectID: string; view: View }>();
-  const [sources, setSources] = createSignal<{ projectID: string; view: MCPLibraryView }>();
-  const [inputError, setInputError] = createSignal("");
-  const [sourceError, setSourceError] = createSignal("");
-  const [inputBusy, setInputBusy] = createSignal(false);
-  const [sourceBusy, setSourceBusy] = createSignal(false);
   let generation = 0;
-  let inputVersion = 0;
-  let sourceVersion = 0;
   let observed = false;
 
-  async function readInputs(id: string, signal?: AbortSignal) {
-    const epoch = generation,
-      request = ++inputVersion;
-    const current = () =>
-      epoch === generation && request === inputVersion && untrack(scope) === id && !signal?.aborted;
-    setInputBusy(true);
-    try {
-      const view = await serverCall(
-        getProjectInputs({ data: [id], ...(signal ? { signal } : {}) }),
-      );
-      if (current()) {
-        setInputs({ projectID: id, view });
-        setInputError("");
-      }
-    } catch (cause) {
-      if (current())
-        setInputError(
-          cause instanceof Error ? plainErrorMessage(cause.message) : "Inputs could not load.",
-        );
-    } finally {
-      if (current()) setInputBusy(false);
-    }
-  }
-  async function readSources(id: string, signal?: AbortSignal) {
-    const epoch = generation,
-      request = ++sourceVersion;
-    const current = () =>
-      epoch === generation &&
-      request === sourceVersion &&
-      untrack(scope) === id &&
-      !signal?.aborted;
-    setSourceBusy(true);
-    try {
-      const view = await serverCall(getMCPLibrary({ data: [id], ...(signal ? { signal } : {}) }));
-      if (current()) {
-        setSources({ projectID: id, view });
-        setSourceError("");
-      }
-    } catch (cause) {
-      if (current())
-        setSourceError(
-          cause instanceof Error ? plainErrorMessage(cause.message) : "Sources could not load.",
-        );
-    } finally {
-      if (current()) setSourceBusy(false);
-    }
-  }
+  const inputs = createReadChannel<View>({
+    scope,
+    getGeneration: () => generation,
+    fetch: (id, signal) =>
+      serverCall(getProjectInputs({ data: [id], ...(signal ? { signal } : {}) })),
+    fallbackError: "Inputs could not load.",
+  });
+  const sources = createReadChannel<MCPLibraryView>({
+    scope,
+    getGeneration: () => generation,
+    fetch: (id, signal) => serverCall(getMCPLibrary({ data: [id], ...(signal ? { signal } : {}) })),
+    fallbackError: "Sources could not load.",
+  });
+
   const source = (kind: "inputs" | "sources") => () => {
     const id = scope();
     return id ? { projectId: id, scope: kind, resourceId: id } : null;
   };
+
   async function reload(id = untrack(scope)) {
-    if (id) await Promise.all([readInputs(id), readSources(id)]);
+    if (id) await Promise.all([inputs.read(id), sources.read(id)]);
   }
+
   createEffect(scope, (id) => {
     generation++;
-    setInputError("");
-    setSourceError("");
-    setInputBusy(false);
-    setSourceBusy(false);
+    inputs.reset();
+    sources.reset();
     if (id && !observed) void reload(id);
     return () => {
       generation++;
     };
   });
+
   observed = observeFactoryRead(source("inputs"), async (signal) => {
     const id = untrack(scope);
-    if (id) await readInputs(id, signal);
+    if (id) await inputs.read(id, signal);
   });
   observeFactoryRead(source("sources"), async (signal) => {
     const id = untrack(scope);
-    if (id) await readSources(id, signal);
+    if (id) await sources.read(id, signal);
   });
+
   return {
-    view: () => (inputs()?.projectID === projectID() ? inputs()?.view : undefined),
-    sources: () => (sources()?.projectID === projectID() ? sources()?.view : undefined),
-    loading: () => inputBusy() || sourceBusy(),
-    error: () => inputError() || sourceError(),
+    view: () => (inputs.data()?.projectID === projectID() ? inputs.data()?.view : undefined),
+    sources: () => (sources.data()?.projectID === projectID() ? sources.data()?.view : undefined),
+    loading: () => inputs.busy() || sources.busy(),
+    error: () => inputs.error() || sources.error(),
     reload,
   };
 }

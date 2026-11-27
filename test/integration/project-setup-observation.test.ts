@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("the running Factory observes an ambiguous repository create without a manual check or another create", async () => {
   let repository: unknown;

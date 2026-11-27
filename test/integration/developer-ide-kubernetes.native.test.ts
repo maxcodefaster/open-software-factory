@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
-import { kubernetesConnectionEnvironment } from "../../packages/runtime-kubernetes/src/config";
-import { createDeveloperIDEClient } from "../../packages/runtime-kubernetes/src/developer-ide";
-import { createDeveloperIDEKubernetesClient } from "../../packages/runtime-kubernetes/src/developer-ide-kubernetes";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+import { runEnvironmentCommand } from "#runtime-kubernetes/command";
+import { kubernetesConnectionEnvironment } from "#runtime-kubernetes/config";
+import { createDeveloperIDEClient } from "#runtime-kubernetes/developer-ide";
+import { createDeveloperIDEKubernetesClient } from "#runtime-kubernetes/developer-ide-kubernetes";
+import { developerIDEIdentity } from "#workspace-domain/developer-ide";
 import upstream from "../../upstream.json";
 import { eventually } from "../fixtures/factory-process";
 

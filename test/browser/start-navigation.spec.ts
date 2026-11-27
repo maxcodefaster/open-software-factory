@@ -3,8 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -70,9 +70,9 @@ test("Start deep links preserve login destinations, history, private drafts and 
       const project = fixtureValue(projects[index], "projects[index]"),
         ticket = fixtureValue(tickets[index], "tickets[index]"),
         pageID = fixtureValue(wiki[index], "wiki[index]");
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${project},${`navigation-${project}`},${`Navigation Project ${index + 1}`},
-          'https://example.invalid/navigation.git','main','.devcontainer/devcontainer.json',${administrator.id})`;
+          'https://example.invalid/navigation.git','main','.factory/actor-template.json',${administrator.id})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${administrator.id},'developer',${administrator.id})`;
       await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)

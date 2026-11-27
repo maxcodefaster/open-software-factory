@@ -1,5 +1,27 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { and, eq, sql as query } from "drizzle-orm";
+import { changeIdentity } from "#change-domain/change";
+import { createDatabase, drizzleTransaction } from "#db/client";
+import {
+  authUser,
+  change as changeTable,
+  operation as operationTable,
+  project,
+  projectMembership,
+  requirementApproval,
+  requirementRevision,
+  technicalDesignRevision,
+  ticketConversation,
+} from "#db/schema";
+import {
+  type createForgejoClient,
+  ForgeAmbiguousWriteError,
+  ForgeConflictError,
+} from "#forge/forge";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { appendTicketAuthoringIn, insertInitialTicketIn } from "#ticket-authoring/authoring";
+import { ticketWorkspaceIdentity } from "#workspace-domain/workspace";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
@@ -8,34 +30,6 @@ import type {
   RequirementApprovalView,
   RequirementRevisionView,
 } from "../../apps/factory/src/change/types";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { createDatabase, drizzleTransaction } from "../../packages/db/src/client";
-import {
-  authUser,
-  branchCreateOperation,
-  change as changeTable,
-  project,
-  projectMembership,
-  requirementApproval,
-  requirementRevision,
-  technicalDesignRevision,
-  ticketConversation,
-} from "../../packages/db/src/schema";
-import {
-  type createForgejoClient,
-  ForgeAmbiguousWriteError,
-  ForgeConflictError,
-} from "../../packages/forge/src/forge";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../packages/requirement-domain/src/requirement";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  appendTicketAuthoringIn,
-  insertInitialTicketIn,
-} from "../../packages/ticket-authoring/src/authoring";
-import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
 let server: Awaited<ReturnType<typeof ownedPostgresServer>>;
@@ -100,7 +94,7 @@ beforeEach(async () => {
     name: "Owned Change",
     repositoryUrl: "https://owned-change.invalid/owned/repository.git",
     defaultBranch: "main",
-    devcontainerPath: ".devcontainer/devcontainer.json",
+    actorTemplatePath: ".factory/actor-template.json",
     createdBy: userID,
   });
   await database.db.insert(projectMembership).values({
@@ -314,15 +308,25 @@ test("reserved Drizzle queries share the same PostgreSQL PID through manual roll
       state: "branch-pending",
       createdBy: userID,
     });
-    await db.insert(branchCreateOperation).values({
+    await db.insert(operationTable).values({
       id: identity.branchOperationID,
-      changeId: identity.changeID,
-      repositoryOwner: "owned",
-      repositoryName: "repository",
-      branchName: identity.branchName,
-      startSha: baseSHA,
-      idempotencyKey: `change:${identity.changeID}:create-branch`,
+      kind: "delivery.branch_create",
+      scopeType: "change",
+      scopeId: identity.changeID,
+      idempotencyKey: `delivery.branch_create:change:${identity.changeID}:create-branch`,
+      activeKey: `delivery.branch_create:${identity.changeID}`,
       state: "executing",
+      payload: {
+        changeId: identity.changeID,
+        repositoryOwner: "owned",
+        repositoryName: "repository",
+        branchName: identity.branchName,
+        startSha: baseSHA,
+        attemptCount: 1,
+        leaseGeneration: 1,
+        reconcileAfter: null,
+      },
+      createdBy: userID,
     });
   });
   const lock = await database.client.reserve();
@@ -343,20 +347,22 @@ test("reserved Drizzle queries share the same PostgreSQL PID through manual roll
         .where(eq(changeTable.id, identity.changeID));
       expect(before?.pid).toBe(native.pid);
       await db
-        .update(branchCreateOperation)
+        .update(operationTable)
         .set({
           state: "succeeded",
-          observedHeadSha: baseSHA,
+          activeKey: null,
+          result: { observedHeadSha: baseSHA },
           completedAt: query`now()`,
           leaseOwner: null,
           leaseExpiresAt: null,
           updatedAt: query`now()`,
-          lastError: null,
+          error: null,
         })
         .where(
           and(
-            eq(branchCreateOperation.id, identity.branchOperationID),
-            eq(branchCreateOperation.state, "executing"),
+            eq(operationTable.id, identity.branchOperationID),
+            eq(operationTable.kind, "delivery.branch_create"),
+            eq(operationTable.state, "executing"),
           ),
         );
       await db
@@ -365,12 +371,19 @@ test("reserved Drizzle queries share the same PostgreSQL PID through manual roll
         .where(and(eq(changeTable.id, identity.changeID), eq(changeTable.state, "branch-pending")));
       const [inside] = await db
         .select({
-          branch: branchCreateOperation.state,
+          branch: operationTable.state,
           change: changeTable.state,
           pid: query<number>`pg_backend_pid()`,
         })
         .from(changeTable)
-        .innerJoin(branchCreateOperation, eq(branchCreateOperation.changeId, changeTable.id))
+        .innerJoin(
+          operationTable,
+          and(
+            eq(operationTable.kind, "delivery.branch_create"),
+            eq(operationTable.scopeType, "change"),
+            eq(operationTable.scopeId, query<string>`${changeTable.id}::text`),
+          ),
+        )
         .where(eq(changeTable.id, identity.changeID));
       expect(inside).toEqual({ branch: "succeeded", change: "active", pid: native.pid });
       const outside = await changes.get(identity.changeID);
@@ -414,8 +427,10 @@ test("reconciliation rolls back a branch result when Change persistence fails be
   }
   const [failed] = await database.client`
     SELECT change.state,change.version::integer AS version,operation.state AS branch,
-      operation.completed_at AS completed,operation.last_error AS error
-    FROM factory.change change JOIN factory.branch_create_operation operation ON operation.change_id=change.id
+      operation.completed_at AS completed,operation.error AS error
+    FROM factory.change change JOIN factory.operation operation
+      ON operation.kind='delivery.branch_create' AND operation.scope_type='change'
+        AND operation.scope_id=change.id::text
     WHERE change.id=${started.id}`;
   expect(failed).toMatchObject({
     state: "branch-pending",
@@ -444,7 +459,8 @@ test("Change projections retain exact verification, merge approval and timestamp
   const approvalID = crypto.randomUUID();
   const otherApprovalID = crypto.randomUUID();
   const otherUserID = crypto.randomUUID();
-  const content = "Retained repository document";
+  const workspaceID = ticketWorkspaceIdentity(started.id).workspaceID;
+  const attemptID = runtimeIdentity(workspaceID, 1).attemptID;
   await database.db.insert(authUser).values({
     id: otherUserID,
     name: "Other approver",
@@ -452,18 +468,28 @@ test("Change projections retain exact verification, merge approval and timestamp
   });
   await database.client.begin(async (sql) => {
     await sql`
-      INSERT INTO factory.change_commit_operation(id,change_id,sequence,branch_name,expected_parent_sha,
-        commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at,
-        source,repository_path,repository_blob_sha,repository_content,content_digest)
-      VALUES(${crypto.randomUUID()},${started.id},1,${started.branchName},${baseSHA},${commitSHA},
-        ${commitSHA},'Saved documentation',${crypto.randomUUID()},'succeeded',${userID},now(),
-        'repository-document','README.md',${"b".repeat(40)},${content},${requirementDigest(content)})`;
+      INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,
+        source_branch,source_revision,created_by)
+      VALUES(${workspaceID},${projectID},'ticket',${ticketID},${started.id},
+        ${started.branchName},${baseSHA},${userID})`;
     await sql`
-      INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
+      INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent)
+      VALUES(${attemptID},${projectID},${started.id},${workspaceID},1,${baseSHA},
+        'create-intended',${"b".repeat(64)},now(),${userID},
+        ${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},'{}')`;
+    await sql`
+      INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
+        expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,
+        created_by,completed_at,source)
+      VALUES(${crypto.randomUUID()},${started.id},${attemptID},1,${started.branchName},${baseSHA},${commitSHA},
+        ${commitSHA},'Saved candidate',${crypto.randomUUID()},'succeeded',${userID},now(),'agent')`;
+    await sql`
+      INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,state,
         created_by,created_at,completed_at)
-      VALUES(${verificationID},${started.id},${commitSHA},1,9,'owned-check','succeeded',${userID},
+      VALUES(${verificationID},${started.id},${commitSHA},1,9,'succeeded',${userID},
         '2026-11-19T10:00:00Z','2026-11-19T10:01:00Z'),
-        (${crypto.randomUUID()},${started.id},${"d".repeat(40)},1,10,'wrong-commit','failed',${userID},
+        (${crypto.randomUUID()},${started.id},${"d".repeat(40)},1,10,'failed',${userID},
         '2026-11-19T11:00:00Z','2026-11-19T11:01:00Z')`;
     await sql`
       INSERT INTO factory.delivery_approval(id,change_id,verification_id,commit_sha,approved_by,approved_at)
@@ -472,15 +498,30 @@ test("Change projections retain exact verification, merge approval and timestamp
         (${otherApprovalID},${started.id},${verificationID},${commitSHA},${otherUserID},
         '2026-11-19T13:00:00.654321+02:00')`;
     await sql`
-      INSERT INTO factory.merge_operation(id,change_id,delivery_approval_id,pull_request_number,base_sha,
-        commit_sha,idempotency_key,state,observed_default_sha,requested_at,completed_at)
-      VALUES(${crypto.randomUUID()},${started.id},${approvalID},1,${baseSHA},${commitSHA},
-        ${crypto.randomUUID()},'succeeded',${commitSHA},'2026-11-19T12:30:00Z','2026-11-19T12:31:00Z'),
-        (${crypto.randomUUID()},${started.id},${otherApprovalID},1,${baseSHA},${commitSHA},
-        ${crypto.randomUUID()},'failed',NULL,'2026-11-19T13:30:00Z','2026-11-19T13:31:00Z')`;
+      INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,created_at,completed_at)
+      VALUES(${crypto.randomUUID()},'delivery.merge','change',${started.id},
+        ${`delivery.merge:${crypto.randomUUID()}`},NULL,'succeeded',
+        jsonb_build_object(
+          'changeId',${started.id}::text,'commitSha',${commitSHA}::text,'baseSha',${baseSHA}::text,
+          'pullRequestNumber',1,'approvalId',${approvalID}::text,'deliveryPolicyId',NULL::text
+        ),
+        jsonb_build_object('mergeSha',${commitSHA}::text),${userID},'2026-11-19T12:30:00Z','2026-11-19T12:31:00Z'),
+        (${crypto.randomUUID()},'delivery.merge','change',${started.id},
+        ${`delivery.merge:${crypto.randomUUID()}`},NULL,'failed',
+        jsonb_build_object(
+          'changeId',${started.id}::text,'commitSha',${commitSHA}::text,'baseSha',${baseSHA}::text,
+          'pullRequestNumber',1,'approvalId',${otherApprovalID}::text,'deliveryPolicyId',NULL::text
+        ),
+        NULL,${userID},'2026-11-19T13:30:00Z','2026-11-19T13:31:00Z')`;
     await sql`
-      INSERT INTO factory.promotion_operation(id,change_id,project_id,commit_sha)
-      VALUES(${crypto.randomUUID()},${started.id},${projectID},${commitSHA})`;
+      INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'delivery.promotion','change',${started.id},
+        ${`delivery.promotion:${started.id}:1`},${`delivery.promotion:${projectID}`},'pending',
+        jsonb_build_object(
+          'changeId',${started.id}::text,'projectId',${projectID}::text,'commitSha',${commitSHA}::text,
+          'previousRuntimeAttemptId',NULL::text,'replacementRuntimeAttemptId',NULL::text,
+          'ordinal',1,'supersedesId',NULL::text,'retryCommandId',NULL::text
+        ),${userID})`;
   });
   const [original] = await database.client<{ at: string }[]>`
     SELECT approved_at AS at FROM factory.delivery_approval WHERE id=${approvalID}`;
@@ -619,10 +660,16 @@ test.each([false, true])(
     expect(results).toEqual([{ ticketId: follow.commandId }, { ticketId: follow.commandId }]);
     const [created] = await database.client`
       SELECT ticket.project_id AS "projectID",ticket.title,ticket.description,ticket.state,
-        follow.source_ticket_id AS source,follow.source_document_id AS document,
-        follow.source_revision_id AS revision,requirement.ordinal,requirement.canonical_content AS canonical,
+        (follow.payload->>'sourceTicketId')::uuid AS source,
+        (follow.payload->>'sourceDocumentId')::uuid AS document,
+        (follow.payload->>'sourceRevisionId')::uuid AS revision,
+        requirement.ordinal,requirement.canonical_content AS canonical,
         requirement.content_digest AS digest,requirement.created_by AS author
-      FROM factory.ticket ticket JOIN factory.ticket_follow_up follow ON follow.ticket_id=ticket.id
+      FROM factory.ticket ticket
+      JOIN factory.audit_event follow
+        ON follow.kind='tickets.follow_up'
+        AND follow.scope_type='ticket'
+        AND follow.scope_id=ticket.id::text
       JOIN factory.requirement_revision requirement ON requirement.ticket_id=ticket.id
       WHERE ticket.id=${follow.commandId}`;
     const canonical = canonicalRequirementContent({
@@ -771,13 +818,15 @@ test("admission rolls back its intent, then persists exact branch identity befor
     ensureBranch: async () => {
       branchCalls++;
       const [intent] = await database.client`
-        SELECT change.id,change.base_sha AS sha,operation.start_sha AS start,
+        SELECT change.id,change.base_sha AS sha,operation.payload->>'startSha' AS start,
           operation.idempotency_key AS key,operation.state
-        FROM factory.change change JOIN factory.branch_create_operation operation ON operation.change_id=change.id`;
+        FROM factory.change change JOIN factory.operation operation
+          ON operation.kind='delivery.branch_create' AND operation.scope_type='change'
+            AND operation.scope_id=change.id::text`;
       expect(intent?.["id"]).toBe(protectedID);
       expect(intent?.["sha"]).toBe(baseSHA);
       expect(intent?.["start"]).toBe(baseSHA);
-      expect(intent?.["key"]).toBe(`change:${protectedID}:create-branch`);
+      expect(intent?.["key"]).toBe(`delivery.branch_create:change:${protectedID}:create-branch`);
       expect(intent?.["state"]).toBe("executing");
     },
   });
@@ -795,7 +844,9 @@ test("admission rolls back its intent, then persists exact branch identity befor
     "Build admission rejected",
   );
   expect(await database.client`SELECT id FROM factory.change`).toHaveLength(0);
-  expect(await database.client`SELECT id FROM factory.branch_create_operation`).toHaveLength(0);
+  expect(
+    await database.client`SELECT id FROM factory.operation WHERE kind='delivery.branch_create'`,
+  ).toHaveLength(0);
   expect(await database.client`SELECT id FROM factory.requirement_approval`).toHaveLength(0);
   expect(branchCalls).toBe(0);
   const started = await changes.start(ticketID, userID, {
@@ -866,8 +917,9 @@ test("waiting dependencies retain order identity, exact source and explicit canc
   expect(await changes.start(ticketID, userID, admission)).toBeNull();
   expect(await changes.start(ticketID, userID, admission)).toBeNull();
   const [order] = await database.client`
-    SELECT command_id AS command,requirement_revision_id AS revision,coding_reasoning AS reasoning,
-      source_sha AS source,state FROM factory.implementation_order`;
+    SELECT id AS command,(payload->>'requirementRevisionId')::uuid AS revision,
+      payload->>'codingReasoning' AS reasoning,payload->>'sourceSha' AS source,state
+    FROM factory.operation WHERE kind='tickets.implementation_order'`;
   expect(order).toEqual({
     command: admission.commandID,
     revision: revision.id,
@@ -908,8 +960,10 @@ test("waiting dependencies retain order identity, exact source and explicit canc
   expect((await service.detail(userID, ticketID)).implementationOrder?.canCancel).toBe(true);
   await service.cancelImplementation(userID, ticketID, admission.commandID);
   const [cancelled] = await database.client`
-    SELECT cancelled_by AS author,cancelled_at AS at,requirement_revision_id AS revision,
-      source_sha AS source,coding_reasoning AS reasoning FROM factory.implementation_order WHERE command_id=${admission.commandID}`;
+    SELECT (payload->>'cancelledBy')::uuid AS author,payload->>'cancelledAt' AS at,
+      (payload->>'requirementRevisionId')::uuid AS revision,
+      payload->>'sourceSha' AS source,payload->>'codingReasoning' AS reasoning
+    FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${admission.commandID}`;
   expect(cancelled).toMatchObject({
     author: userID,
     revision: revision.id,
@@ -989,7 +1043,9 @@ test("implementation rejects incomplete documents and pins the exact technical r
     "source changed since Technical Planning",
   );
   expect(await database.client`SELECT id FROM factory.requirement_approval`).toHaveLength(0);
-  expect(await database.client`SELECT id FROM factory.branch_create_operation`).toHaveLength(0);
+  expect(
+    await database.client`SELECT id FROM factory.operation WHERE kind='delivery.branch_create'`,
+  ).toHaveLength(0);
   const currentDesignID = crypto.randomUUID();
   await database.db.insert(technicalDesignRevision).values({
     id: currentDesignID,
@@ -1113,14 +1169,11 @@ test.each(["stopped", "failed"])(
           ${started.branchName},${baseSHA},${userID})`;
       await sql`
         INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
-          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,failure)
+          parent_connector_token_hash,create_intended_at,created_by,failure,atespace,actor_name,binding_intent)
         VALUES(${attemptID},${projectID},${started.id},${workspaceID},1,${baseSHA},
-          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${userID},
-          ${state === "failed" ? "Owned cleanup failed" : null})`;
-      await sql`
-        INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},
-          ${`runtime-${attemptID.replaceAll("-", "")}`},'{}')`;
+          'create-intended',${"b".repeat(64)},now(),${userID},
+          ${state === "failed" ? "Owned cleanup failed" : null},
+          ${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},'{}')`;
       await sql`UPDATE factory.runtime_attempt SET state=${state}::factory.runtime_attempt_state WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${attemptID},state='starting' WHERE id=${started.id}`;
     });
@@ -1158,7 +1211,9 @@ test("branch retries preserve terminal outcomes and recovery leaves recorded run
     await Bun.sleep(10);
   }
   expect((await changes.get(started.id))?.branchState).toBe("ambiguous");
-  await database.client`UPDATE factory.branch_create_operation SET reconcile_after=now() WHERE change_id=${started.id}`;
+  await database.client`UPDATE factory.operation
+    SET payload=jsonb_set(payload,'{reconcileAfter}',to_jsonb(now()::text))
+    WHERE kind='delivery.branch_create' AND scope_type='change' AND scope_id=${started.id}`;
   await changes.reconcile(started.id);
   await settle(changes, started.id, "active");
   await changes.recover();

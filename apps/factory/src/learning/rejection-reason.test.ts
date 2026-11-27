@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  LearningResultRejected,
-  validateLearningResult,
-} from "../../../../packages/conversation-domain/src/learning";
+import { LearningResultRejected, validateLearningResult } from "#conversation-domain/learning";
 import { calibratedResult } from "../../../../test/fixtures/learning";
 import { fixtureValue } from "../../../../test/fixtures/value";
 import { calibrationCases } from "./calibration";

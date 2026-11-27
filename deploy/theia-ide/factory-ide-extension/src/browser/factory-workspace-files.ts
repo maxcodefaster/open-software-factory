@@ -21,12 +21,12 @@ import {
   type Stat,
   type WatchOptions,
 } from "@theia/filesystem/lib/common/files";
+import { sharedEditorDocuments } from "./factory-collaboration-registry";
 import {
   type SourceChange,
   SourceResponseError,
   type SourceTransport,
 } from "./factory-source-client";
-import { sharedEditorDocuments } from "./factory-collaboration-registry";
 
 export const workspaceScheme = "factory-workspace";
 

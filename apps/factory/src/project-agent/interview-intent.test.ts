@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { AgentTurnCommand } from "../../../../packages/conversation-domain/src/agent-turn";
+import type { AgentTurnCommand } from "#conversation-domain/agent-turn";
 import type { ConversationEntry } from "../conversations/store";
 import { isRequirementsInterview } from "./interview-intent";
 

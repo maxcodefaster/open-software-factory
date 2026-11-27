@@ -1,12 +1,8 @@
 import { createSignal, For, onCleanup, Show } from "solid-js";
-import {
-  knowledgeIcons,
-  pageParentWouldCycle,
-  pageSiblings,
-} from "../../../../packages/knowledge-domain/src/page-tree";
+import { knowledgeIcons, pageParentWouldCycle, pageSiblings } from "#knowledge-domain/page-tree";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
-import { type KnowledgePage, type KnowledgePageOutline } from "./contracts";
+import type { KnowledgePage, KnowledgePageOutline } from "./contracts";
 import type { PageMove } from "./page-tree";
 
 export function PageOrganization(props: {

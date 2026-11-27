@@ -4,6 +4,7 @@ COPY services/runtime-connector/go.mod services/runtime-connector/go.sum ./
 RUN go mod download
 COPY services/runtime-connector ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-worker ./cmd/factory-browser-worker
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-native-browser ./cmd/factory-native-browser
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-app-proxy ./cmd/factory-browser-app-proxy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-recording-encoder ./cmd/factory-recording-encoder
 
@@ -36,6 +37,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
 COPY --from=browsers /chromium /opt/factory/chromium-bin
 COPY --from=mcp /opt/factory/browser-mcp /opt/factory/browser-mcp
 COPY --from=worker /factory-browser-worker /usr/local/bin/factory-browser-worker
+COPY --from=worker /factory-native-browser /usr/local/bin/factory-native-browser
 COPY --from=worker /factory-browser-app-proxy /usr/local/bin/factory-browser-app-proxy
 COPY --from=worker /factory-recording-encoder /usr/local/bin/factory-recording-encoder
 RUN ln -s /opt/factory/chromium-bin/chrome /opt/factory/chromium \
@@ -43,6 +45,6 @@ RUN ln -s /opt/factory/chromium-bin/chrome /opt/factory/chromium \
   && node --version \
   && /opt/factory/chromium --version \
   && test "$(/opt/factory/chromium --version | awk '{print $NF}' | cut -d . -f 1)" -ge 149
-USER 1000:1000
+USER 0:0
 WORKDIR /tmp
-ENTRYPOINT ["/usr/local/bin/factory-browser-worker"]
+ENTRYPOINT ["/usr/local/bin/factory-native-browser"]

@@ -1,7 +1,7 @@
-import { createServerFn } from "@tanstack/solid-start";
 import { getRequestEvent } from "@solidjs/web";
+import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { identityConfigurationWrite } from "../../../../packages/identity-domain/src/configuration";
+import { identityConfigurationWrite } from "#identity-domain/configuration";
 import { managedUserInput, memberInput, passwordChangeInput } from "../access/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

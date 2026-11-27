@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { createEffect, createRoot, createSignal, flush } from "solid-js";
-import { createQueryData } from "../../packages/zero-solid/src/query-data";
-import { createQuerySelection } from "../../packages/zero-solid/src/query-selection";
 import { addContextToQuery, asQueryInternals } from "@rocicorp/zero/bindings";
-import { zeroQueries } from "../../packages/zero-schema/src";
+import { createEffect, createRoot, createSignal, flush } from "solid-js";
+import { zeroQueries } from "#zero-schema";
+import { createQueryData } from "#zero-solid/query-data";
+import { createQuerySelection } from "#zero-solid/query-selection";
 
 createRoot((dispose) => {
   const state = createQueryData<{ id: string; title: string }[]>();

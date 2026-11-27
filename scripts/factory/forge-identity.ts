@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { forgeClientID, forgeClientSecret } from "../../packages/auth/src/forge-issuer";
+import { forgeClientID, forgeClientSecret } from "#auth/forge-issuer";
 
 export async function ensureLocalForgeIdentity(options: {
   factoryURL: string;

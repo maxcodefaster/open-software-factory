@@ -5,14 +5,14 @@ import {
   inArray,
   isNotNull,
   isNull,
+  ne,
   notExists,
   notInArray,
-  or,
   sql as query,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   authUser,
@@ -20,23 +20,23 @@ import {
   changeAgentSession,
   changeCommitOperation,
   developmentWorkspace,
+  operation,
   project,
   runtimeAttempt,
-  substrateBinding,
   workspaceSharedDocument,
-  workspaceSubmission,
-} from "../../../../packages/db/src/schema";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { forgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+} from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
+import { forgeRepositoryFromURL } from "#forge/repository";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { recordWorkspaceCandidateIn, submitWorkspaceCandidate } from "../agent/candidate-api";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import type { createWorkspaceCollaboration } from "./collaboration";
 import { personalGitStatus } from "./personal-git";
 
+const WORKSPACE_SUBMISSION_KIND = "workspace.submission";
 const sha = z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/);
 export const workspaceSubmissionInput = z.strictObject({
   requestID: z.uuid(),
@@ -90,7 +90,7 @@ export function createWorkspaceSubmission(
         changeID: change.id,
         attemptID: runtimeAttempt.id,
         repositoryURL: project.repositoryUrl,
-        nativeIntent: substrateBinding.intent,
+        nativeIntent: runtimeAttempt.bindingIntent,
         branch: change.branchName,
         base: change.baseSha,
         authorName: authUser.name,
@@ -105,7 +105,6 @@ export function createWorkspaceSubmission(
           eq(runtimeAttempt.workspaceId, developmentWorkspace.id),
         ),
       )
-      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
       .innerJoin(project, eq(project.id, developmentWorkspace.projectId))
       .innerJoin(authUser, eq(authUser.id, userID))
       .where(
@@ -116,8 +115,9 @@ export function createWorkspaceSubmission(
           isNull(change.cancelRequestedAt),
           eq(runtimeAttempt.state, "ready"),
           isNull(runtimeAttempt.stopIntendedAt),
-          isNull(substrateBinding.deleteIntendedAt),
-          isNull(substrateBinding.deletedAt),
+          isNotNull(runtimeAttempt.atespace),
+          isNull(runtimeAttempt.deleteIntendedAt),
+          isNull(runtimeAttempt.deletedAt),
           notExists(
             db
               .select({ id: changeAgentSession.changeId })
@@ -140,32 +140,35 @@ export function createWorkspaceSubmission(
     const [result] = await database.db
       .select({
         id: changeCommitOperation.id,
-        workspaceID: workspaceSubmission.workspaceId,
-        actorID: workspaceSubmission.actorId,
+        workspaceID: operation.scopeId,
+        actorID: query<string>`${operation.payload}->>'actorId'`,
         changeID: changeCommitOperation.changeId,
-        attemptID: substrateBinding.runtimeAttemptId,
-        repositoryURL: workspaceSubmission.repositoryUrl,
-        nativeIntent: substrateBinding.intent,
+        attemptID: runtimeAttempt.id,
+        repositoryURL: query<string>`${operation.payload}->>'repositoryUrl'`,
+        nativeIntent: runtimeAttempt.bindingIntent,
         branch: changeCommitOperation.branchName,
         base: changeCommitOperation.integrationBaseSha,
         expectedHead: changeCommitOperation.expectedParentSha,
-        remoteHead: workspaceSubmission.remoteHead,
+        remoteHead: query<string>`${operation.payload}->>'remoteHead'`,
         message: changeCommitOperation.commitMessage,
         state: changeCommitOperation.state,
         commitSHA: changeCommitOperation.commitSha,
-        attempted: isNotNull(workspaceSubmission.prepareAttemptedAt).mapWith(Boolean),
-        epoch: query<string>`${workspaceSubmission.writerEpoch}::text`,
+        attempted: query<boolean>`(${operation.payload}->>'prepareAttemptedAt') IS NOT NULL`,
+        epoch: query<string>`${operation.payload}->>'writerEpoch'`,
         authorName: authUser.name,
         authorEmail: authUser.email,
       })
-      .from(workspaceSubmission)
-      .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, workspaceSubmission.id))
-      .innerJoin(
-        substrateBinding,
-        eq(substrateBinding.runtimeAttemptId, changeCommitOperation.runtimeAttemptId),
-      )
-      .innerJoin(authUser, eq(authUser.id, workspaceSubmission.actorId))
-      .where(eq(workspaceSubmission.id, id));
+      .from(operation)
+      .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, operation.id))
+      .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeCommitOperation.runtimeAttemptId))
+      .innerJoin(authUser, eq(authUser.id, operation.createdBy))
+      .where(
+        and(
+          eq(operation.id, id),
+          eq(operation.kind, WORKSPACE_SUBMISSION_KIND),
+          isNotNull(runtimeAttempt.atespace),
+        ),
+      );
     if (!result) throw new CommandError("not-found", "Workspace submission not found");
     return result;
   }
@@ -212,13 +215,12 @@ export function createWorkspaceSubmission(
         .select({
           id: changeCommitOperation.id,
           repositoryURL: destination.repositoryUrl,
-          nativeIntent: substrateBinding.intent,
+          nativeIntent: attempt.bindingIntent,
         })
         .from(changeCommitOperation)
         .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
         .innerJoin(destination, eq(destination.id, change.projectId))
         .innerJoin(attempt, eq(attempt.id, changeCommitOperation.runtimeAttemptId))
-        .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, attempt.id))
         .where(
           and(
             eq(changeCommitOperation.id, op.id),
@@ -226,8 +228,9 @@ export function createWorkspaceSubmission(
             eq(change.runtimeAttemptId, attempt.id),
             eq(attempt.state, "ready"),
             isNull(attempt.stopIntendedAt),
-            isNull(substrateBinding.deleteIntendedAt),
-            isNull(substrateBinding.deletedAt),
+            isNotNull(attempt.atespace),
+            isNull(attempt.deleteIntendedAt),
+            isNull(attempt.deletedAt),
             notExists(
               db
                 .select({ id: changeAgentSession.changeId })
@@ -259,9 +262,13 @@ export function createWorkspaceSubmission(
     await writing.fenceSource(op.changeID, op.epoch, false);
     if (action === "git-prepare-commit")
       await database.db
-        .update(workspaceSubmission)
-        .set({ prepareAttemptedAt: query`now()` })
-        .where(eq(workspaceSubmission.id, op.id));
+        .update(operation)
+        .set({
+          state: "prepared",
+          payload: query`jsonb_set(${operation.payload}, '{prepareAttemptedAt}', to_jsonb(now()::text))`,
+          updatedAt: query`now()`,
+        })
+        .where(and(eq(operation.id, op.id), eq(operation.kind, WORKSPACE_SUBMISSION_KIND)));
     return hub.parentOperation(
       op.attemptID,
       {
@@ -328,9 +335,11 @@ export function createWorkspaceSubmission(
       const task = (async () => {
         const input = workspaceSubmissionInput.parse(raw);
         const [recorded] = await database.db
-          .select({ id: workspaceSubmission.id })
-          .from(workspaceSubmission)
-          .where(eq(workspaceSubmission.id, input.requestID));
+          .select({ id: operation.id })
+          .from(operation)
+          .where(
+            and(eq(operation.id, input.requestID), eq(operation.kind, WORKSPACE_SUBMISSION_KIND)),
+          );
         if (recorded) {
           const previous = await row(input.requestID);
           await database.client.begin((sql) =>
@@ -344,9 +353,11 @@ export function createWorkspaceSubmission(
         try {
           await lock`SELECT pg_advisory_lock(hashtext(${`workspace-submission:${saved.changeID}`}))`;
           const [exists] = await database.db
-            .select({ id: workspaceSubmission.id })
-            .from(workspaceSubmission)
-            .where(eq(workspaceSubmission.id, input.requestID));
+            .select({ id: operation.id })
+            .from(operation)
+            .where(
+              and(eq(operation.id, input.requestID), eq(operation.kind, WORKSPACE_SUBMISSION_KIND)),
+            );
           if (!exists) {
             await collaboration.assertSaved(input.workspaceID);
             await database.client.begin(async (sql) => {
@@ -359,7 +370,7 @@ export function createWorkspaceSubmission(
                 .where(
                   and(
                     eq(workspaceSharedDocument.workspaceId, input.workspaceID),
-                    or(workspaceSharedDocument.dirty, workspaceSharedDocument.conflict),
+                    ne(workspaceSharedDocument.syncState, "clean"),
                   ),
                 )
                 .limit(1);
@@ -434,10 +445,15 @@ export function createWorkspaceSubmission(
     async recover() {
       const rows = await database.db
         .select({ id: changeCommitOperation.id })
-        .from(workspaceSubmission)
-        .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, workspaceSubmission.id))
-        .where(inArray(changeCommitOperation.state, ["commit-intended", "push-intended"]))
-        .orderBy(asc(workspaceSubmission.createdAt))
+        .from(operation)
+        .innerJoin(changeCommitOperation, eq(changeCommitOperation.id, operation.id))
+        .where(
+          and(
+            eq(operation.kind, WORKSPACE_SUBMISSION_KIND),
+            inArray(changeCommitOperation.state, ["commit-intended", "push-intended"]),
+          ),
+        )
+        .orderBy(asc(operation.createdAt))
         .limit(16);
       for (const saved of rows) {
         const op = await row(saved.id);

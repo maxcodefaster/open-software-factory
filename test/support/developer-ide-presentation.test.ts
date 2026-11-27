@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
-import { FileStat } from "../../deploy/theia-ide/node_modules/@theia/filesystem/lib/common/files";
-import { FactoryWorkspaceLabels } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-labels";
 import {
   FactorySourceClient,
   SourceResponseError,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-source-client";
+import { FactoryWorkspaceLabels } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-labels";
+import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
+import { FileStat } from "../../deploy/theia-ide/node_modules/@theia/filesystem/lib/common/files";
 
 test("Workspace names and file captions retain their original immutable source identity", async () => {
   const client = {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeProcessProtocol } from "../fixtures/native-process-protocol";
 
@@ -16,8 +16,8 @@ test("isolated Factory grants stay on its listener and refuse disconnected Apps"
       SELECT user_id AS id FROM factory.administrator`;
     if (!administrator) throw Error("Owned Factory administrator missing");
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`access-${projectID}`},'Owned runtime access','https://example.invalid/fixture.git','main','.devcontainer/devcontainer.json',${administrator.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`access-${projectID}`},'Owned runtime access','https://example.invalid/fixture.git','main','.factory/actor-template.json',${administrator.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${administrator.id},'developer',${administrator.id})`;
     // Retained source revision avoids any real Forge/Git/network dependency.
@@ -40,7 +40,7 @@ test("isolated Factory grants stay on its listener and refuse disconnected Apps"
     const owned = { attemptID };
     const [binding] = await database.client<{ actorUID: string; created: boolean }[]>`
       SELECT actor_uid AS "actorUID",create_attempted_at IS NOT NULL AS created
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${attemptID}`;
+      FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect(binding).toMatchObject({ actorUID: expect.any(String), created: true });
     const creates = native.calls.filter((call) => call.method.startsWith("Create"));
     // Deliberately stale saved readiness must not substitute for transport.

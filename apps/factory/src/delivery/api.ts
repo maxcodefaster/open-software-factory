@@ -1,1 +1,1 @@
-export { type createDeliveryController } from "./controller";
+export type { createDeliveryController } from "./controller";

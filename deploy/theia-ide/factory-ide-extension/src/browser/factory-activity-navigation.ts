@@ -1,20 +1,20 @@
 import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
-import { inject, injectable } from "@theia/core/shared/inversify";
-import URI from "@theia/core/lib/common/uri";
-import type { Resource, ResourceResolver } from "@theia/core/lib/common/resource";
-import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
-import type { TextEditor } from "@theia/editor/lib/browser/editor";
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
+import type { Resource, ResourceResolver } from "@theia/core/lib/common/resource";
+import URI from "@theia/core/lib/common/uri";
+import { inject, injectable } from "@theia/core/shared/inversify";
+import type { TextEditor } from "@theia/editor/lib/browser/editor";
+import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import { MonacoEditor } from "@theia/monaco/lib/browser/monaco-editor";
-import type { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
+import {
+  type ActivityNavigationMessage,
+  activityNavigationMessage,
+} from "./factory-activity-message";
+import { AgentFollowGate } from "./factory-agent-follow";
 import { authorizedFactoryOrigin } from "./factory-parent-context";
 import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
-import { AgentFollowGate } from "./factory-agent-follow";
-import {
-  activityNavigationMessage,
-  type ActivityNavigationMessage,
-} from "./factory-activity-message";
+import type { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 
 @injectable()
 export class FactoryActivityNavigation

@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, type Request } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -32,9 +32,9 @@ test.beforeEach(async ({ page }) => {
       },
     },
   });
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
     VALUES(${projectID},${`efficiency-${projectID}`},'Efficient board',
-      'https://example.invalid/efficiency.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+      'https://example.invalid/efficiency.git','main','.factory/actor-template.json',${session.user.id})`;
   await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
     VALUES(${crypto.randomUUID()},${projectID},'Explore the onboarding flow','A first Idea.','inbox',${session.user.id}),
       (${crypto.randomUUID()},${projectID},'Make navigation easier to scan','Fewer, clearer stops.','ready',${session.user.id}),

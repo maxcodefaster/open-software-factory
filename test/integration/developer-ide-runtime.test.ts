@@ -29,6 +29,12 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
         starts++;
         return null;
       },
+      async pause() {
+        throw new Error("Unexpected compute Pause");
+      },
+      async get() {
+        return null;
+      },
       async processOutput(attemptID) {
         return { processes: [{ name: "app", state: "running" as const, output: attemptID }] };
       },
@@ -160,12 +166,10 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     const replacement = crypto.randomUUID();
     await database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
-        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent)
         VALUES(${replacement},${owned.projectID},${owned.changeID},${source.id},2,${"a".repeat(40)},
-          'create-intended',${"d".repeat(64)},${"e".repeat(64)},now(),${owned.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${replacement},${`fa-${replacement.replaceAll("-", "")}`},
-          ${`runtime-${replacement.replaceAll("-", "")}`},'{}')`;
+          'create-intended',${"d".repeat(64)},now(),${owned.userID},
+          ${`fa-${replacement.replaceAll("-", "")}`},${`runtime-${replacement.replaceAll("-", "")}`},'{}')`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacement}`;
     });
     // A newer generation is not this Ticket's selected Attempt until its owner links it.

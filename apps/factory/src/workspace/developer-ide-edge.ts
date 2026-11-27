@@ -1,7 +1,6 @@
 import type { ServerWebSocket } from "bun";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import { CommandError } from "../command-error";
-import { developerIDEOrigin } from "../developer-ide-origin";
 import { json } from "../http";
 import { factoryRequestURL } from "../request-origin";
 import {
@@ -12,6 +11,7 @@ import {
 import type { createWorkspaceCollaboration } from "./collaboration";
 import { createDeveloperIDEAccess, developerIDEPath } from "./developer-ide-access";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
+import { developerIDEOrigin } from "./developer-ide-origin";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
 import { boundedSourceBody } from "./source-body";
 import type { createWorkspaceSourceController } from "./source-controller";

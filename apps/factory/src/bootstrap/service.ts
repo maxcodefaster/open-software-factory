@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { sessionSchema } from "../access/contracts";
-import { type UIPreference } from "../preferences/contracts";
+import type { UIPreference } from "../preferences/contracts";
 import { type Bootstrap, bootstrapSchema } from "./contracts";
 
 export function createBootstrapService(options: {

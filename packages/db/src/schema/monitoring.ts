@@ -14,90 +14,26 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { MCPAssignment } from "../../../conversation-domain/src/mcp-library";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
 import { authUser } from "./auth";
-import { mcpConnection } from "./mcp";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
 import { ticket } from "./tickets";
-
-export const monitoringCommand = factorySchema.table(
-  "monitoring_command",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    projectId: uuid("project_id").notNull(),
-    hookId: uuid("hook_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    inputDigest: text("input_digest").notNull(),
-    action: text("action").$type<"save" | "disable" | "rotate">().notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "monitoring_command_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.hookId],
-      foreignColumns: [monitoringHook.id],
-      name: "monitoring_command_hook_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "monitoring_command_project_id_fkey",
-    }),
-    check(
-      "monitoring_command_action_check",
-      sql`${table.action} = ANY (ARRAY['save'::text, 'disable'::text, 'rotate'::text])`,
-    ),
-  ],
-);
-
-export const monitoringEvidence = factorySchema.table(
-  "monitoring_evidence",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    incidentId: uuid("incident_id").notNull(),
-    kind: text("kind").notNull(),
-    digest: text("digest").notNull(),
-    path: text("path"),
-    commitSha: text("commit_sha"),
-    observedAt: timestamp("observed_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.incidentId],
-      foreignColumns: [monitoringIncident.id],
-      name: "monitoring_evidence_incident_id_fkey",
-    }),
-    check("monitoring_evidence_digest_check", sql`${table.digest} ~ '^[a-f0-9]{64}$'::text`),
-  ],
-);
 
 export const monitoringPolicy = factorySchema.table(
   "monitoring_policy",
   {
     id: uuid("id").primaryKey().notNull(),
     hookId: uuid("hook_id").notNull(),
-    connectionId: uuid("connection_id"),
-    assignment: jsonb("assignment").$type<MCPAssignment>(),
     delegatedBy: uuid("delegated_by").notNull(),
-    delegatedAt: timestamp("delegated_at", { withTimezone: true }).defaultNow().notNull(),
     delegation: text("delegation")
       .$type<"prepare-ticket" | "application-fix-and-delivery">()
       .notNull(),
     instructions: text("instructions"),
     sourceIds: uuid("source_ids").array().default([]).notNull(),
-    sourceAssignments: jsonb("source_assignments").$type<MCPAssignment[]>(),
+    sourceAssignments: jsonb("source_assignments").$type<MCPAssignment[]>().default([]).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.connectionId],
-      foreignColumns: [mcpConnection.id],
-      name: "monitoring_policy_connection_id_fkey",
-    }),
     foreignKey({
       columns: [table.delegatedBy],
       foreignColumns: [authUser.id],

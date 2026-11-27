@@ -1,7 +1,10 @@
-import { and, asc, eq, sql as expression, lt, notInArray } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { accessRevocation, accountAccess } from "../../../../packages/db/src/schema";
+import { and, asc, eq, sql as expression, notInArray } from "drizzle-orm";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { accountAccess, operation } from "#db/schema";
 import { reportFailure } from "../failure-log";
+
+const ACCESS_REVOCATION_KIND = "access.revocation";
+const accessRevocationKey = (userID: string) => `${ACCESS_REVOCATION_KIND}:${userID}`;
 
 type Database = ReturnType<typeof createDatabase>;
 type Revocation = { userID: string; version: string; disabled: boolean };
@@ -30,20 +33,26 @@ export function createAccessRevocation(
         const db = drizzleTransaction(database.client);
         const rows: Revocation[] = await db
           .select({
-            userID: accessRevocation.userId,
+            userID: operation.scopeId,
             // Keep the native bigint exact across the external acknowledgement boundary.
-            version: expression<string>`${accessRevocation.version}::text`,
+            version: expression<string>`${operation.payload}->>'version'`,
             disabled: expression<boolean>`${accountAccess.disabledAt} IS NOT NULL OR ${accountAccess.directoryDisabledAt} IS NOT NULL`,
           })
-          .from(accessRevocation)
-          .innerJoin(accountAccess, eq(accountAccess.userId, accessRevocation.userId))
+          .from(operation)
+          .innerJoin(
+            accountAccess,
+            eq(expression<string>`${accountAccess.userId}::text`, operation.scopeId),
+          )
           .where(
             and(
-              lt(accessRevocation.processedVersion, accessRevocation.version),
-              attempted.length ? notInArray(accessRevocation.userId, attempted) : undefined,
+              eq(operation.kind, ACCESS_REVOCATION_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.state, "pending"),
+              expression`CASE WHEN ${operation.kind} = ${ACCESS_REVOCATION_KIND} THEN (${operation.payload}->>'processedVersion')::bigint < (${operation.payload}->>'version')::bigint ELSE false END`,
+              attempted.length ? notInArray(operation.scopeId, attempted) : undefined,
             ),
           )
-          .orderBy(asc(accessRevocation.updatedAt), asc(accessRevocation.userId))
+          .orderBy(asc(operation.updatedAt), asc(operation.scopeId))
           .limit(64);
         for (const row of rows) {
           if (closed) return;
@@ -53,13 +62,19 @@ export function createAccessRevocation(
             // Recheck the version after external work. A newer revocation stays pending.
             const version = expression`${row.version}::bigint`;
             await db
-              .update(accessRevocation)
-              .set({ processedVersion: version })
+              .update(operation)
+              .set({
+                state: "processed",
+                payload: expression`jsonb_set(${operation.payload}, '{processedVersion}', to_jsonb(${version}))`,
+                completedAt: expression`now()`,
+                updatedAt: expression`now()`,
+              })
               .where(
                 and(
-                  eq(accessRevocation.userId, row.userID),
-                  eq(accessRevocation.version, version),
-                  lt(accessRevocation.processedVersion, version),
+                  eq(operation.kind, ACCESS_REVOCATION_KIND),
+                  eq(operation.idempotencyKey, accessRevocationKey(row.userID)),
+                  expression`(${operation.payload}->>'version')::bigint = ${version}`,
+                  expression`(${operation.payload}->>'processedVersion')::bigint < ${version}`,
                 ),
               );
           } catch (cause) {

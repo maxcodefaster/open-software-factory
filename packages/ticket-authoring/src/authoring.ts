@@ -1,9 +1,9 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../db/src/client";
-import { requirementRevision, ticket, ticketDocumentRevision } from "../../db/src/schema";
-import { requirementDigest } from "../../requirement-domain/src/requirement";
-import { createTicketInput } from "../../ticket-domain/src/ticket";
+import type { createDatabase } from "#db/client";
+import { requirementRevision, ticket, ticketDocumentRevision } from "#db/schema";
+import { requirementDigest } from "#requirement-domain/requirement";
+import { createTicketInput } from "#ticket-domain/ticket";
 
 // Server-side product authoring. The caller owns the transaction and authorization.
 type Database = ReturnType<typeof createDatabase>["db"];

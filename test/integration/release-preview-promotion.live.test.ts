@@ -25,7 +25,9 @@ test.skipIf(!installation)(
       const current = attempts.find((a) => a.currentStaging && a.state === "ready");
       const [previous] = await f.database.client<
         { id: string }[]
-      >`SELECT previous_runtime_attempt_id AS id FROM factory.promotion_operation WHERE change_id = ${changeID}`;
+      >`SELECT payload->>'previousRuntimeAttemptId' AS id FROM factory.operation
+        WHERE kind = 'delivery.promotion' AND scope_type = 'change' AND scope_id = ${changeID}
+        ORDER BY (payload->>'ordinal')::integer DESC LIMIT 1`;
       if (!current || !previous) throw new Error("Completed genuine promotion required");
       const old = { ...current, id: previous.id, state: "stopped", currentStaging: false };
       const page = await f.page("developer");

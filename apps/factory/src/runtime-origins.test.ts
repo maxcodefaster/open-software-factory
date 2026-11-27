@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { developerIDEOrigin } from "./developer-ide-origin";
 import { appRuntimeOrigin, isolatedRuntimeOrigin, runtimeAppOriginRoute } from "./runtime-origins";
+import { developerIDEOrigin } from "./workspace/client";
 
 const id = "01994a7d-0000-7000-8000-000000000001";
 

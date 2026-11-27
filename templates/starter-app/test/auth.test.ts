@@ -1,7 +1,7 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createDatabase } from "../src/db/client.ts";
+import { test } from "node:test";
 import { createAuth } from "../src/auth.ts";
+import { createDatabase } from "../src/db/client.ts";
 import { startApplication } from "./application.ts";
 import { readSession, sessionValue } from "./session.ts";
 

@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { ownedMonitoringForge } from "../fixtures/monitoring-native";
+import { createForgejoClient } from "#forge/forge";
 import { eventually } from "../fixtures/factory-process";
+import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { fixtureValue } from "../fixtures/value";
 
 test("pinned Forgejo 17 exposes exact failed-step diagnostics and bounded native log reads", async () => {

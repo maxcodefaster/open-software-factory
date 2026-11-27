@@ -1,5 +1,5 @@
-import type { ModelProvider } from "../../../../packages/conversation-domain/src/model-connection";
-import type { UsageCounters } from "../../../../packages/conversation-domain/src/usage";
+import type { ModelProvider } from "#conversation-domain/model-connection";
+import type { UsageCounters } from "#conversation-domain/usage";
 
 export type ResolvedModelConnection = {
   provider?: ModelProvider;

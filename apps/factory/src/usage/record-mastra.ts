@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import { createContractRates } from "./contract-rates";
 import { createUsageJournal, type UsageOperation } from "./journal";
 import type { MastraUsageSink } from "./mastra";

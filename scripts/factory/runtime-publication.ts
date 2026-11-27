@@ -4,6 +4,7 @@ export async function publishRuntimeImage(
     target: string | undefined;
     repository: string;
     metadata: string;
+    platform?: "linux/amd64" | "linux/arm64";
   },
   command: (args: string[]) => Promise<unknown>,
 ) {
@@ -12,6 +13,7 @@ export async function publishRuntimeImage(
     "buildx",
     "build",
     "--provenance=false",
+    ...(input.platform ? ["--platform", input.platform] : []),
     "--file",
     input.dockerfile,
     ...(input.target ? ["--target", input.target] : []),

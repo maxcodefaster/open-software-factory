@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { unknownCounters } from "#conversation-domain/usage";
+import type { createDatabase } from "#db/client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import {
   beginInstallationMaintenance,
@@ -6,8 +8,6 @@ import {
   installationInMaintenance,
 } from "../../apps/factory/src/installation/maintenance";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
-import { unknownCounters } from "../../packages/conversation-domain/src/usage";
-import type { createDatabase } from "../../packages/db/src/client";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("upgrade admission serializes against real inference intent and never discards pending work", async () => {
@@ -24,13 +24,14 @@ test("upgrade admission serializes against real inference intent and never disca
       INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userID},'Owned maintenance fixture',${`maintenance-${userID}@factory.local`},true)`;
     await database.client`
-      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`maintenance-${projectID}`},'Owned maintenance fixture',
-        'https://example.invalid/maintenance','main','.devcontainer/devcontainer.json',${userID})`;
+        'https://example.invalid/maintenance','main','.factory/actor-template.json',${userID})`;
     writing = database.client.begin(async (sql) => {
       await sql`
-        INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-        VALUES(${generationID},${projectID},${"a".repeat(40)},${userID})`;
+        INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+        VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${projectID}`},'pending',${userID},
+          ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
       const [owner] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
       if (!owner) throw new Error("Owned inference transaction is missing");
       entered.resolve(owner.pid);
@@ -59,25 +60,29 @@ test("upgrade admission serializes against real inference intent and never disca
     expect(result.message).toContain("Finish or explicitly stop");
     expect(await installationInMaintenance(database)).toBe(false);
     const [retained] = await database.client<{ state: string }[]>`
-      SELECT state FROM factory.knowledge_generation WHERE id=${generationID}`;
+      SELECT state FROM factory.operation WHERE id=${generationID} AND kind='knowledge.generation'`;
     expect(retained?.state).toBe("pending");
 
     await database.client`
-      UPDATE factory.knowledge_generation SET state='failed',completed_at=now()
-      WHERE id=${generationID}`;
+      UPDATE factory.operation SET state='failed',active_key=NULL,completed_at=now()
+      WHERE id=${generationID} AND kind='knowledge.generation'`;
     await beginInstallationMaintenance(database);
     expect(await installationInMaintenance(database)).toBe(true);
     const admitWhilePaused = async () => {
+      const nextID = crypto.randomUUID();
       await database.client`
-        INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-        VALUES(${crypto.randomUUID()},${projectID},${"a".repeat(40)},${userID})`;
+        INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+        VALUES(${nextID},'knowledge.generation','project',${projectID},${`knowledge.generation:${nextID}`},${`knowledge.generation:${projectID}`},'pending',${userID},
+          ${JSON.stringify({ id: nextID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     };
     await expect(admitWhilePaused()).rejects.toThrow("maintenance");
     await finishInstallationMaintenance(database);
     expect(await installationInMaintenance(database)).toBe(false);
+    const resumedID = crypto.randomUUID();
     await database.client`
-      INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-      VALUES(${crypto.randomUUID()},${projectID},${"a".repeat(40)},${userID})`;
+      INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+      VALUES(${resumedID},'knowledge.generation','project',${projectID},${`knowledge.generation:${resumedID}`},${`knowledge.generation:${projectID}`},'pending',${userID},
+        ${JSON.stringify({ id: resumedID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
   } finally {
     release.resolve();
     await writing?.catch(() => {});
@@ -92,9 +97,9 @@ async function dispatchedProject(database: ReturnType<typeof createDatabase>) {
   const conversationID = crypto.randomUUID();
   await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
     VALUES(${userID},'Owned expired planning',${`planning-${userID}@factory.local`},true)`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
     VALUES(${projectID},${`planning-${projectID}`},'Owned expired planning',
-      'https://example.invalid/planning','main','.devcontainer/devcontainer.json',${userID})`;
+      'https://example.invalid/planning','main','.factory/actor-template.json',${userID})`;
   await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
     VALUES(${projectID},${userID},'developer',${userID})`;
   await database.client`INSERT INTO factory.ticket_conversation(id,project_id,mode,created_by)

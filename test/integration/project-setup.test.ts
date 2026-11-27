@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
-import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
+import { createForgejoClient } from "#forge/forge";
+import { isDesktopBackgroundKey } from "#interface-domain/background";
+import {
+  assertRepositoryIntentMutable,
+  createProjectSetupController,
+} from "../../apps/factory/src/setup/controller";
 import type { ImportCredential } from "../../apps/factory/src/setup/secrets";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("retained setup and ambiguous import recover without duplicate repositories with one application connection", async () => {
@@ -22,8 +25,9 @@ test("retained setup and ambiguous import recover without duplicate repositories
     fetch: async (_url, init) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
-        const [intent] = await database.client`SELECT state,source_url,credential_key
-          FROM factory.project_repository_intent`;
+        const [intent] =
+          await database.client`SELECT state,payload->>'sourceUrl' AS source_url,payload->>'credentialKey' AS credential_key
+          FROM factory.operation WHERE kind='projects.repository_intent'`;
         expect(intent?.["state"]).toBe("create-intended");
         expect(intent?.["source_url"]).toBe("https://github.com/team/private.git");
         expect(credentials.has(String(intent?.["credential_key"]))).toBe(true);
@@ -60,8 +64,9 @@ test("retained setup and ambiguous import recover without duplicate repositories
       configured: true,
       read: async (key) => credentials.get(key),
       create: async (key, value) => {
-        const [intent] = await database.client`SELECT state,command_id,fingerprint
-          FROM factory.project_repository_intent WHERE credential_key=${key}`;
+        const [intent] =
+          await database.client`SELECT state,id AS command_id,payload->>'fingerprint' AS fingerprint
+          FROM factory.operation WHERE kind='projects.repository_intent' AND payload->>'credentialKey'=${key}`;
         expect(intent?.["state"]).toBe("credential-intended");
         expect(intent?.["command_id"]).toBe(value.commandID);
         expect(intent?.["fingerprint"]).toBe(value.fingerprint);
@@ -166,14 +171,46 @@ test("retained setup and ambiguous import recover without duplicate repositories
       SELECT id,desktop_background_key AS key FROM factory.project`;
     expect([...recoveredProjects]).toEqual([createdProject]);
     expect(creates).toBe(1);
-    expect(
-      JSON.stringify(await database.client`SELECT * FROM factory.project_repository_intent`),
-    ).not.toContain("private-source-token");
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.project_repository_intent SET source_url='https://evil.test/repo'`;
-      })(),
-    ).rejects.toThrow("immutable");
+    const intentRows =
+      await database.client`SELECT * FROM factory.operation WHERE kind='projects.repository_intent'`;
+    expect(JSON.stringify(intentRows)).not.toContain("private-source-token");
+    const [savedIntent] = intentRows;
+    if (!savedIntent) throw new Error("Saved repository intent missing");
+    const savedPayload = savedIntent["payload"] as {
+      setupId: string;
+      name: string;
+      slug: string;
+      kind: "starter" | "import";
+      sourceUrl: string;
+      credentialKey: string | null;
+      fingerprint: string;
+    };
+    const savedResult = savedIntent["result"] as {
+      defaultBranch?: string | null;
+      credentialRemovedAt?: string | null;
+    } | null;
+    expect(() =>
+      assertRepositoryIntentMutable(
+        {
+          commandID: String(savedIntent["id"]),
+          setupID: savedPayload.setupId,
+          userID: String(savedIntent["created_by"]),
+          projectID: String(savedIntent["scope_id"]),
+          name: savedPayload.name,
+          slug: savedPayload.slug,
+          kind: savedPayload.kind,
+          sourceURL: savedPayload.sourceUrl,
+          credentialKey: savedPayload.credentialKey,
+          fingerprint: savedPayload.fingerprint,
+          state: savedIntent["state"] as "committed",
+          defaultBranch: savedResult?.defaultBranch ?? null,
+          credentialRemovedAt: savedResult?.credentialRemovedAt ?? null,
+          createdAt: savedIntent["created_at"] as Date,
+          completedAt: (savedIntent["completed_at"] as Date | null) ?? null,
+        },
+        { sourceURL: "https://evil.test/repo" },
+      ),
+    ).toThrow("immutable");
     const next = await restarted.begin(manager);
     expect(next?.id).not.toBe(draft.id);
     expect(next).toMatchObject({
@@ -229,12 +266,15 @@ test("setup draft compare-and-swap keeps one winner under real row-lock contenti
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
     const draft = await controller.begin(manager);
     if (!draft) throw new Error("Owned draft missing");
-    await database.client`UPDATE factory.project_setup_draft SET updated_at='2001-01-01'`;
-    const [before] = await database.client`SELECT * FROM factory.project_setup_draft`;
+    await database.client`UPDATE factory.operation SET updated_at='2001-01-01' WHERE kind='projects.setup_draft'`;
+    const [before] =
+      await database.client`SELECT * FROM factory.operation WHERE kind='projects.setup_draft'`;
     expect(await controller.begin(manager)).toEqual(draft);
-    expect((await database.client`SELECT * FROM factory.project_setup_draft`)[0]).toEqual(before);
+    expect(
+      (await database.client`SELECT * FROM factory.operation WHERE kind='projects.setup_draft'`)[0],
+    ).toEqual(before);
     lock = database.client.begin(async (transaction) => {
-      await transaction`SELECT id FROM factory.project_setup_draft WHERE id=${draft.id} FOR UPDATE`;
+      await transaction`SELECT id FROM factory.operation WHERE id=${draft.id} FOR UPDATE`;
       const [backend] = await transaction<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
       if (!backend) throw new Error("Owned draft lock backend is missing");
       blockerPID = backend.pid;
@@ -281,7 +321,8 @@ test("setup draft compare-and-swap keeps one winner under real row-lock contenti
     if (!current) throw new Error("Owned draft missing after CAS");
     expect(current.version).toBe(2);
     expect(["first", "second"]).toContain(current.name);
-    const [after] = await database.client`SELECT updated_at FROM factory.project_setup_draft`;
+    const [after] =
+      await database.client`SELECT updated_at FROM factory.operation WHERE kind='projects.setup_draft' AND id=${draft.id}`;
     expect(after?.["updated_at"]).not.toEqual(before?.["updated_at"]);
   } finally {
     release.resolve();
@@ -371,11 +412,12 @@ test("a rejected private import can start another setup without discarding or re
       commandID: crypto.randomUUID(),
     });
     expect(rejected?.state).toBe("failed");
-    const [original] = await database.client`SELECT * FROM factory.project_repository_intent`;
+    const [original] =
+      await database.client`SELECT id AS command_id,payload->>'sourceUrl' AS source_url FROM factory.operation WHERE kind='projects.repository_intent'`;
     // Older versions classified this response as uncertain. Keep observing it
     // after starting another setup, but never repeat its external write.
-    await database.client`UPDATE factory.project_repository_intent SET state='uncertain'`;
-    await database.client`UPDATE factory.project_setup_draft SET state='checking'`;
+    await database.client`UPDATE factory.operation SET state='uncertain',completed_at=NULL WHERE kind='projects.repository_intent'`;
+    await database.client`UPDATE factory.operation SET state='checking' WHERE kind='projects.setup_draft'`;
     const second = await controller.startAnother(manager, first.id);
     if (!second) throw new Error("Missing new draft");
     expect(second?.id).not.toBe(first.id);
@@ -411,7 +453,7 @@ test("a rejected private import can start another setup without discarding or re
     previousRepository.empty = false;
     await controller.recover();
     const [retained] =
-      await database.client`SELECT * FROM factory.project_repository_intent WHERE setup_id=${first.id}`;
+      await database.client`SELECT state,id AS command_id,payload->>'sourceUrl' AS source_url FROM factory.operation WHERE kind='projects.repository_intent' AND payload->>'setupId'=${first.id}`;
     expect(retained?.["state"]).toBe("committed");
     expect(retained?.["command_id"]).toBe(original?.["command_id"]);
     expect(retained?.["source_url"]).toBe(original?.["source_url"]);
@@ -482,7 +524,9 @@ test("an import URL outside the approved hosts is refused with its reason and ke
       expect((await controller.view(manager))?.state).toBe("draft");
     }
     expect(
-      (await database.client`SELECT command_id FROM factory.project_repository_intent`).length,
+      (
+        await database.client`SELECT id FROM factory.operation WHERE kind='projects.repository_intent'`
+      ).length,
     ).toBe(0);
   } finally {
     await database.client.end({ timeout: 2 });

@@ -1,15 +1,7 @@
-import { and, eq, getTableColumns, inArray, sql as expression } from "drizzle-orm";
-import { inputInstructions } from "../../../../packages/conversation-domain/src/monitoring";
-import {
-  type DatabaseTransaction,
-  type createDatabase,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  monitoringHook,
-  monitoringIncident,
-  monitoringPolicy,
-} from "../../../../packages/db/src/schema";
+import { and, eq, sql as expression, getTableColumns, inArray } from "drizzle-orm";
+import { inputInstructions } from "#conversation-domain/monitoring";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { monitoringHook, monitoringIncident, monitoringPolicy } from "#db/schema";
 import { CommandError } from "../command-error";
 import {
   manageMonitoringIn,

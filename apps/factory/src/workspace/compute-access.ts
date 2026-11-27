@@ -1,21 +1,32 @@
-import { desc, eq } from "drizzle-orm";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { runtimeAttempt, runtimeComputeWait } from "../../../../packages/db/src/schema";
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
+import { and, desc, eq, sql as expression } from "drizzle-orm";
+import type { createDatabase } from "#db/client";
+import { operation, runtimeAttempt } from "#db/schema";
+import { nativeLifecycleWindowMS } from "#runtime-domain/timing";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
-import { type createRuntimeController } from "../runtime/api";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { createRuntimeController } from "../runtime/api";
+import type { RuntimeHub } from "../runtime/transport-api";
 
-/** Demand resumes an existing Sandbox. It never replaces explicit Stop or a failed attempt. */
+/** Demand resumes the original native Workspace, never inference or failed compute. */
 export function createWorkspaceComputeAccess(
   database: ReturnType<typeof createDatabase>,
-  hub: Pick<RuntimeHub, "ready">,
-  runtime: Pick<ReturnType<typeof createRuntimeController>, "start" | "startPersisted" | "get">,
+  hub: Pick<RuntimeHub, "ready" | "sourceConnected">,
+  runtime: Pick<
+    ReturnType<typeof createRuntimeController>,
+    "start" | "startPersisted" | "resumeForSource" | "get"
+  >,
   closing: () => boolean,
 ) {
-  return async (workspaceID: string, userID: string, write = true, expectedAttemptID?: string) => {
+  return async (
+    workspaceID: string,
+    userID: string,
+    write = true,
+    expectedAttemptID?: string,
+    signal?: AbortSignal,
+    sourceOnly = false,
+  ) => {
+    signal?.throwIfAborted();
     const authorize = () =>
       database.client.begin(async (sql) => {
         const access = write
@@ -28,10 +39,21 @@ export function createWorkspaceComputeAccess(
       .select({
         id: runtimeAttempt.id,
         state: runtimeAttempt.state,
-        computeWait: runtimeComputeWait.reason,
+        computeWait: expression<string | null>`${operation.payload}->>'reason'`,
       })
       .from(runtimeAttempt)
-      .leftJoin(runtimeComputeWait, eq(runtimeComputeWait.attemptId, runtimeAttempt.id))
+      .leftJoin(
+        operation,
+        and(
+          eq(operation.kind, "runtime.compute_wait"),
+          eq(operation.scopeType, "runtime_attempt"),
+          eq(operation.scopeId, expression`${runtimeAttempt.id}::text`),
+          eq(
+            operation.idempotencyKey,
+            expression`'runtime.compute_wait:' || ${runtimeAttempt.id}::text`,
+          ),
+        ),
+      )
       .where(eq(runtimeAttempt.workspaceId, workspaceID))
       .orderBy(desc(runtimeAttempt.generation))
       .limit(1);
@@ -49,21 +71,47 @@ export function createWorkspaceComputeAccess(
         "Start this Workspace explicitly before accessing compute",
       );
     if (closing()) throw new CommandError("unavailable", "Factory is stopping");
+    signal?.throwIfAborted();
     if (
       attempt.state === "paused" ||
       attempt.state === "resuming" ||
       (attempt.state === "starting" && attempt.computeWait === "compute-capacity")
     ) {
-      // Resume changes compute state and still needs current development writer authority.
-      await database.client.begin((sql) => workspaceWriteAuthorityIn(sql, workspaceID, userID));
-      if (access.changeID) await runtime.startPersisted(access.changeID, userID);
-      else await runtime.start(access.projectID, userID, workspaceID);
+      if (sourceOnly && !write) {
+        // Current-file observation resumes only this retained Actor, not Start
+        // or a Change writer. Personal observation shares still cannot wake.
+        await runtime.resumeForSource(attempt.id, userID);
+      } else {
+        await database.client.begin((sql) => workspaceWriteAuthorityIn(sql, workspaceID, userID));
+        signal?.throwIfAborted();
+        if (access.changeID) await runtime.startPersisted(access.changeID, userID);
+        else await runtime.start(access.projectID, userID, workspaceID);
+      }
     }
+    signal?.throwIfAborted();
     const deadline = Date.now() + nativeLifecycleWindowMS;
-    while (!hub.ready(attempt.id)) {
+    for (;;) {
+      signal?.throwIfAborted();
       if (closing())
         throw new CommandError("unavailable", "Factory is stopping. No operation was dispatched.");
+      const [current] = await database.db
+        .select({ id: runtimeAttempt.id, state: runtimeAttempt.state })
+        .from(runtimeAttempt)
+        .where(eq(runtimeAttempt.workspaceId, workspaceID))
+        .orderBy(desc(runtimeAttempt.generation))
+        .limit(1);
+      if (current?.id !== attempt.id)
+        throw new CommandError("conflict", "Workspace compute changed during preparation");
+      // Connector hello can precede its persisted readiness update. Retain the
+      // ordinary ready fast path, but never release a waking Save before both.
+      if (
+        sourceOnly
+          ? ["starting", "ready"].includes(current.state) && hub.sourceConnected(attempt.id)
+          : current.state === "ready" && hub.ready(attempt.id)
+      )
+        break;
       const observed = await runtime.get(attempt.id);
+      signal?.throwIfAborted();
       if (observed?.state === "starting" && observed.native?.state === "ACTOR_STATE_SUSPENDED")
         throw new CommandError(
           "unavailable",
@@ -84,15 +132,8 @@ export function createWorkspaceComputeAccess(
         );
       await Bun.sleep(100);
     }
-    const [current] = await database.db
-      .select({ id: runtimeAttempt.id })
-      .from(runtimeAttempt)
-      .where(eq(runtimeAttempt.workspaceId, workspaceID))
-      .orderBy(desc(runtimeAttempt.generation))
-      .limit(1);
-    if (current?.id !== attempt.id)
-      throw new CommandError("conflict", "Workspace compute changed during preparation");
     await authorize();
+    signal?.throwIfAborted();
     return attempt.id;
   };
 }

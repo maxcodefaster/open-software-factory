@@ -1,4 +1,4 @@
-import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
+import type { CodingReasoning } from "#conversation-domain/model-settings";
 
 // Reviewed Azure model/version: gpt-6.1-sol-2026-09-29. Keep the selected
 // deployment's native context independent of a retained models.dev cache.

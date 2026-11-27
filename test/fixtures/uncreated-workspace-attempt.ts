@@ -1,7 +1,7 @@
 import { z } from "zod";
+import type { createDatabase } from "#db/client";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
-import type { createDatabase } from "../../packages/db/src/client";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 
 const admission = z.strictObject({
   workspaceID: z.uuid(),
@@ -12,7 +12,10 @@ const admission = z.strictObject({
     .regex(/^[a-f0-9]{40}$/)
     .optional(),
   parentHash: z.string().regex(/^[a-f0-9]{64}$/),
-  childHash: z.string().regex(/^[a-f0-9]{64}$/),
+  childHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   connectorURL: z.url().refine((value) => {
     const url = new URL(value);
     return (
@@ -47,12 +50,12 @@ export async function recordUncreatedWorkspaceAttempt(
       throw Error("Uncreated native fixture admission requires an owned database and Workspace");
     await sql`INSERT INTO factory.runtime_attempt(
       id,project_id,change_id,workspace_id,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      parent_connector_token_hash,create_intended_at,created_by,
+      atespace,actor_name,binding_intent)
       VALUES(${attemptID},${scope.projectID},${scope.changeID},${input.workspaceID},
         ${input.generation},${input.revision ?? scope.revision},'create-intended',
-        ${input.parentHash},${input.childHash},now(),${input.createdBy})`;
-    await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},
+        ${input.parentHash},now(),${input.createdBy},
+        ${`fa-${attemptID.replaceAll("-", "")}`},
         ${`runtime-${attemptID.replaceAll("-", "")}`},
         ${JSON.stringify({ connectorURL: input.connectorURL, egressHosts: [] })}::jsonb)`;
     if (input.recordEnvironment) await freezeRuntimeEnvironment(sql, attemptID);

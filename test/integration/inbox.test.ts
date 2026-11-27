@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mentionText } from "#ticket-domain/attention";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { createInboxService } from "../../apps/factory/src/inbox/service";
-import { mentionText } from "../../packages/ticket-domain/src/attention";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -72,9 +72,9 @@ test("Inbox retains responsibility and personal receipts while deriving current 
     await expect(
       service.responsibility(owned.userID, owned.ticketID, { ...assignment, responsibleId: peer }),
     ).rejects.toThrow("identity changed");
-    expect(await database.client`SELECT id FROM factory.ticket_responsibility_event`).toHaveLength(
-      1,
-    );
+    expect(
+      await database.client`SELECT id FROM factory.audit_event WHERE kind='tickets.responsibility_event'`,
+    ).toHaveLength(1);
     expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
     expect(
       (await service.list(contributor)).items.some((item) => item.id.startsWith("responsibility:")),
@@ -382,7 +382,7 @@ test("responsibility CAS, retries and history share the owned transaction, inclu
     ]);
     expect(simultaneous.map((view) => view.version)).toEqual([1, 1]);
     const history =
-      await database.client`SELECT * FROM factory.ticket_responsibility_event ORDER BY id`;
+      await database.client`SELECT * FROM factory.audit_event WHERE kind='tickets.responsibility_event' ORDER BY id`;
     expect(history).toHaveLength(1);
     for (const changed of [
       { ...command, expectedVersion: 1 },
@@ -407,7 +407,7 @@ test("responsibility CAS, retries and history share the owned transaction, inclu
     await database.client`CREATE FUNCTION factory.reject_owned_inbox_event() RETURNS trigger
       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned Inbox event rejected'; END $$`;
     await database.client`CREATE TRIGGER reject_owned_inbox_event BEFORE INSERT
-      ON factory.ticket_responsibility_event FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_inbox_event()`;
+      ON factory.audit_event FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_inbox_event()`;
     await expect(
       service.responsibility(owned.userID, owned.ticketID, {
         commandId: crypto.randomUUID(),
@@ -423,9 +423,9 @@ test("responsibility CAS, retries and history share the owned transaction, inclu
       following: false,
     });
     expect(
-      await database.client`SELECT * FROM factory.ticket_responsibility_event ORDER BY id`,
+      await database.client`SELECT * FROM factory.audit_event WHERE kind='tickets.responsibility_event' ORDER BY id`,
     ).toEqual(history);
-    await database.client`DROP TRIGGER reject_owned_inbox_event ON factory.ticket_responsibility_event`;
+    await database.client`DROP TRIGGER reject_owned_inbox_event ON factory.audit_event`;
     await database.client`DROP FUNCTION factory.reject_owned_inbox_event()`;
     const cleared = await service.responsibility(owned.userID, owned.ticketID, {
       commandId: crypto.randomUUID(),
@@ -437,11 +437,11 @@ test("responsibility CAS, retries and history share the owned transaction, inclu
     expect(replay).toMatchObject({ responsibleId: null, version: 2 });
     expect((await service.ticket(peer, owned.ticketID)).following).toBe(false);
     expect(
-      await database.client`SELECT * FROM factory.ticket_responsibility_event WHERE id=${command.commandId}`,
+      await database.client`SELECT * FROM factory.audit_event WHERE kind='tickets.responsibility_event' AND id=${command.commandId}`,
     ).toEqual(history);
-    expect(await database.client`SELECT id FROM factory.ticket_responsibility_event`).toHaveLength(
-      2,
-    );
+    expect(
+      await database.client`SELECT id FROM factory.audit_event WHERE kind='tickets.responsibility_event'`,
+    ).toHaveLength(2);
     expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
 
     await database.client`UPDATE factory.ticket SET trashed_at=now(),trashed_by=${owned.userID} WHERE id=${owned.ticketID}`;
@@ -640,9 +640,14 @@ test("Inbox groups exact conversation, Coding and review targets without exposin
       messageB = crypto.randomUUID();
     await database.client`INSERT INTO factory.review_feedback(id,change_id,author_id,kind,state,commit_sha)
       VALUES(${feedbackID},${owned.changeID},${contributor},'thread','implemented',${"a".repeat(40)})`;
-    await database.client`INSERT INTO factory.review_feedback_message(id,feedback_id,author_id,body,created_at)
-      VALUES(${messageA},${feedbackID},${owned.userID},${`First feedback ${token}`},${new Date(1000).toISOString()}),
-        (${messageB},${feedbackID},${owned.userID},${`Latest feedback ${token}`},${new Date(2000).toISOString()})`;
+    await database.client`INSERT INTO factory.audit_event(id,kind,scope_type,scope_id,actor_id,payload,created_at)
+      VALUES
+        (${messageA},'review.feedback_message','review_feedback',${feedbackID},${owned.userID},
+          ${JSON.stringify({ feedbackId: feedbackID, authorId: owned.userID, body: `First feedback ${token}` })}::jsonb,
+          ${new Date(1000).toISOString()}),
+        (${messageB},'review.feedback_message','review_feedback',${feedbackID},${owned.userID},
+          ${JSON.stringify({ feedbackId: feedbackID, authorId: owned.userID, body: `Latest feedback ${token}` })}::jsonb,
+          ${new Date(2000).toISOString()})`;
     expect(
       (await service.list(contributor)).items.find((item) => item.id === `feedback:${feedbackID}`),
     ).toMatchObject({
@@ -805,7 +810,9 @@ test("technical-design and failed Coding attention follows current revisions, pa
       needsAction: true,
     });
     const history = await database.client`SELECT * FROM factory.agent_turn WHERE id=${failure.id}`;
-    await database.client`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${failure.id},'coding-budget-used')`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'usage.coding_pause','agent_turn',${failure.id},${`usage.coding_pause:${failure.id}`},'paused',
+        ${JSON.stringify({ turnId: failure.id, reason: "coding-budget-used", resumedByTurnId: null })}::jsonb)`;
     const paused = await service.list(owned.userID);
     expect(paused.items.some((item) => item.id === `turn:${failure.id}`)).toBe(false);
     expect(paused.items.find((item) => item.id === `pause:${failure.id}`)).toMatchObject({
@@ -834,7 +841,12 @@ test("technical-design and failed Coding attention follows current revisions, pa
         (item) => item.id === `pause:${failure.id}` || item.id === `turn:${failure.id}`,
       ),
     ).toBe(false);
-    await database.client`UPDATE factory.coding_pause SET resumed_by_turn_id=${replacement.id} WHERE turn_id=${failure.id}`;
+    await database.client`UPDATE factory.operation
+      SET state='resumed',
+        payload=payload || ${JSON.stringify({ resumedByTurnId: replacement.id })}::jsonb,
+        updated_at=now(),
+        completed_at=now()
+      WHERE kind='usage.coding_pause' AND idempotency_key=${`usage.coding_pause:${failure.id}`}`;
     expect(await database.client`SELECT * FROM factory.agent_turn WHERE id=${failure.id}`).toEqual(
       history,
     );
@@ -893,9 +905,9 @@ test("review, Verification and editing requests retain exact candidate and write
     expect(reviews.items.some((item) => item.id === reviewID)).toBe(false);
     expect(reviews.items.some((item) => item.id === `review:${newerReview}`)).toBe(true);
     const newerCheck = crypto.randomUUID();
-    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
       created_by,state,created_at)
-      VALUES(${newerCheck},${owned.changeID},${"e".repeat(40)},1,'owned-inbox-check',${owned.userID},'pending',${new Date(Date.now() + 1000).toISOString()})`;
+      VALUES(${newerCheck},${owned.changeID},${"e".repeat(40)},1,${owned.userID},'pending',${new Date(Date.now() + 1000).toISOString()})`;
     expect((await service.list(peer)).items.some((item) => item.id === checkID)).toBe(false);
     await database.client`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,
       branch_name,expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
@@ -912,8 +924,15 @@ test("review, Verification and editing requests retain exact candidate and write
     await database.client`UPDATE factory.change_writer SET state='human',user_id=${owned.userID},turn_id=NULL
       WHERE change_id=${owned.changeID}`;
     const requestID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.change_editing_request(id,change_id,requester_id,owner_id,writer_epoch)
-      SELECT ${requestID},change_id,${peer},user_id,epoch FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+    await database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      SELECT ${requestID},'access.change_editing_request','change',change_id::text,
+        ${`access.change_editing_request:${requestID}`},
+        'access.change_editing_request:'||change_id::text||':'||${peer}::text||':'||epoch::text,
+        'requested',
+        jsonb_build_object('changeId',change_id::text,'requesterId',${peer}::text,'ownerId',user_id::text,'writerEpoch',epoch,'decidedBy',NULL,'decidedAt',NULL),
+        ${peer}
+      FROM factory.change_writer WHERE change_id=${owned.changeID}`;
     expect(
       (await service.list(owned.userID)).items.find((item) => item.id === `editing:${requestID}`),
     ).toMatchObject({
@@ -931,18 +950,28 @@ test("review, Verification and editing requests retain exact candidate and write
       (await service.list(owned.userID)).items.some((item) => item.id === `editing:${requestID}`),
     ).toBe(false);
     const [retainedRequest] = await database.client<{ state: string }[]>`
-      SELECT state FROM factory.change_editing_request WHERE id=${requestID}`;
+      SELECT state FROM factory.operation WHERE id=${requestID} AND kind='access.change_editing_request'`;
     expect(retainedRequest?.state).toBe("requested");
     const currentRequest = crypto.randomUUID();
-    await database.client`INSERT INTO factory.change_editing_request(id,change_id,requester_id,owner_id,writer_epoch)
-      SELECT ${currentRequest},change_id,${peer},user_id,epoch FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+    await database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      SELECT ${currentRequest},'access.change_editing_request','change',change_id::text,
+        ${`access.change_editing_request:${currentRequest}`},
+        'access.change_editing_request:'||change_id::text||':'||${peer}::text||':'||epoch::text,
+        'requested',
+        jsonb_build_object('changeId',change_id::text,'requesterId',${peer}::text,'ownerId',user_id::text,'writerEpoch',epoch,'decidedBy',NULL,'decidedAt',NULL),
+        ${peer}
+      FROM factory.change_writer WHERE change_id=${owned.changeID}`;
     expect(
       (await service.list(owned.userID)).items.some(
         (item) => item.id === `editing:${currentRequest}`,
       ),
     ).toBe(true);
-    await database.client`UPDATE factory.change_editing_request SET state='accepted',decided_by=${owned.userID},decided_at=now()
-      WHERE id=${currentRequest}`;
+    await database.client`UPDATE factory.operation
+      SET state='accepted',active_key=NULL,
+        payload=payload||jsonb_build_object('decidedBy',${owned.userID}::text,'decidedAt',now()::text),
+        completed_at=now(),updated_at=now()
+      WHERE id=${currentRequest} AND kind='access.change_editing_request'`;
     expect(
       (await service.list(owned.userID)).items.some(
         (item) => item.id === `editing:${currentRequest}`,

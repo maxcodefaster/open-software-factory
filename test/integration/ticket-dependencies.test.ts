@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { createChangeController } from "../../apps/factory/src/change/controller";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { change as changeModel } from "../../packages/db/src/schema";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { changeIdentity } from "#change-domain/change";
+import { change as changeModel } from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
+import { zeroQueries, zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createChangeController } from "../../apps/factory/src/change/controller";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { substrateFixture } from "../fixtures/substrate";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 
@@ -140,8 +140,8 @@ async function fixture() {
     await database.client`INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userId}, 'Owned Dependency Developer', ${`dependency-${userId}@factory.local`}, true)`;
     for (const id of [projectId, otherProjectId]) {
-      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-        VALUES (${id}, ${`dependency-${id}`}, 'Owned Dependency Project', 'http://127.0.0.1:9/owned-process-fixture/dependencies.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+        VALUES (${id}, ${`dependency-${id}`}, 'Owned Dependency Project', 'http://127.0.0.1:9/owned-process-fixture/dependencies.git', 'main', '.factory/actor-template.json', ${administrator})`;
     }
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
       VALUES (${projectId}, ${userId}, 'developer', ${administrator})`;
@@ -212,8 +212,8 @@ async function fixture() {
       },
       async green(changeId: string) {
         const id = crypto.randomUUID();
-        await database.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number, action_run_id, runner_name, state, completed_at, created_by)
-          VALUES (${id}, ${changeId}, ${"d".repeat(40)}, 1, 1, 'owned-dependency', 'succeeded', now(), ${userId})`;
+        await database.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number, action_run_id, state, completed_at, created_by)
+          VALUES (${id}, ${changeId}, ${"d".repeat(40)}, 1, 1, 'succeeded', now(), ${userId})`;
         return id;
       },
       async delivered(ticketId: string, changeId: string, verificationId: string) {
@@ -221,10 +221,26 @@ async function fixture() {
         await database.client.begin(async (sql) => {
           await sql`INSERT INTO factory.delivery_approval(id, change_id, verification_id, commit_sha, approved_by)
             VALUES (${approvalId}, ${changeId}, ${verificationId}, ${"d".repeat(40)}, ${userId})`;
-          await sql`INSERT INTO factory.merge_operation(id, change_id, delivery_approval_id, pull_request_number, base_sha, commit_sha, idempotency_key, state, observed_default_sha, completed_at)
-            VALUES (${crypto.randomUUID()}, ${changeId}, ${approvalId}, 1, ${"a".repeat(40)}, ${"d".repeat(40)}, ${`owned-dependency-merge:${changeId}`}, 'succeeded', ${"d".repeat(40)}, now())`;
-          await sql`INSERT INTO factory.promotion_operation(id, change_id, project_id, commit_sha, state, completed_at)
-            VALUES (${crypto.randomUUID()}, ${changeId}, ${projectId}, ${"d".repeat(40)}, 'succeeded', now())`;
+          await sql`INSERT INTO factory.operation(
+            id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, result, created_by, completed_at)
+            VALUES (${crypto.randomUUID()}, 'delivery.merge', 'change', ${changeId},
+              ${`delivery.merge:owned-dependency-merge:${changeId}`}, NULL, 'succeeded',
+              jsonb_build_object(
+                'changeId', ${changeId}::text, 'commitSha', ${"d".repeat(40)}::text,
+                'baseSha', ${"a".repeat(40)}::text, 'pullRequestNumber', 1,
+                'approvalId', ${approvalId}::text, 'deliveryPolicyId', NULL::text
+              ),
+              jsonb_build_object('mergeSha', ${"d".repeat(40)}::text), ${userId}, now())`;
+          await sql`INSERT INTO factory.operation(
+            id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by, completed_at)
+            VALUES (${crypto.randomUUID()}, 'delivery.promotion', 'change', ${changeId},
+              ${`delivery.promotion:${changeId}:1`}, NULL, 'succeeded',
+              jsonb_build_object(
+                'changeId', ${changeId}::text, 'projectId', ${projectId}::text,
+                'commitSha', ${"d".repeat(40)}::text, 'previousRuntimeAttemptId', NULL::text,
+                'replacementRuntimeAttemptId', NULL::text, 'ordinal', 1,
+                'supersedesId', NULL::text, 'retryCommandId', NULL::text
+              ), ${userId}, now())`;
           await sql`UPDATE factory.change SET state = 'delivered' WHERE id = ${changeId}`;
           await sql`UPDATE factory.ticket SET state = 'done' WHERE id = ${ticketId}`;
         });
@@ -324,8 +340,8 @@ test("Change and Build commands require exact delivered prerequisites, not cance
     const verificationId = await owned.green(changeId);
     expect(await controller.start(second, ctx.userId, approvedSecond.commission)).toBeNull();
     const [waiting] = await database.client`
-      SELECT state,source_sha AS source,requirement_revision_id AS revision
-      FROM factory.implementation_order WHERE command_id=${approvedSecond.commission.commandID}`;
+      SELECT state,payload->>'sourceSha' AS source,(payload->>'requirementRevisionId')::uuid AS revision
+      FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${approvedSecond.commission.commandID}`;
     expect(waiting).toEqual({
       state: "waiting",
       source: "a".repeat(40),
@@ -336,7 +352,8 @@ test("Change and Build commands require exact delivered prerequisites, not cance
       await database.client`SELECT id FROM factory.change WHERE ticket_id = ${second}`,
     ).toHaveLength(0);
     expect(
-      await database.client`SELECT id FROM factory.branch_create_operation WHERE change_id = ${approvedSecond.changeID}`,
+      await database.client`SELECT id FROM factory.operation
+        WHERE kind = 'delivery.branch_create' AND scope_type = 'change' AND scope_id = ${approvedSecond.changeID}`,
     ).toHaveLength(0);
 
     await owned.delivered(first, changeId, verificationId);
@@ -411,8 +428,8 @@ test("dependency admission rereads after a planning write and late edges lose to
     await writer;
     expect(await starting).toBeNull();
     const [waiting] = await database.client`
-      SELECT state,requirement_revision_id AS revision FROM factory.implementation_order
-      WHERE command_id=${approved.commission.commandID}`;
+      SELECT state,(payload->>'requirementRevisionId')::uuid AS revision FROM factory.operation
+      WHERE kind='tickets.implementation_order' AND id=${approved.commission.commandID}`;
     expect(waiting).toEqual({ state: "waiting", revision: approved.revisionId });
     await expect(directStarting).rejects.toThrow("Waiting delivery");
     await expect(owned.change(approved)).rejects.toThrow("Waiting delivery");
@@ -600,7 +617,8 @@ test("a dependent Change resolves the current delivered default after waiting fo
     expect(current?.branchHeadSha).toBe(defaultSHA);
     const [intent] = await owned.database.client<
       Array<{ startSha: string }>
-    >`SELECT start_sha AS "startSha" FROM factory.branch_create_operation WHERE change_id = ${change?.id ?? ""}`;
+    >`SELECT payload->>'startSha' AS "startSha" FROM factory.operation
+      WHERE kind = 'delivery.branch_create' AND scope_type = 'change' AND scope_id = ${change?.id ?? ""}`;
     expect(intent?.startSha).toBe(defaultSHA);
     expect((await controller.start(second, owned.ctx.userId, approvedSecond.commission))?.id).toBe(
       change?.id,

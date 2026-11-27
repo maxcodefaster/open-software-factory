@@ -3,12 +3,9 @@ import { z } from "zod";
 import {
   modelConnectionWrite,
   modelRoleConnectionInput,
-} from "../../../../packages/conversation-domain/src/model-connection";
-import {
-  personalModelInput,
-  projectModelInput,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
-import { modelDefaultsInput } from "../../../../packages/conversation-domain/src/model-settings";
+} from "#conversation-domain/model-connection";
+import { personalModelInput, projectModelInput } from "#conversation-domain/model-inheritance";
+import { modelDefaultsInput } from "#conversation-domain/model-settings";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

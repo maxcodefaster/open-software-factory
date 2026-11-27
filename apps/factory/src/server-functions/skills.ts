@@ -1,14 +1,8 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
-import {
-  skillChoiceInput,
-  skillLibrarySaveInput,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import {
-  type SkillRole,
-  skillRoleInput,
-} from "../../../../packages/conversation-domain/src/skills";
+import { libraryCoverInput } from "#conversation-domain/library-covers";
+import { skillChoiceInput, skillLibrarySaveInput } from "#conversation-domain/skill-library";
+import { type SkillRole, skillRoleInput } from "#conversation-domain/skills";
 import { repositorySkillImportInput, skillImportInput, skillShareInput } from "../skills/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

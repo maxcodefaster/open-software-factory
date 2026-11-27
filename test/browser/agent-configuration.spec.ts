@@ -1,12 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -104,8 +104,8 @@ test("admitted configuration is readable, private to Project members, and distin
     const member = users[0];
     const nonMember = users[1];
     if (!member || !nonMember) throw new Error("Owned accounts missing");
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`config-qa-${short}`}, ${title}, 'https://example.invalid/configuration.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`config-qa-${short}`}, ${title}, 'https://example.invalid/configuration.git', 'main', '.factory/actor-template.json', ${administrator})`;
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
       VALUES (${projectID}, ${member.id}, 'developer', ${administrator})`;
     await database.client`INSERT INTO factory.ticket(id, project_id, title, created_by)
@@ -148,7 +148,11 @@ test("admitted configuration is readable, private to Project members, and distin
     const owner = await turns.claimPending(admitted.turn.id);
     if (!owner?.ownerToken) throw new Error("Owned Turn lease missing");
     await turns.beginDispatch(owner.id, owner.ownerToken);
-    await database.client`INSERT INTO factory.agent_turn_skill(turn_id, revision_id) VALUES (${owner.id}, ${revisionID})`;
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'coding.turn_skill','agent_turn',${owner.id},
+        ${`coding.turn_skill:${owner.id}:${revisionID}`},'loaded',
+        ${JSON.stringify({ turnId: owner.id, revisionId: revisionID, loadedAt: new Date().toISOString() })}::jsonb)`;
     await turns.settle(
       owner.id,
       owner.ownerToken,
@@ -271,7 +275,7 @@ test("admitted configuration is readable, private to Project members, and distin
         >`SELECT id FROM factory.project WHERE id = ${projectID}
           AND slug = ${`config-qa-${short}`} AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id = ${projectID})`;
         if (safe) {
-          await sql`DELETE FROM factory.forge_grant_intent WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.operation WHERE kind='forge.grant' AND payload->>'projectId'=${projectID}`;
           await sql`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
           await sql`DELETE FROM factory.ticket_conversation WHERE project_id = ${projectID}`;
           await sql`DELETE FROM factory.ticket WHERE project_id = ${projectID}`;
@@ -280,18 +284,19 @@ test("admitted configuration is readable, private to Project members, and distin
           throw new Error("Owned configuration fixture acquired a runtime; cleanup refused");
         }
         await sql`SET LOCAL session_replication_role = replica`;
-        await sql`DELETE FROM factory.skill_library_revision WHERE library_id = ${libraryID}`;
-        await sql`DELETE FROM factory.skill_library_cover WHERE library_id = ${libraryID}`;
-        await sql`DELETE FROM factory.skill_library WHERE id = ${libraryID}`;
-        await sql`DELETE FROM factory.skill_publication WHERE revision_id = ${revisionID}`;
         await sql`DELETE FROM factory.skill_revision WHERE id = ${revisionID} AND skill_key = ${`library-${libraryID}`}`;
+        await sql`DELETE FROM factory.skill_library WHERE id = ${libraryID}`;
+        for (const user of users)
+          await sql`DELETE FROM factory.audit_event WHERE actor_id=${user.id}`;
         // Restore constraints and cascades before deleting owned identities.
         await sql`SET LOCAL session_replication_role = origin`;
         for (const user of users) {
-          await sql`DELETE FROM factory.forge_grant_intent WHERE user_id=${user.id}`;
+          await sql`DELETE FROM factory.operation
+            WHERE (kind='forge.grant' AND payload->>'userId'=${user.id})
+               OR (kind='forge.account' AND scope_type='user' AND scope_id=${user.id})
+               OR created_by=${user.id}`;
           await sql`DELETE FROM auth.account WHERE user_id=${user.id}`;
-          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${user.id}`;
-          await sql`DELETE FROM factory.developer_ide WHERE user_id=${user.id} AND state='stopped'`;
+          await sql`DELETE FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${user.id} AND state='stopped'`;
           await sql`DELETE FROM auth."user" WHERE id = ${user.id} AND email = ${user.email}`;
         }
       });

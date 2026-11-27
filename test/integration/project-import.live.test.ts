@@ -3,11 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { createForgejoClient } from "#forge/forge";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
 import { createImportSecrets } from "../../apps/factory/src/setup/secrets";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { assistedImportRuntime } from "../fixtures/assisted-import-runtime";
@@ -474,7 +474,8 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
       ).toBe(result?.projectID);
       expect(authenticatedRequests).toBe(beforeReplay);
       expect(await secrets.read(`imports/${draft.id}/${commandID}`)).toBeUndefined();
-      const rows = await database.client`SELECT * FROM factory.project_repository_intent`;
+      const rows =
+        await database.client`SELECT *, result->>'credentialRemovedAt' AS credential_removed_at FROM factory.operation WHERE kind='projects.repository_intent'`;
       expect(rows).toHaveLength(1);
       expect(rows[0]?.["credential_removed_at"]).not.toBeNull();
       expect(JSON.stringify(rows)).not.toContain(sourceToken);

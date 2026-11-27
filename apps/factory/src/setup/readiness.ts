@@ -1,19 +1,15 @@
 import { createHmac } from "node:crypto";
-import { and, asc, eq, exists, sql as expression, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, eq, exists, sql as expression, isNull, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  knowledgeGeneration,
-  project,
-  projectImagePreparation,
-  projectRepositoryIntent,
-  projectSetupReadiness,
-  runtimeAttempt,
-} from "../../../../packages/db/src/schema";
-import { type SetupTask, setupTask } from "../../../../packages/project-domain/src/setup";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { operation, project, runtimeAttempt } from "#db/schema";
+import { type SetupTask, setupTask } from "#project-domain/setup";
 import { createAccessController } from "../access/api";
 import { projectAuthorityIn } from "../access/authority";
-import { type createEnvironmentController } from "../environments/api";
+import type { createEnvironmentController } from "../environments/api";
+
+const readinessKey = (projectID: string, task: SetupTask) =>
+  `projects.setup_readiness:${projectID}:${task}`;
 
 export function createSetupReadiness(input: {
   database: ReturnType<typeof createDatabase>;
@@ -22,7 +18,6 @@ export function createSetupReadiness(input: {
   protection(projectID: string): Promise<void>;
   hook(projectID: string): Promise<void>;
   wiki(projectID: string, userID: string, automatic: boolean): Promise<string>;
-  prepare(projectID: string): Promise<{ development: string; preview: string }>;
   preview(projectID: string, userID: string): Promise<string>;
   requiredVariables?(projectID: string): Promise<readonly string[]>;
 }) {
@@ -36,101 +31,110 @@ export function createSetupReadiness(input: {
   async function status(projectID: string, userID: string) {
     await access.requireProject(userID, projectID);
     // Observe the admitted operation, never an unrelated newer generation.
+    const generation = alias(operation, "generation");
     await db
-      .update(projectSetupReadiness)
+      .update(operation)
       .set({
-        state: expression`CASE ${knowledgeGeneration.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
-        failure: expression`CASE WHEN ${knowledgeGeneration.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+        state: expression`CASE ${generation.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
+        error: expression`CASE WHEN ${generation.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+        completedAt: expression`CASE WHEN ${generation.state} IN ('succeeded','failed') THEN COALESCE(${operation.completedAt}, now()) ELSE NULL END`,
+        updatedAt: expression`now()`,
       })
-      .from(knowledgeGeneration)
+      .from(generation)
       .where(
         and(
-          eq(projectSetupReadiness.projectId, projectID),
-          eq(projectSetupReadiness.task, "wiki"),
-          eq(projectSetupReadiness.state, "running"),
-          eq(knowledgeGeneration.projectId, projectSetupReadiness.projectId),
-          eq(knowledgeGeneration.id, projectSetupReadiness.operationId),
+          eq(operation.kind, "projects.setup_readiness"),
+          eq(operation.scopeType, "project"),
+          eq(operation.scopeId, projectID),
+          eq(operation.idempotencyKey, readinessKey(projectID, "wiki")),
+          eq(operation.state, "running"),
+          eq(generation.kind, "knowledge.generation"),
+          eq(generation.scopeType, "project"),
+          eq(generation.scopeId, projectID),
+          expression`${generation.id}::text = ${operation.result}->>'operationId'`,
         ),
       );
     await db
-      .update(projectSetupReadiness)
+      .update(operation)
       .set({
         state: expression`CASE ${runtimeAttempt.state} WHEN 'ready' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'cleanup-failed' THEN 'failed' WHEN 'stopped' THEN 'failed' ELSE 'running' END`,
-        failure: expression`CASE WHEN ${runtimeAttempt.state} IN ('failed','cleanup-failed','stopped') THEN 'Main-Preview startup needs retry.' ELSE NULL END`,
+        error: expression`CASE WHEN ${runtimeAttempt.state} IN ('failed','cleanup-failed','stopped') THEN 'Main-Preview startup needs retry.' ELSE NULL END`,
+        completedAt: expression`CASE WHEN ${runtimeAttempt.state} IN ('ready','failed','cleanup-failed','stopped') THEN COALESCE(${operation.completedAt}, now()) ELSE NULL END`,
+        updatedAt: expression`now()`,
       })
       .from(runtimeAttempt)
       .where(
         and(
-          eq(projectSetupReadiness.projectId, projectID),
-          eq(projectSetupReadiness.task, "main-preview"),
-          eq(projectSetupReadiness.state, "running"),
-          eq(runtimeAttempt.projectId, projectSetupReadiness.projectId),
-          eq(runtimeAttempt.id, projectSetupReadiness.operationId),
-        ),
-      );
-    await db
-      .update(projectSetupReadiness)
-      .set({
-        state: expression`CASE ${projectImagePreparation.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' WHEN 'unsupported' THEN 'ready' ELSE 'running' END`,
-        failure: expression`CASE ${projectImagePreparation.state} WHEN 'failed' THEN 'Image preparation needs attention. Normal startup remains available.' WHEN 'unsupported' THEN 'This configuration uses normal startup instead of a prebuilt image.' ELSE NULL END`,
-      })
-      .from(projectImagePreparation)
-      .where(
-        and(
-          eq(projectSetupReadiness.projectId, projectID),
-          inArray(projectSetupReadiness.task, ["development", "preview-image"]),
-          eq(projectSetupReadiness.state, "running"),
-          eq(projectImagePreparation.projectId, projectSetupReadiness.projectId),
-          eq(projectImagePreparation.id, projectSetupReadiness.operationId),
+          eq(operation.kind, "projects.setup_readiness"),
+          eq(operation.scopeType, "project"),
+          eq(operation.scopeId, projectID),
+          eq(operation.idempotencyKey, readinessKey(projectID, "main-preview")),
+          eq(operation.state, "running"),
+          eq(runtimeAttempt.projectId, projectID),
+          expression`${runtimeAttempt.id}::text = ${operation.result}->>'operationId'`,
         ),
       );
     return db
       .select({
-        task: expression<SetupTask>`${projectSetupReadiness.task}`,
-        state: projectSetupReadiness.state,
-        commandID: projectSetupReadiness.commandId,
-        operationID: projectSetupReadiness.operationId,
-        failure: projectSetupReadiness.failure,
+        task: expression<SetupTask>`${operation.payload}->>'task'`,
+        state: expression<"pending" | "running" | "ready" | "failed">`${operation.state}`,
+        commandID: expression<string>`${operation.payload}->>'commandId'`,
+        operationID: expression<string | null>`${operation.result}->>'operationId'`,
+        failure: operation.error,
       })
-      .from(projectSetupReadiness)
-      .where(eq(projectSetupReadiness.projectId, projectID))
-      .orderBy(asc(projectSetupReadiness.task));
+      .from(operation)
+      .where(
+        and(
+          eq(operation.kind, "projects.setup_readiness"),
+          eq(operation.scopeType, "project"),
+          eq(operation.scopeId, projectID),
+        ),
+      )
+      .orderBy(asc(expression`${operation.payload}->>'task'`));
   }
 
   async function observeWikiRetry(projectID: string, userID: string, generationID: string) {
     await sql.begin(async (transaction) => {
       const tx = drizzleTransaction(transaction);
-      const previous = alias(knowledgeGeneration, "previous");
+      const generation = alias(operation, "generation");
+      const previous = alias(operation, "previous");
       await projectAuthorityIn(transaction, userID, projectID);
       // Only the authenticated retry's returned operation can replace a failed
       // setup observation. Ordinary reads and newer background work cannot.
       await tx
-        .update(projectSetupReadiness)
+        .update(operation)
         .set({
-          operationId: knowledgeGeneration.id,
-          state: expression`CASE ${knowledgeGeneration.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
-          failure: expression`CASE WHEN ${knowledgeGeneration.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+          result: expression`jsonb_build_object('operationId', ${generation.id}::text)`,
+          state: expression`CASE ${generation.state} WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END`,
+          error: expression`CASE WHEN ${generation.state}='failed' THEN 'Wiki generation needs retry.' ELSE NULL END`,
+          completedAt: expression`CASE WHEN ${generation.state} IN ('succeeded','failed') THEN now() ELSE NULL END`,
           updatedAt: expression`now()`,
         })
-        .from(knowledgeGeneration)
+        .from(generation)
         .where(
           and(
-            eq(projectSetupReadiness.projectId, projectID),
-            eq(projectSetupReadiness.task, "wiki"),
-            eq(knowledgeGeneration.id, generationID),
-            eq(knowledgeGeneration.projectId, projectSetupReadiness.projectId),
+            eq(operation.kind, "projects.setup_readiness"),
+            eq(operation.scopeType, "project"),
+            eq(operation.scopeId, projectID),
+            eq(operation.idempotencyKey, readinessKey(projectID, "wiki")),
+            eq(generation.kind, "knowledge.generation"),
+            eq(generation.scopeType, "project"),
+            eq(generation.scopeId, projectID),
+            eq(generation.id, generationID),
             or(
-              eq(projectSetupReadiness.state, "failed"),
+              eq(operation.state, "failed"),
               and(
-                eq(projectSetupReadiness.state, "running"),
+                eq(operation.state, "running"),
                 exists(
                   tx
                     .select({ id: previous.id })
                     .from(previous)
                     .where(
                       and(
-                        eq(previous.id, projectSetupReadiness.operationId),
-                        eq(previous.projectId, projectSetupReadiness.projectId),
+                        eq(previous.kind, "knowledge.generation"),
+                        eq(previous.scopeType, "project"),
+                        eq(previous.scopeId, projectID),
+                        expression`${previous.id}::text = ${operation.result}->>'operationId'`,
                         eq(previous.state, "failed"),
                       ),
                     ),
@@ -144,63 +148,91 @@ export function createSetupReadiness(input: {
 
   async function seed(projectID: string, userID: string) {
     await access.requireProject(userID, projectID, true);
-    for (const name of setupTask.options)
+    for (const name of setupTask.options) {
       await db
-        .insert(projectSetupReadiness)
-        .values({ projectId: projectID, task: name, commandId: crypto.randomUUID() })
+        .insert(operation)
+        .values({
+          id: crypto.randomUUID(),
+          kind: "projects.setup_readiness",
+          scopeType: "project",
+          scopeId: projectID,
+          idempotencyKey: readinessKey(projectID, name),
+          state: "pending",
+          payload: { task: name, commandId: crypto.randomUUID() },
+          createdBy: userID,
+        })
         .onConflictDoNothing({
-          target: [projectSetupReadiness.projectId, projectSetupReadiness.task],
+          target: operation.idempotencyKey,
         });
+    }
   }
 
   async function task(
     projectID: string,
     userID: string,
     name: SetupTask,
-    operation: (commandID: string) => Promise<string | undefined>,
+    work: (commandID: string) => Promise<string | undefined>,
     failure = "This step needs attention. Other work stays available.",
   ) {
     await access.requireProject(userID, projectID, true);
     const [claim] = await db
-      .update(projectSetupReadiness)
-      .set({ state: "running", failure: null, operationId: null, updatedAt: expression`now()` })
+      .update(operation)
+      .set({
+        state: "running",
+        error: null,
+        result: null,
+        completedAt: null,
+        updatedAt: expression`now()`,
+      })
       .where(
         and(
-          eq(projectSetupReadiness.projectId, projectID),
-          eq(projectSetupReadiness.task, name),
-          eq(projectSetupReadiness.state, "pending"),
+          eq(operation.kind, "projects.setup_readiness"),
+          eq(operation.scopeType, "project"),
+          eq(operation.scopeId, projectID),
+          eq(operation.idempotencyKey, readinessKey(projectID, name)),
+          eq(operation.state, "pending"),
         ),
       )
-      .returning({ commandID: projectSetupReadiness.commandId });
+      .returning({ commandID: expression<string>`${operation.payload}->>'commandId'` });
     if (!claim) return;
     try {
-      const operationID = await operation(claim.commandID);
+      const operationID = await work(claim.commandID);
       await db
-        .update(projectSetupReadiness)
+        .update(operation)
         .set({
           state: operationID ? "running" : "ready",
-          operationId: operationID ?? null,
-          failure: null,
+          result: operationID ? { operationId: operationID } : null,
+          error: null,
+          completedAt: operationID ? null : expression`now()`,
           updatedAt: expression`now()`,
         })
         .where(
           and(
-            eq(projectSetupReadiness.projectId, projectID),
-            eq(projectSetupReadiness.task, name),
-            eq(projectSetupReadiness.commandId, claim.commandID),
-            eq(projectSetupReadiness.state, "running"),
+            eq(operation.kind, "projects.setup_readiness"),
+            eq(operation.scopeType, "project"),
+            eq(operation.scopeId, projectID),
+            eq(operation.idempotencyKey, readinessKey(projectID, name)),
+            expression`${operation.payload}->>'commandId' = ${claim.commandID}`,
+            eq(operation.state, "running"),
           ),
         );
     } catch {
       await db
-        .update(projectSetupReadiness)
-        .set({ state: "failed", failure, updatedAt: expression`now()` })
+        .update(operation)
+        .set({
+          state: "failed",
+          error: failure,
+          completedAt: expression`now()`,
+          updatedAt: expression`now()`,
+        })
         .where(
           and(
-            eq(projectSetupReadiness.projectId, projectID),
-            eq(projectSetupReadiness.task, name),
-            eq(projectSetupReadiness.commandId, claim.commandID),
-            eq(projectSetupReadiness.state, "running"),
+            eq(operation.kind, "projects.setup_readiness"),
+            eq(operation.scopeType, "project"),
+            eq(operation.scopeId, projectID),
+            eq(operation.idempotencyKey, readinessKey(projectID, name)),
+            expression`${operation.payload}->>'commandId' = ${claim.commandID}`,
+            eq(operation.state, "running"),
           ),
         );
     }
@@ -250,27 +282,23 @@ export function createSetupReadiness(input: {
       await input.environments.save(projectID, userID, environment, {
         commandID,
         version: 0,
-        registries: [],
         variables: [
           {
             name: "POSTGRES_PASSWORD",
             value: password,
             runtime: true,
-            build: false,
             verification: true,
           },
           {
             name: "DATABASE_URL",
-            value: `postgresql://app:${password}@postgres:5432/app`,
+            value: `postgresql://app:${password}@127.0.0.1:5432/app`,
             runtime: true,
-            build: false,
             verification: true,
           },
           {
             name: "BETTER_AUTH_SECRET",
             value: value("auth"),
             runtime: true,
-            build: false,
             verification: true,
           },
         ],
@@ -299,13 +327,20 @@ export function createSetupReadiness(input: {
         // Missing acknowledgements never authorize another paid generation.
         if (recovering)
           await db
-            .update(projectSetupReadiness)
-            .set({ state: "failed", failure: "Setup was interrupted. Check and retry this step." })
+            .update(operation)
+            .set({
+              state: "failed",
+              error: "Setup was interrupted. Check and retry this step.",
+              completedAt: expression`now()`,
+              updatedAt: expression`now()`,
+            })
             .where(
               and(
-                eq(projectSetupReadiness.projectId, projectID),
-                eq(projectSetupReadiness.state, "running"),
-                isNull(projectSetupReadiness.operationId),
+                eq(operation.kind, "projects.setup_readiness"),
+                eq(operation.scopeType, "project"),
+                eq(operation.scopeId, projectID),
+                eq(operation.state, "running"),
+                expression`${operation.result}->>'operationId' IS NULL`,
               ),
             );
         if (starter) await task(projectID, userID, "configuration", async () => undefined);
@@ -339,12 +374,6 @@ export function createSetupReadiness(input: {
         const ready = await status(projectID, userID);
         const isReady = (name: SetupTask) =>
           ready.some((row) => row.task === name && row.state === "ready");
-        if (isReady("development-secrets") && isReady("preview-secrets")) {
-          let images: Awaited<ReturnType<typeof input.prepare>> | undefined;
-          const prepare = async () => (images ??= await input.prepare(projectID));
-          await task(projectID, userID, "development", async () => (await prepare()).development);
-          await task(projectID, userID, "preview-image", async () => (await prepare()).preview);
-        }
         if (isReady("preview-secrets"))
           await task(projectID, userID, "main-preview", () => input.preview(projectID, userID));
       } finally {
@@ -376,37 +405,63 @@ export function createSetupReadiness(input: {
     await access.requireProject(userID, projectID, true);
     await status(projectID, userID);
     await db
-      .update(projectSetupReadiness)
-      .set({ state: "pending", failure: null, operationId: null })
+      .update(operation)
+      .set({
+        state: "pending",
+        error: null,
+        result: null,
+        completedAt: null,
+        updatedAt: expression`now()`,
+      })
       .where(
         and(
-          eq(projectSetupReadiness.projectId, projectID),
-          eq(projectSetupReadiness.task, name),
-          eq(projectSetupReadiness.state, "failed"),
+          eq(operation.kind, "projects.setup_readiness"),
+          eq(operation.scopeType, "project"),
+          eq(operation.scopeId, projectID),
+          eq(operation.idempotencyKey, readinessKey(projectID, name)),
+          eq(operation.state, "failed"),
         ),
       );
     await start(projectID, userID, starter, false, name === "wiki");
   }
   async function recover() {
     if (stopping) return;
+    const repoIntent = alias(operation, "repo_intent");
+    const readiness = alias(operation, "setup_readiness");
     const projects = await db
       .select({
         id: project.id,
-        userID: expression<string>`COALESCE(${projectRepositoryIntent.userId},${project.createdBy})`,
-        starter: expression<boolean>`COALESCE(${projectRepositoryIntent.kind}='starter',false)`,
+        userID: expression<string>`COALESCE(${repoIntent.createdBy},${project.createdBy})`,
+        starter: expression<boolean>`COALESCE((${repoIntent.payload}->>'kind')='starter',false)`,
       })
       .from(project)
-      .leftJoin(projectRepositoryIntent, eq(projectRepositoryIntent.projectId, project.id))
+      .leftJoin(
+        repoIntent,
+        and(
+          eq(repoIntent.kind, "projects.repository_intent"),
+          eq(repoIntent.scopeType, "project"),
+          eq(
+            repoIntent.idempotencyKey,
+            expression<string>`'projects.repository_intent:' || ${project.id}::text`,
+          ),
+        ),
+      )
       .where(
         or(
-          eq(projectRepositoryIntent.state, "committed"),
+          eq(repoIntent.state, "committed"),
           and(
-            isNull(projectRepositoryIntent.projectId),
+            isNull(repoIntent.id),
             exists(
               db
-                .select({ projectID: projectSetupReadiness.projectId })
-                .from(projectSetupReadiness)
-                .where(eq(projectSetupReadiness.projectId, project.id)),
+                .select({ id: readiness.id })
+                .from(readiness)
+                .where(
+                  and(
+                    eq(readiness.kind, "projects.setup_readiness"),
+                    eq(readiness.scopeType, "project"),
+                    expression`${readiness.scopeId} = ${project.id}::text`,
+                  ),
+                ),
             ),
           ),
         ),

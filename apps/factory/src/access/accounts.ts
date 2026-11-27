@@ -1,8 +1,8 @@
 import { and, eq, sql as expression, isNull, ne, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { emergencyAdministratorID } from "../../../../packages/auth/src/policy";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { accountAccess, authSession, projectMembership } from "../../../../packages/db/src/schema";
+import { emergencyAdministratorID } from "#auth/policy";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { accountAccess, authSession, projectMembership } from "#db/schema";
 import { CommandError } from "../command-error";
 import { requireActiveAccountIn, requireSystemManagerIn } from "./authority";
 

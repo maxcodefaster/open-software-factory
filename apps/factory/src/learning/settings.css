@@ -1,12 +1,12 @@
 .work-settings {
   min-width: 0;
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 .work-history,
 .work-method {
-  margin-block: var(--space-3);
+  margin-block: var(--space-2);
 }
 .work-method[open] {
   display: grid;
@@ -34,19 +34,19 @@
   gap: var(--space-1);
 }
 .work-scope {
-  padding-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--line-subtle);
 }
 .work-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-4);
-  margin: var(--space-5) 0;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
   font-variant-numeric: tabular-nums;
 }
 .work-chart {
   border-block: 1px solid var(--line-subtle);
-  padding-block: var(--space-4);
+  padding-block: var(--space-3);
 }
 .work-chart-toolbar,
 .work-section-heading {
@@ -63,7 +63,7 @@
 }
 .work-chart-plot {
   width: 100%;
-  margin-top: var(--space-4);
+  margin-top: var(--space-3);
 }
 .work-chart-date {
   fill: var(--color-ink-muted);
@@ -110,7 +110,7 @@
   color: var(--color-ink-muted);
   line-height: var(--leading-body);
   min-height: 2.8em;
-  margin: var(--space-3) 0;
+  margin: var(--space-2) 0;
 }
 .work-chart-data,
 .work-review-history {
@@ -121,14 +121,14 @@
   margin-top: var(--space-3);
 }
 .work-learning {
-  margin-top: var(--space-6);
+  margin-top: var(--space-4);
 }
 .work-learning-state {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-2);
-  margin-block: var(--space-4) var(--space-3);
+  margin-block: var(--space-3) var(--space-2);
 }
 .work-state-dot {
   background: var(--color-ink-faint);
@@ -137,15 +137,15 @@
   border-radius: var(--radius-pill);
 }
 .work-empty {
-  margin-block: var(--space-5);
-  padding: var(--space-4);
+  margin-block: var(--space-4);
+  padding: var(--space-3);
   background: var(--material-panel);
   border-radius: var(--radius-sm);
 }
 .work-proposals,
 .work-created-tickets {
   padding: 0;
-  margin: var(--space-5) 0;
+  margin: var(--space-3) 0;
   list-style: none;
 }
 .work-proposal-heading {
@@ -169,8 +169,8 @@
 .work-edit-passages {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-  margin-block: var(--space-3);
+  gap: var(--space-3);
+  margin-block: var(--space-2);
 }
 .work-edit-release {
   display: flex;
@@ -184,11 +184,11 @@
   line-height: var(--leading-body);
 }
 .work-applied {
-  margin-block: var(--space-5);
+  margin-block: var(--space-4);
 }
 .work-automatic,
 .work-comparisons {
-  margin-block: var(--space-4);
+  margin-block: var(--space-3);
 }
 @media (max-width: 760px) {
   .work-edit-passages {
@@ -202,11 +202,11 @@
 }
 .work-review-history {
   border-top: 1px solid var(--line-subtle);
-  padding-top: var(--space-4);
+  padding-top: var(--space-3);
 }
 .work-review {
-  margin-top: var(--space-4);
-  padding: var(--space-3) 0;
+  margin-top: var(--space-3);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--line-subtle);
 }
 .work-case-result {
@@ -253,17 +253,17 @@
 }
 .work-scope button,
 .work-chart-metrics button {
-  border: 1px solid transparent;
+  border: 0;
   background: transparent;
   color: var(--color-ink-muted);
   border-radius: var(--radius-xs);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1-5) var(--space-2);
   font: inherit;
-  min-height: 36px;
+  min-height: var(--control-height);
 }
 .work-summary dt {
   color: var(--color-ink-muted);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
 }
 .work-summary dd {
   font-size: var(--text-lg);
@@ -332,9 +332,9 @@
 }
 .work-proposals > li {
   border-top: 1px solid var(--line-subtle);
-  padding-block: var(--space-4);
+  padding-block: var(--space-3);
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 .work-proposal-heading > span {
   font-size: var(--text-xs);
@@ -398,9 +398,7 @@
   gap: var(--space-1);
   margin-bottom: var(--space-3);
 }
-.work-review-history > summary {
-  display: list-item;
-}
+.work-review-history > summary,
 .work-review > summary {
   display: list-item;
 }
@@ -434,6 +432,10 @@
     box-sizing: border-box;
     min-height: 44px;
     padding-block: var(--space-3);
+  }
+  .work-scope button,
+  .work-chart-metrics button {
+    min-height: var(--touch-target);
   }
 }
 @media (max-width: 760px) {
@@ -527,13 +529,12 @@
 
 .learning-dashboard .work-review-now {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
   max-width: 72ch;
   min-width: 0;
   margin: var(--space-3) 0;
-  padding: var(--space-3);
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--line-subtle);
 }
 .work-review-now-actions {
   justify-content: flex-start;

@@ -1,8 +1,8 @@
 import { expect, mock, test } from "bun:test";
-import { buildBrowserToolCatalogue } from "../../../../packages/conversation-domain/src/browser-tools";
-import { candidateReviewToolCatalogue } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { buildBrowserToolCatalogue } from "#conversation-domain/browser-tools";
+import { candidateReviewToolCatalogue } from "#conversation-domain/candidate-review";
+import type { LearningCase } from "#conversation-domain/learning";
+import type { createDatabase } from "#db/client";
 import { memoryPrivateObjects } from "../../../../test/fixtures/private-objects";
 import type { SessionArchiveManifest } from "../agent/session-archive";
 import { objectDigest } from "../storage/objects";
@@ -159,15 +159,41 @@ function collection(
                   false,
                 ],
               ];
-      } else if (from("learning_policy")) {
+      } else if (from("operation") && values[0] === "learning.policy") {
         expect(transaction.depth).toBeGreaterThan(0);
-        const personal = query.includes('"owner_id" = $2');
-        expect(values).toEqual(personal ? [projectID, userID, false, 1] : [projectID, false, 1]);
-        policyOwners.push(personal ? values[1] : null);
+        const personal = query.includes('"idempotency_key" in');
+        expect(values).toEqual(
+          personal
+            ? [
+                "learning.policy",
+                "project",
+                projectID,
+                `learning.policy:${projectID}:project`,
+                `learning.policy:${projectID}:${userID}`,
+                "disabled",
+                1,
+              ]
+            : [
+                "learning.policy",
+                "project",
+                projectID,
+                `learning.policy:${projectID}:project`,
+                "disabled",
+                1,
+              ],
+        );
+        policyOwners.push(personal ? userID : null);
         rows = options.disabled ? [["owned-paused"]] : [];
-      } else if (from("session_archive")) {
+      } else if (from("operation") && values.includes("coding.session_archive")) {
         expect(transaction.depth).toBeGreaterThan(0);
-        expect(values).toEqual(["completed", turnID, projectID, "saved"]);
+        expect(values).toEqual([
+          "completed",
+          "coding.session_archive",
+          "agent_turn",
+          turnID,
+          projectID,
+          "saved",
+        ]);
         const saved = availability.saved;
         rows = saved
           ? [
@@ -205,7 +231,7 @@ function collection(
             !options.nonNative,
           ],
         ];
-      } else if (from("agent_turn_skill")) {
+      } else if (from("operation") && values.includes("coding.turn_skill")) {
         rows =
           options.personal || options.personalOutsideExcerpt
             ? [
@@ -222,7 +248,7 @@ function collection(
             : [];
       } else if (
         from("candidate_review") ||
-        from("review_feedback_command") ||
+        from("audit_event") ||
         from("technical_design_revision")
       ) {
         rows = [];
@@ -248,7 +274,7 @@ function collection(
             options.verificationPending ? null : new Date(),
           ],
         ];
-      } else if (from("learning_source_artifact")) {
+      } else if (from("operation") && values[0] === "learning.source_artifact") {
         rows = options.largeEvidence
           ? Array.from({ length: 3 }, (_, ordinal) => [
               ordinal,
@@ -371,13 +397,16 @@ test("selected completed Coding work retains safe checkpoint-bound tool counts a
   expect(source.snapshots[0]?.ownerId).toBeNull();
   expect(source.snapshots[0]?.developerOnly).toBe(true);
   expect(owned.read).toHaveBeenCalledTimes(2);
-  const query = source.queries.find((query) => query.includes('from "factory"."session_archive"'));
-  expect(query).toContain('"session_archive"."state" = $4');
+  const query = source.queries.find(
+    (query) =>
+      query.includes('from "factory"."operation"') && query.includes('"change_agent_turn_intent"'),
+  );
+  expect(query).toContain('"operation"."state" = $6');
   expect(query).toContain(
-    '"change_agent_turn_intent"."session_id" = "factory"."session_archive"."session_id"',
+    `"change_agent_turn_intent"."session_id" = "factory"."operation"."payload"->>'sessionId'`,
   );
   expect(query).toContain(
-    '"change_agent_turn_intent"."prompt_id" = "factory"."session_archive"."prompt_id"',
+    `"change_agent_turn_intent"."prompt_id" = "factory"."operation"."payload"->>'promptId'`,
   );
   expect(query).toContain(
     '"runtime_attempt"."change_id" = "factory"."agent_turn"."change_id" and "factory"."runtime_attempt"."project_id" = "factory"."agent_turn"."project_id"',
@@ -395,9 +424,13 @@ test.each(["disabled", "contributor"] as const)(
     await collectLearningCases(source.database, null, owned.objects);
     expect(source.snapshots).toEqual([]);
     expect(owned.read).not.toHaveBeenCalled();
-    expect(source.queries.some((query) => query.includes('from "factory"."session_archive"'))).toBe(
-      false,
-    );
+    expect(
+      source.queries.some(
+        (query) =>
+          query.includes('from "factory"."operation"') &&
+          query.includes('"change_agent_turn_intent"'),
+      ),
+    ).toBe(false);
     if (gate === "disabled") expect(source.policyOwners).toEqual([userID]);
   },
 );
@@ -916,6 +949,130 @@ test("all exact registered review names and pinned subagent classify without adm
   expect(item.body).not.toContain("PRIVATE");
   expect(item.body).not.toContain("Factory_browser");
   expect(item.truncated).toBe(false);
+});
+
+test.each(["actor-template.json", "system.json"])(
+  "native default Project config %s is private config discovery for explicit reads and simple cat",
+  async (name) => {
+    const path = `/PRIVATE/.factory/${name}`;
+    const owned = await archive([
+      configRead(path),
+      configRead(path),
+      configRead(path, 101),
+      tool("shell", `cat ${path}`),
+      tool("shell", `cat ${path}`),
+      tool("bash", `cat .factory/${name}`),
+    ]);
+    const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+    const packet = JSON.parse(item.body);
+    expect(packet.methods).toMatchObject([
+      { category: "config-discovery", calls: 6, repeated: true },
+    ]);
+    expect(packet.methods[0].groups.map((group: { calls: number }) => group.calls).sort()).toEqual([
+      1, 1, 2, 2,
+    ]);
+    expect(packet.tools).toEqual(
+      [
+        { tool: "bash", calls: 1 },
+        { tool: "read", calls: 3 },
+        { tool: "shell", calls: 2 },
+      ].map((entry) => ({
+        ...entry,
+        completed: entry.calls,
+        failed: 0,
+        unknown: 0,
+        timed: entry.calls,
+        elapsedMS: entry.calls * 15,
+      })),
+    );
+    expect(packet.coverage).toMatchObject({
+      toolCalls: 6,
+      shellCalls: 3,
+      classifiedShellCalls: 3,
+      inventoryComplete: true,
+      toolClassificationComplete: true,
+      methodInputsComplete: true,
+      omittedEquivalenceGroups: 0,
+      omittedEquivalenceCalls: 0,
+    });
+    expect(item.kind).toBe("artifact");
+    expect(item.truncated).toBe(false);
+    expect(owned.read).toHaveBeenCalledTimes(2);
+    for (const secret of ["PRIVATE", name, ".factory", "cat "]) {
+      expect(item.body).not.toContain(secret);
+    }
+    expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(4_000);
+  },
+);
+
+test.each(["actor-template.json", "system.json"])(
+  "native default Project config %s keeps shell discovery finite",
+  async (name) => {
+    const path = `/PRIVATE/.factory/${name}`;
+    const owned = await archive([
+      tool("shell", `echo "cat ${path}"`),
+      tool("shell", `cd /PRIVATE && cat ${path}`),
+      tool("shell", `cat ${path} | node PRIVATE`),
+      tool("shell", `cat ${path}; ps aux`),
+      tool("shell", `cat ${path}\nps aux`),
+      tool("shell", `cat ${path} /PRIVATE/package.json`),
+      tool("shell", `cat ${path}.bak`),
+      configRead(`${path}.bak`),
+    ]);
+    const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+    const packet = JSON.parse(item.body);
+    expect(packet.methods).toEqual([]);
+    expect(packet.coverage).toMatchObject({
+      toolCalls: 8,
+      shellCalls: 7,
+      classifiedShellCalls: 0,
+      inventoryComplete: true,
+      toolClassificationComplete: true,
+      methodInputsComplete: true,
+    });
+    expect(item.truncated).toBe(false);
+    expect(item.body).not.toContain("PRIVATE");
+    expect(item.body).not.toContain(name);
+  },
+);
+
+test.each([
+  "package.json",
+  "tsconfig.json",
+  "jsconfig.json",
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.production",
+  "vite.config.ts",
+  "vite.config.js",
+  "vite.config.mts",
+  "vite.config.mjs",
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "Dockerfile",
+])("known Project config %s remains observed for reads and simple cat", async (name) => {
+  const path = `/PRIVATE/${name}`;
+  const owned = await archive([configRead(path), tool("shell", `cat ${path}`)]);
+  const item = await readNativeToolEvidence(turnID, owned.saved, owned.objects);
+  const packet = JSON.parse(item.body);
+  expect(packet.methods).toMatchObject([
+    { category: "config-discovery", calls: 2, repeated: true },
+  ]);
+  expect(packet.methods[0].groups.map((group: { calls: number }) => group.calls)).toEqual([1, 1]);
+  expect(packet.coverage).toMatchObject({
+    toolCalls: 2,
+    shellCalls: 1,
+    classifiedShellCalls: 1,
+    inventoryComplete: true,
+    toolClassificationComplete: true,
+    methodInputsComplete: true,
+  });
+  expect(item.truncated).toBe(false);
+  expect(item.body).not.toContain("PRIVATE");
+  expect(item.body).not.toContain(name);
 });
 
 test("discovery equivalence distinguishes repeated explicit inputs, working directories and read pages privately", async () => {

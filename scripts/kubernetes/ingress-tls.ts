@@ -4,8 +4,8 @@ import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "
 import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
-import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
+import { runCommand } from "#runtime-kubernetes/command";
+import { serviceAccountConfiguration } from "#runtime-kubernetes/service-account";
 
 type Execute = (
   args: readonly string[],

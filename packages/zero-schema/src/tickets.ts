@@ -6,7 +6,7 @@ import {
   type ReadonlyJSONObject,
 } from "@rocicorp/zero";
 import { z } from "zod";
-import { canPlanTicket } from "../../ticket-domain/src/ticket";
+import { canPlanTicket } from "#ticket-domain/ticket";
 import { dependencyMutators } from "./dependencies";
 import { assignTicketEpicMutator, epicMutators } from "./epics";
 import { knowledgeMutators } from "./knowledge";

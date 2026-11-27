@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import type { runCommand } from "#runtime-kubernetes/command";
 import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
 const image = `registry.invalid/runtime-host@sha256:${"a".repeat(64)}`;

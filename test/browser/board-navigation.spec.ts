@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -92,10 +92,10 @@ test.beforeEach(async ({ page }, info) => {
         },
       },
     });
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
       VALUES(${id},${`navigation-${id}`},
         ${id === projectID ? "Product workspace" : "Another workspace with a deliberately long Project name"},
-        'https://example.invalid/navigation.git','main','.devcontainer/devcontainer.json',${session.user.id},'the-harvesters')`;
+        'https://example.invalid/navigation.git','main','.factory/actor-template.json',${session.user.id},'the-harvesters')`;
   }
   await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
     VALUES(${crypto.randomUUID()},${projectID},'Explore the onboarding flow','inbox',${session.user.id}),

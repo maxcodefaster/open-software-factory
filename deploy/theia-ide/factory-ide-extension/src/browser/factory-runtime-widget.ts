@@ -104,36 +104,101 @@ export class FactoryRuntimeWidget extends BaseWidget {
     this.#main.append(this.#output);
     this.node.append(this.#processList, this.#main);
     this.#contextSubscription = factoryRuntimeContext.subscribe((state) => {
+      const nextRuntime = readyRuntime(state);
+      if (
+        nextRuntime &&
+        this.#runtime &&
+        nextRuntime.workspaceID === this.#runtime.workspaceID &&
+        nextRuntime.attemptID === this.#runtime.attemptID
+      ) {
+        this.#connect();
+        return;
+      }
+      const computeFocused =
+        (this.node.contains(document.activeElement) &&
+          (document.activeElement as HTMLElement).dataset.control === "compute-lifecycle") ||
+        (document.activeElement === this.#output && this.#output.dataset.computeFocus === "true");
       this.#disconnect();
-      this.#runtime = readyRuntime(state);
+      this.#runtime = nextRuntime;
       this.#processes = [];
       this.#actionError = undefined;
       this.#processList.replaceChildren();
       this.#main.replaceChildren(this.#output);
       this.#output.textContent = runtimePreparationCopy(state);
-      if (!this.#runtime && state && ["failed", "stopped", "paused"].includes(state.state)) {
-        const label =
-          state.state === "failed"
-            ? "Retry compute"
-            : state.state === "paused"
-              ? "Resume compute"
-              : "Start compute";
-        const start = controlButton(label, () => void factoryRuntimeContext.prepare());
-        start.disabled = !factoryWriteContext.allows(state.workspaceID);
+      this.#output.setAttribute("aria-live", this.#runtime ? "off" : "polite");
+      if (
+        !this.#runtime &&
+        state &&
+        ["failed", "stopped", "paused", "pausing", "resuming", "pause-uncertain"].includes(
+          state.state,
+        )
+      ) {
+        const checking =
+          state.state === "pause-uncertain" ||
+          (["pausing", "resuming"].includes(state.state) && Boolean(state.failure));
+        const label = checking
+          ? state.state === "pause-uncertain"
+            ? "Check Pause"
+            : "Check compute status"
+          : state.state === "pausing"
+            ? "Pausing compute…"
+            : state.state === "resuming"
+              ? "Resuming compute…"
+              : state.state === "failed"
+                ? "Retry compute"
+                : state.state === "paused"
+                  ? "Resume compute"
+                  : "Start compute";
+        const pending = !checking && ["pausing", "resuming"].includes(state.state);
+        const start = controlButton(
+          label,
+          () =>
+            void (checking
+              ? state.state === "pause-uncertain"
+                ? factoryRuntimeContext.pause()
+                : factoryRuntimeContext.observe()
+              : factoryRuntimeContext.prepare()),
+          "compute-lifecycle",
+        );
+        start.disabled =
+          pending ||
+          (label !== "Check compute status" && !factoryWriteContext.allows(state.workspaceID));
+        start.setAttribute("aria-busy", String(pending));
         const controls = document.createElement("div");
         controls.className = "factory-compute-status";
+        controls.setAttribute("role", "status");
+        controls.setAttribute("aria-live", "polite");
         controls.append(start);
         this.#main.prepend(controls);
+      }
+      if (this.#runtime) this.#render();
+      if (computeFocused) {
+        const control = this.node.querySelector<HTMLButtonElement>(
+          '[data-control="compute-lifecycle"]',
+        );
+        // Keep keyboard focus in the Run panel while the native command is pending.
+        if (control?.disabled) {
+          this.#output.dataset.computeFocus = "true";
+          this.#output.tabIndex = -1;
+          this.#output.focus();
+        } else {
+          delete this.#output.dataset.computeFocus;
+          control?.focus();
+        }
       }
       this.#connect();
     });
     this.#writeSubscription = factoryWriteContext.subscribe(() => {
       if (this.#runtime) this.#render();
       const workspaceID = factoryRuntimeContext.value?.workspaceID;
-      for (const label of ["Start compute", "Resume compute", "Retry compute", "Start fresh"]) {
-        const start = this.node.querySelector<HTMLButtonElement>(`[data-control="${label}"]`);
-        if (start) start.disabled = !workspaceID || !factoryWriteContext.allows(workspaceID);
-      }
+      const start = this.node.querySelector<HTMLButtonElement>(
+        '[data-control="compute-lifecycle"]',
+      );
+      if (start && start.textContent !== "Check compute status")
+        start.disabled =
+          start.getAttribute("aria-busy") === "true" ||
+          !workspaceID ||
+          !factoryWriteContext.allows(workspaceID);
     });
     document.addEventListener("visibilitychange", this.#visibility);
   }
@@ -316,7 +381,18 @@ export class FactoryRuntimeWidget extends BaseWidget {
       outputSummary.focus();
       event.stopPropagation();
     });
-    header.append(processControls, outputOptions);
+    const workspaceControls = document.createElement("div");
+    const pause = controlButton(
+      "Pause compute",
+      () => void factoryRuntimeContext.pause(),
+      "compute-lifecycle",
+    );
+    pause.disabled = !this.#runtime || !factoryWriteContext.allows(this.#runtime.workspaceID);
+    pause.title = pause.disabled
+      ? "Observation mode. Request editing to pause shared compute."
+      : "Pause compute for all participants, retaining the environment and files. This is not Coding Stop.";
+    workspaceControls.append(pause, outputOptions);
+    header.append(processControls, workspaceControls);
 
     const wasAtBottom =
       this.#output.scrollHeight - this.#output.scrollTop - this.#output.clientHeight < 8;

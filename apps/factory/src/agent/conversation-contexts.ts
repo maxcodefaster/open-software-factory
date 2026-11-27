@@ -1,7 +1,7 @@
 import { and, eq, sql as query } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { change, changeAgentSession, ticketConversation } from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { change, changeAgentSession, ticketConversation } from "#db/schema";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { CommandError } from "../command-error";

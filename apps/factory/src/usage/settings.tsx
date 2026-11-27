@@ -1,12 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import {
-  type ExecutionPolicy,
-  executionPolicy,
-} from "../../../../packages/conversation-domain/src/execution-policy";
-import type {
-  currentComputeView,
-  UsageSettingsView,
-} from "../../../../packages/conversation-domain/src/usage-view";
+import { type ExecutionPolicy, executionPolicy } from "#conversation-domain/execution-policy";
+import type { currentComputeView, UsageSettingsView } from "#conversation-domain/usage-view";
 import { plainErrorMessage } from "../command-error";
 import { serverCall } from "../server-functions/result";
 import { getCurrentCompute, getUsage, saveUsage } from "../server-functions/usage";

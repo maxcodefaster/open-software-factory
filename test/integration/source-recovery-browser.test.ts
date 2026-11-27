@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/workspace/contracts";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -41,8 +41,8 @@ test("unavailable native file access can be rechecked without replacing Source, 
     if (!user) throw Error("Owned source recovery actor missing");
     const userID = String(user.id);
     workspaceID = personalWorkspaceIdentity(projectID, userID).workspaceID;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Source recovery fixture','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Source recovery fixture','https://example.invalid/owned','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${userID},'developer',${userID})`;
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)

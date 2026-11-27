@@ -4,7 +4,7 @@ import type {
   feedbackCreateInput,
   feedbackDispatchInput,
   feedbackUpdateInput,
-} from "../../../../packages/conversation-domain/src/visual-review";
+} from "#conversation-domain/visual-review";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

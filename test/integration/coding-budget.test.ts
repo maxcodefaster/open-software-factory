@@ -1,12 +1,68 @@
 import { expect, test } from "bun:test";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
+import { runtimeModelToken } from "#runtime-domain/identity";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createModelRelay } from "../../apps/factory/src/models/relay";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+
+test.each(["retained session", "before session"] as const)(
+  "failed capacity admission exposes failure instead of automatic wait without erasing the refusal: %s",
+  async (phase) => {
+    const owned = await fixture();
+    const controller = owned.controller();
+    try {
+      if (phase === "before session")
+        await owned.database
+          .client`DELETE FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
+      const accepted = await createChangeAdmission(owned.database, "owned-model").admit(
+        owned.changeID,
+        owned.userID,
+        phase === "before session"
+          ? { kind: "change-start", commandId: crypto.randomUUID() }
+          : {
+              kind: "change-prompt",
+              commandId: crypto.randomUUID(),
+              text: "Wait for owned capacity",
+            },
+      );
+      await owned.database.client`UPDATE factory.runtime_attempt SET state='starting'
+      WHERE id=${owned.attemptID}`;
+      await owned.database
+        .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${owned.attemptID},
+        ${`runtime.compute_wait:${owned.attemptID}`},'waiting',${JSON.stringify({ reason: "compute-capacity" })}::jsonb)`;
+      const before = await owned.database.client`
+        SELECT * FROM factory.operation
+        WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt' AND scope_id=${owned.attemptID}`;
+      expect((await controller.get(owned.changeID, undefined, false, false)).computeWait).toBe(
+        "compute-capacity",
+      );
+      const store = createAgentTurnStore(owned.database);
+      const leased = await store.claimPending(accepted.turn.id);
+      if (!leased?.ownerToken) throw Error("Owned capacity turn lease missing");
+      expect(
+        await store.failPending(leased.id, leased.ownerToken, "Owned capacity admission failed"),
+      ).toBe(true);
+      const failed = await controller.get(owned.changeID, undefined, false, false);
+      expect(failed.state).toBe("failed");
+      expect(failed.computeWait).toBeNull();
+      expect(
+        await owned.database.client`
+          SELECT * FROM factory.operation
+          WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt' AND scope_id=${owned.attemptID}`,
+      ).toEqual(before);
+      expect((await store.get(leased.id))?.state).toBe("failed");
+      expect(owned.requests()).toBe(0);
+    } finally {
+      await controller.shutdown();
+      await owned.dispose();
+    }
+  },
+  60_000,
+);
 
 test("commissioned Coding finishes its in-flight call, blocks subsequent inference and explicitly resumes exact pending input", async () => {
   const isolated = await factoryProcess(),
@@ -27,8 +83,17 @@ test("commissioned Coding finishes its in-flight call, blocks subsequent inferen
   try {
     const owned = await fixture(undefined, undefined, database),
       admission = createChangeAdmission(database, "owned-model");
-    await database.client`INSERT INTO factory.usage_rate_override(provider,model,version,rate,updated_by)
-      VALUES('openai','owned-model',1,${JSON.stringify({ provider: "openai", model: "owned-model", source: "contract", fetchedAt: new Date().toISOString(), tiers: [{ above: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }] })}::jsonb,${owned.userID})`;
+    const rateOverride = {
+      provider: "openai",
+      model: "owned-model",
+      source: "contract",
+      fetchedAt: new Date().toISOString(),
+      tiers: [{ above: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }],
+    };
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+      VALUES(${crypto.randomUUID()},'usage.rate_override','model','openai:owned-model',
+        ${`usage.rate_override:${encodeURIComponent("openai")}:${encodeURIComponent("owned-model")}`},NULL,'active',${owned.userID},
+        ${JSON.stringify({ provider: "openai", model: "owned-model", version: 1, rate: rateOverride, updatedBy: owned.userID })}::jsonb)`;
     const accepted = await admission.admit(owned.changeID, owned.userID, {
       kind: "change-prompt",
       commandId: crypto.randomUUID(),
@@ -100,7 +165,7 @@ test("commissioned Coding finishes its in-flight call, blocks subsequent inferen
     expect(calls).toBe(1);
     expect(
       (
-        await database.client`SELECT reason FROM factory.coding_pause WHERE turn_id=${actor.id}`
+        await database.client`SELECT payload->>'reason' AS reason FROM factory.operation WHERE kind='usage.coding_pause' AND scope_type='agent_turn' AND scope_id=${actor.id}`
       )[0]?.["reason"],
     ).toBe("finish-reserve-used");
     // A separately admitted pending turn waits without losing input or silently restarting.
@@ -156,8 +221,12 @@ test("controller resume preserves pending identity, replays one command and reje
     });
     await owned.writers.prepareAgent(owned.changeID, accepted.turn.id);
     await database.client`UPDATE factory.runtime_attempt SET state='create-intended' WHERE id=${owned.attemptID}`;
-    await database.client`INSERT INTO factory.runtime_compute_wait(attempt_id) VALUES(${owned.attemptID})`;
-    await database.client`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${accepted.turn.id},'finish-reserve-used')`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${owned.attemptID},
+        ${`runtime.compute_wait:${owned.attemptID}`},'waiting',${JSON.stringify({ reason: "compute-capacity" })}::jsonb)`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'usage.coding_pause','agent_turn',${accepted.turn.id},${`usage.coding_pause:${accepted.turn.id}`},'paused',
+        ${JSON.stringify({ turnId: accepted.turn.id, reason: "finish-reserve-used", resumedByTurnId: null })}::jsonb)`;
     await database.client`INSERT INTO factory.execution_policy(scope,version,policy,timezone,updated_by)
       VALUES('factory',1,${JSON.stringify({ ...defaultExecutionPolicy(), codingUSD: 0 })}::jsonb,'UTC',${owned.userID})`;
     controller = owned.controller();
@@ -211,7 +280,7 @@ test("automatic repair at an exhausted reserve retains one paused input for expl
     expect((await admission.admit(owned.changeID, owned.userID, input)).turn.id).toBe(work.turn.id);
     expect(await createAgentTurnStore(database).claimPending(work.turn.id)).toBeNull();
     expect(
-      await database.client`SELECT reason FROM factory.coding_pause WHERE turn_id=${work.turn.id}`,
+      await database.client`SELECT payload->>'reason' AS reason FROM factory.operation WHERE kind='usage.coding_pause' AND scope_type='agent_turn' AND scope_id=${work.turn.id}`,
     ).toHaveLength(1);
   } finally {
     await database.client.end();

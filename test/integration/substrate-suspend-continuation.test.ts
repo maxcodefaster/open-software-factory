@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
+import {
+  type NativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import {
   createSubstrateExecution,
   type SubstrateConfiguration,
 } from "../../apps/factory/src/runtime/substrate";
 import { intendActorRPCIn } from "../../apps/factory/src/runtime/substrate-rpc-facts";
-import {
-  type NativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 async function recoverOriginal(
@@ -18,7 +18,7 @@ async function recoverOriginal(
 ) {
   const [saved] = await f.database.client<
     { intent: SubstrateConfiguration & { actorSelector: Record<string, string> } }[]
-  >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+  >`SELECT binding_intent AS intent FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
   if (!saved) throw Error("Original binding is unavailable");
   const { actorSelector, ...configuration } = saved.intent;
   if (!f.config.workerSelector) throw Error("Original Actor selector is unavailable");
@@ -69,10 +69,15 @@ test.each([
     let original: Record<string, unknown> | undefined;
     const fact = async () => {
       const [row] = await f.database.client`
-        SELECT actor_uid::text,native_version,origin_key,attempted_at::text,outcome
-        FROM factory.substrate_actor_rpc
-        WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'
-        ORDER BY intended_at DESC LIMIT 1`;
+        SELECT payload->>'actorUid' AS actor_uid,
+          payload->>'nativeVersion' AS native_version,
+          payload->>'originKey' AS origin_key,
+          payload->>'attemptedAt' AS attempted_at,
+          result AS outcome
+        FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID} AND payload->>'action'='suspend'
+        ORDER BY created_at DESC LIMIT 1`;
       if (!row) throw Error("Original Suspend dispatch is unavailable");
       return row;
     };
@@ -242,8 +247,7 @@ test.each([
         expect(minted).toHaveLength(2);
         expect(await fact()).toEqual(original);
         const [saved] = await f.database
-          .client`SELECT checkpoint,state FROM factory.substrate_binding
-          JOIN factory.runtime_attempt ON id=runtime_attempt_id WHERE id=${f.attemptID}`;
+          .client`SELECT checkpoint,state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         expect(saved?.["state"]).toBe("pausing");
         const first = minted[0];
         if (!first) throw Error("Previous confirmed checkpoint is unavailable");
@@ -285,8 +289,9 @@ test.each([
         checkpoint: minted[1],
       });
       expect(
-        await f.database.client`SELECT action FROM factory.substrate_actor_rpc
-          WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`,
+        await f.database.client`SELECT payload->>'action' AS action FROM factory.operation
+          WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+            AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`,
       ).toHaveLength(2);
       await runtime.pause(f.attemptID);
       expect(suspends).toBe(expectedSuspends);
@@ -361,8 +366,8 @@ test.each(["missing", "undispatched"] as const)(
       await expect(runtime.pause(f.attemptID)).rejects.toThrow("original dispatched");
       await expect(recoverOriginal(f, call)).rejects.toThrow("original dispatched");
       expect(suspends).toBe(0);
-      const [saved] = await f.database.client`SELECT checkpoint FROM factory.substrate_binding
-        WHERE runtime_attempt_id=${f.attemptID}`;
+      const [saved] = await f.database.client`SELECT checkpoint FROM factory.runtime_attempt
+        WHERE id=${f.attemptID}`;
       expect(saved?.["checkpoint"]).toBeNull();
     } finally {
       await f.dispose();

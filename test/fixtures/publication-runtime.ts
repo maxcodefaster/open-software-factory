@@ -4,17 +4,18 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
+import { releaseContract, releasePackageOwner } from "#project-domain/release";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { nativeActor } from "#runtime-kubernetes/substrate-control";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { type ForgeRepository } from "../../packages/forge/src/contracts";
-import { type createForgejoClient } from "../../packages/forge/src/forge";
-import { releaseContract, releasePackageOwner } from "../../packages/project-domain/src/release";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { nativeActor } from "../../packages/runtime-kubernetes/src/substrate-control";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "./editor-source-resources";
 import { eventually, factoryProcess } from "./factory-process";
 import { nativeLiveConfiguration, requireNativeLiveHost } from "./native-live-configuration";
+import { configuredRuntimeProjectFiles } from "./runtime-project";
 import { callFactoryFunction } from "./server-functions";
 
 // Explicit live lane. This proves execution of an admitted publication intent,
@@ -41,6 +42,7 @@ export async function publicationRuntimeProof(input: {
       FACTORY_FORGEJO_PUBLIC_URL: input.publicOrigin,
     },
   );
+  const sourceFiles = await configuredRuntimeProjectFiles(input.nativeConfiguration);
   const runtimeHostImage = (await requirePublishedRuntimeArtifacts(".factory"))["runtime-host"];
   const directory = resolve(".factory/test-results/releases", `runtime-${id}`);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -101,26 +103,7 @@ export async function publicationRuntimeProof(input: {
     });
   }
   try {
-    const starter = JSON.parse(await readFile(".factory/starter-images.json", "utf8")) as {
-      development: string;
-    };
-    const starterRecipe = JSON.parse(
-      await readFile("templates/starter-app/.devcontainer/devcontainer.json", "utf8"),
-    ) as {
-      features: Record<string, unknown>;
-    };
-    await file(
-      ".devcontainer/devcontainer.json",
-      JSON.stringify({
-        image: starter.development,
-        workspaceFolder: "/workspace/project",
-        workspaceMount: `source=\${localWorkspaceFolder},target=/workspace/project,type=bind`,
-        remoteUser: "node",
-        updateRemoteUserUID: false,
-        features: starterRecipe.features,
-        runArgs: ["--cap-drop=ALL"],
-      }),
-    );
+    for (const source of sourceFiles) await file(source.path, source.content);
     await file(
       ".factory/release.json",
       JSON.stringify({
@@ -159,20 +142,31 @@ console.log("Owned exact-source package published");
     });
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userID},'Owned publication commissioner',${`publication-${id}@factory.invalid`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`publication-${id.slice(0, 8)}`},'Owned publication',${`${input.publicOrigin}/${input.repository.owner}/${input.repository.name}.git`},
-        ${metadata.default_branch},'.devcontainer/devcontainer.json',${userID})`;
+        ${metadata.default_branch},'.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectID},${userID},'developer',true,${userID})`;
-    // This proof owns publication, not the separate opportunistic prebuild producer.
-    for (const environment of ["development", "main-preview"])
-      await database.client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version,state,failure)
-        VALUES(${crypto.randomUUID()},${projectID},${environment},${head.headSha},0,'unsupported','Owned publication fixture uses normal startup')`;
     // This native proof resumes an admitted intent. Separate admission tests own human gates.
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,created_by)
       VALUES(${releaseID},${projectID},${releaseID},'2.0.1',${head.headSha},'.forgejo/workflows/factory-release.yml',${JSON.stringify(contract)}::text::jsonb,'Owned native publication',${userID})`;
-    await database.client`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal)
-      VALUES(${releaseID},${releaseID},${releaseID},1)`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${releaseID},'releases.attempt','project_release',${releaseID},${`releases.attempt:${releaseID}`},
+        ${`releases.attempt.ordinal:${releaseID}:1`},'pending',
+        ${JSON.stringify({
+          id: releaseID,
+          releaseId: releaseID,
+          commandId: releaseID,
+          ordinal: 1,
+          dispatchIntendedAt: null,
+          runId: null,
+          runnerId: null,
+          runnerUuid: null,
+          runnerToken: null,
+          jobHandle: null,
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::text::jsonb,${userID})`;
     await writeFile(
       resolve(directory, "intent.json"),
       JSON.stringify({
@@ -199,8 +193,11 @@ console.log("Owned exact-source package published");
           }[]
         >`SELECT release.state,release.failure,release.artifacts,runtime.state AS runtime,
         runtime.id AS "runtimeAttemptID",runtime.failure AS "runtimeFailure"
-        FROM factory.project_release release JOIN factory.release_attempt publication ON publication.release_id=release.id
-        LEFT JOIN factory.runtime_attempt runtime ON runtime.id=publication.runtime_attempt_id WHERE release.id=${releaseID}`;
+        FROM factory.project_release release
+        JOIN factory.operation publication ON publication.kind='releases.attempt'
+          AND publication.scope_type='project_release' AND publication.scope_id=release.id::text
+        LEFT JOIN factory.runtime_attempt runtime ON runtime.id::text=publication.payload->>'runtimeAttemptId'
+        WHERE release.id=${releaseID}`;
         const current = `${row?.state}/${row?.runtime}`;
         if (current !== previous) {
           previous = current;
@@ -249,13 +246,13 @@ console.log("Owned exact-source package published");
         observation: unknown;
       }[]
     >`SELECT attempt.revision,isolated.owner_id AS "ownerID",
-      isolated.kind,binding.actor_uid AS "actorUID",binding.atespace,
-      binding.actor_name AS "actorName",binding.observation
+      isolated.kind,attempt.actor_uid AS "actorUID",attempt.atespace,
+      attempt.actor_name AS "actorName",attempt.observation
       FROM factory.runtime_attempt attempt
-      JOIN factory.substrate_isolated isolated ON isolated.runtime_attempt_id=attempt.id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      JOIN factory.substrate_provision isolated ON isolated.runtime_attempt_id=attempt.id
+        AND isolated.kind='publication'
       WHERE attempt.id=${runtimeAttemptID} AND attempt.project_id=${projectID}
-        AND attempt.isolated_kind='publication' AND attempt.generation=1`;
+        AND attempt.isolated_kind='publication' AND attempt.generation=1 AND attempt.atespace IS NOT NULL`;
     if (!bound) throw Error("Published artifact has no saved native publication owner");
     const observed = nativeActor.parse(bound.observation);
     const actorUID = z.uuid().parse(bound.actorUID);
@@ -277,7 +274,9 @@ console.log("Owned exact-source package published");
     await eventually(
       async () => {
         const [grant] = await database.client<{ state: string }[]>`
-        SELECT state FROM factory.release_access WHERE release_id=${releaseID} AND scope='publish'`;
+        SELECT state FROM factory.operation
+        WHERE kind='releases.access' AND scope_type='project' AND scope_id=${projectID}
+          AND payload->>'releaseId'=${releaseID} AND payload->>'scope'='publish'`;
         return grant?.state;
       },
       (state) => state === "revoked",

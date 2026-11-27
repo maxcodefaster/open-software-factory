@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { systemContract } from "#system-contract/system-contract";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import {
   attemptsResponseSchema,
@@ -9,7 +10,6 @@ import {
 import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
 import { absentBoundNativeResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { systemContract } from "../../packages/system-contract/src/system-contract";
 import { readResetResources } from "../../scripts/factory/reset-resources";
 import {
   editorFixtureNamespaces,
@@ -49,7 +49,7 @@ export async function releaseCleanup(f: Fixture) {
   expect([...projects]).toEqual([{ id: projectID, slug: f.slug, repository: f.repositoryURL }]);
   const cookie = await f.login("developer");
   const namespacesBefore = await editorFixtureNamespaces();
-  // Include isolated Verification/prebuild attempts omitted from the customer
+  // Include isolated Verification attempts omitted from the customer
   // runtime list. Rejected/uncreated bindings refuse before any cleanup effect.
   const attempts = await database.client<{ id: string }[]>`
     SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID} ORDER BY id`;

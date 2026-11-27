@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import type { ConversationEntry } from "../conversations/store";
 import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
-import type { ConversationEntry } from "../conversations/store";
 
 test("native Project Agent preserves structured context and sends current input once", async () => {
   let captured = "";
@@ -567,6 +567,92 @@ test("native Mastra batches memoized research and rechecks authority without a s
     expect(queries).toContain("i\u0307");
     expect(authorities).toBe(18); // Every tool call plus each provider step.
     expect(requests).toBe(2);
+  } finally {
+    await model.stop(true);
+  }
+});
+
+test("investigate mode uses lean instructions and forces synthesis at its step budget", async () => {
+  const requests: Array<{ messages?: unknown; tool_choice?: unknown }> = [];
+  const sourceID = crypto.randomUUID();
+  const model = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as { messages?: unknown; tool_choice?: unknown };
+      const step = requests.push(body) - 1;
+      const forceAnswer = body.tool_choice === "none";
+      return Response.json({
+        id: `owned-investigate-${step}`,
+        object: "chat.completion",
+        created: 1,
+        model: "owned-investigate",
+        choices: [
+          {
+            index: 0,
+            message: forceAnswer
+              ? {
+                  role: "assistant",
+                  content: JSON.stringify({
+                    output: {
+                      kind: "answer",
+                      message: "Synthesized answer at step budget.",
+                      citations: [],
+                    },
+                  }),
+                }
+              : {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: `search-${step}`,
+                      type: "function",
+                      function: {
+                        name: "searchProject",
+                        arguments: JSON.stringify({ query: `topic-${step}` }),
+                      },
+                    },
+                  ],
+                },
+            finish_reason: forceAnswer ? "stop" : "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+      });
+    },
+  });
+  try {
+    const result = await generateProjectResponse({
+      mode: "investigate",
+      modelId: "owned-investigate",
+      connection: {
+        baseURL: `http://127.0.0.1:${model.port}/v1`,
+        apiKey: "owned-not-a-secret",
+      },
+      prompt: "How does authentication work?",
+      history: [],
+      signal: AbortSignal.timeout(5000),
+      research: {
+        search: async (query) => [
+          { source: "knowledge", id: sourceID, label: query, excerpt: "Observed" },
+        ],
+        read: async () => {
+          throw new Error("Unused");
+        },
+      },
+    });
+    expect(result).toMatchObject({
+      kind: "answer",
+      message: "Synthesized answer at step budget.",
+    });
+    expect(requests).toHaveLength(10);
+    expect(requests.at(-1)?.tool_choice).toBe("none");
+    const firstSystem = JSON.stringify(requests[0]?.messages ?? []);
+    expect(firstSystem).toContain("Batch independent tool calls in parallel");
+    expect(firstSystem).not.toContain("Requirement proposals must be crisp");
+    expect(firstSystem).not.toContain("@startuml");
+    expect(firstSystem).not.toContain("return kind epic");
   } finally {
     await model.stop(true);
   }

@@ -1,5 +1,5 @@
-import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export type MigrationFile = { version: number; name: string };

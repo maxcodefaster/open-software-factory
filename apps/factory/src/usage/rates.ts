@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type UsageRate, usageRate } from "../../../../packages/conversation-domain/src/usage";
+import { type UsageRate, usageRate } from "#conversation-domain/usage";
 
 const cost = z.number().finite().nonnegative().max(1_000_000).optional();
 const prices = z.object({ input: cost, output: cost, cache_read: cost, cache_write: cost });

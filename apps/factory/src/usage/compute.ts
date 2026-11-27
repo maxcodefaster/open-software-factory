@@ -1,5 +1,5 @@
 import type { TransactionSql } from "postgres";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import { CommandError } from "../command-error";
 import { type ComputeResources, computeAllocationIn } from "./allocation";
 import { lockUsageIn, policyIn } from "./policy";

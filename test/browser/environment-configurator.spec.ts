@@ -1,9 +1,8 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect } from "@playwright/test";
+import { expect, type Locator } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { CommandError } from "../../apps/factory/src/command-error";
 import {
   type EnvironmentBundle,
   type EnvironmentSettingsView,
@@ -12,7 +11,8 @@ import {
   environmentWrite,
   type ProjectEnvironment,
   replaceEnvironment,
-} from "../../packages/project-domain/src/environment";
+} from "#project-domain/environment";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { test } from "../fixtures/browser-test";
 import {
   factoryFunctionMatcher,
@@ -56,29 +56,47 @@ function initialBundle(): EnvironmentBundle {
         name: "API_KEY",
         value: "saved-api-secret",
         runtime: true,
-        build: false,
         verification: false,
       },
-      { name: "HUGO_VERSION", value: "0.140", runtime: false, build: true, verification: true },
+      { name: "HUGO_VERSION", value: "0.140", runtime: false, verification: true },
       {
         name: "PUBLIC_ORIGIN",
         value: "https://example.invalid",
         runtime: true,
-        build: false,
         verification: true,
-      },
-    ],
-    registries: [
-      {
-        host: "registry.example.invalid",
-        username: "builder",
-        password: "saved-registry-secret",
-        certificate: "",
-        verification: true,
-        publish: false,
       },
     ],
   };
+}
+
+async function expectNativeEnvironmentControls(area: Locator) {
+  await expect(area.locator(".environment-private-images, .environment-registry")).toHaveCount(0);
+  await expect(
+    area.getByRole("region", {
+      name: "Private container images",
+      exact: true,
+      includeHidden: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("button", {
+      name: /Add credentials|Edit image credentials|Remove registry/,
+      includeHidden: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("checkbox", {
+      name: /Image build|registry credentials|image pulls|publishing prepared images/,
+      includeHidden: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("option", { name: "Image build", exact: true, includeHidden: true }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("textbox", { name: /Registry|Replace password or token/, includeHidden: true }),
+  ).toHaveCount(0);
+  await expect(area.getByText(/BuildKit|factory-build-secrets|build args/)).toHaveCount(0);
 }
 
 test("initial environment errors retry only the read and leave save decisions explicit", async ({
@@ -110,7 +128,6 @@ test("initial environment errors retry only the read and leave save decisions ex
           storeConfigured: true,
           pending: false,
           pendingCommandID: null,
-          preparation: null,
         };
       },
     },
@@ -164,11 +181,9 @@ for (const outcome of ["success", "failure"] as const) {
                   name: projectID.endsWith("003") ? "NEXT_PROJECT" : "PREVIOUS_PROJECT",
                   value: "protected",
                   runtime: true,
-                  build: false,
                   verification: false,
                 },
               ],
-              registries: [],
             }),
             environment,
             version: 0,
@@ -176,7 +191,6 @@ for (const outcome of ["success", "failure"] as const) {
             storeConfigured: true,
             pending: false,
             pendingCommandID: null,
-            preparation: null,
           };
         },
       },
@@ -217,14 +231,13 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   const writes: EnvironmentWrite[] = [];
   function view(environment: ProjectEnvironment): EnvironmentSettingsView {
     return {
-      ...environmentMetadata(bundles.get(environment) ?? { variables: [], registries: [] }),
+      ...environmentMetadata(bundles.get(environment) ?? { variables: [] }),
       environment,
       version: versions.get(environment) ?? 0,
       canManage: true,
       storeConfigured: true,
       pending: false,
       pendingCommandID: null,
-      preparation: null,
     };
   }
   await mockFactoryFunctions(page, {
@@ -236,7 +249,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
         writes.push(input);
         bundles.set(
           environment,
-          replaceEnvironment(input, bundles.get(environment) ?? { variables: [], registries: [] }),
+          replaceEnvironment(input, bundles.get(environment) ?? { variables: [] }),
         );
         versions.set(environment, input.version + 1);
         return view(environment);
@@ -257,6 +270,11 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   const search = area.getByRole("searchbox", { name: "Search variables" });
   const save = area.getByRole("button", { name: "Save environment", exact: true });
   await expect(names).toHaveText(["API_KEY", "HUGO_VERSION", "PUBLIC_ORIGIN"]);
+  await expect(
+    area.getByText(
+      /Development image ready|Preparing the development image|normal Dev Container startup|No compatible prepared image/,
+    ),
+  ).toHaveCount(0);
   await expect(area.getByRole("heading", { name: "Environments", exact: true })).toHaveCount(1);
   await expect(
     page.getByRole("heading", { name: "Environment variables", exact: true }),
@@ -270,7 +288,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await expect(area.getByRole("combobox")).toHaveCount(0);
   await expect(save).toHaveCount(0);
   await expect(area.getByText("Saved", { exact: true })).toHaveCount(0);
-  await expect(area.getByRole("textbox", { name: "Registry 1 host" })).toBeHidden();
+  await expectNativeEnvironmentControls(area);
   await expect(area.getByRole("region", { name: "QA recording settings" })).toHaveCount(0);
   await expect(area.locator("details")).toHaveCount(0);
   await expect(area.getByText("Advanced", { exact: true })).toHaveCount(0);
@@ -284,81 +302,36 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   ).toHaveCount(0);
   await expect(area.getByRole("textbox", { name: /^Value for/ })).toHaveCount(0);
   expect(await area.innerHTML()).not.toContain("saved-api-secret");
-  expect(await area.innerHTML()).not.toContain("saved-registry-secret");
   await page.screenshot({ path: `${evidence}/desktop.png` });
 
-  const privateImages = area.getByRole("region", { name: "Private container images", exact: true });
-  const editImage = privateImages.getByRole("button", {
-    name: "Edit image credentials for registry.example.invalid",
-    exact: true,
-  });
-  const registry = area.getByRole("textbox", { name: "Registry 1 host" });
-  await expect(privateImages).toBeVisible();
-  await expect(privateImages.getByText("registry.example.invalid", { exact: true })).toBeVisible();
-  await expect(area.getByText("Private container images", { exact: true })).toHaveCount(1);
-  await expect(
-    area.getByText(/private image downloads during environment preparation and startup/),
-  ).toBeVisible();
   expect(writes).toHaveLength(0);
   await expect(save).toHaveCount(0);
 
-  await editImage.focus();
-  await editImage.press("Enter");
-  await expect(registry).toBeFocused();
-  await expect(registry).toHaveValue("registry.example.invalid");
-  await expect(area.getByText(/repository's Dev Container configuration/)).toBeVisible();
-  await expect(
-    area.getByRole("textbox", { name: "Replace password or token", exact: true }),
-  ).toHaveValue("");
-  const imageAccess = area.locator(".environment-registry details > summary");
-  const publication = area.getByRole("checkbox", {
-    name: "Allow publishing prepared images for this Project",
-    exact: true,
-  });
-  await expect(publication).not.toBeChecked();
-  await imageAccess.focus();
-  await imageAccess.press("Enter");
-  await expect(
-    area.getByRole("checkbox", { name: "Allow image pulls during Verification", exact: true }),
-  ).toBeChecked();
-  await imageAccess.press("Space");
-  await expect(
-    area.getByRole("checkbox", { name: "Allow image pulls during Verification", exact: true }),
-  ).toBeHidden();
-  await area.getByRole("textbox", { name: "Username", exact: true }).fill("image-reader");
-  await expect(save).toBeVisible();
-  await page.screenshot({ path: `${evidence}/private-images-desktop.png` });
-  await save.click();
-  await expect(save).toHaveCount(0);
-  expect(bundles.get("development")?.registries[0]?.username).toBe("image-reader");
-  expect(bundles.get("development")?.registries[0]?.password).toBe("saved-registry-secret");
-  expect(bundles.get("development")?.registries[0]?.verification).toBe(true);
-  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
-  await expect(registry).toBeHidden();
-  await expect(privateImages.getByText("image-reader", { exact: true })).toBeVisible();
-
   // Grant changes alone must enable Save, without replacing the stored token.
-  await editImage.click();
-  await publication.check();
-  await expect(save).toBeVisible();
-  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
-  await save.click();
-  await expect(save).toHaveCount(0);
-  expect(bundles.get("development")?.registries[0]?.publish).toBe(true);
-  expect(bundles.get("development")?.registries[0]?.password).toBe("saved-registry-secret");
-  await expect(privateImages.getByText("Prepared image publishing", { exact: true })).toBeVisible();
-  await editImage.click();
-  await publication.uncheck();
-  await save.click();
-  await expect(save).toHaveCount(0);
-  expect(bundles.get("development")?.registries[0]?.publish).toBe(false);
-  await expect(privateImages.getByText("Prepared image publishing", { exact: true })).toHaveCount(
-    0,
-  );
+  for (const granted of [true, false]) {
+    await area.getByRole("button", { name: "Actions for API_KEY", exact: true }).click();
+    await area.getByRole("menuitem", { name: "Edit variable", exact: true }).click();
+    await expectNativeEnvironmentControls(area);
+    await area
+      .getByRole("group", { name: "Available to", exact: true })
+      .getByRole("checkbox", { name: "Verification", exact: true })
+      .setChecked(granted);
+    await expect(save).toBeVisible();
+    expect(bundles.get("development")?.variables[0]?.verification).toBe(!granted);
+    await save.click();
+    await expect(save).toHaveCount(0);
+    expect(bundles.get("development")?.variables[0]?.verification).toBe(granted);
+    expect(bundles.get("development")?.variables[0]?.value).toBe("saved-api-secret");
+    expect(writes.at(-1)?.variables[0]?.value).toBeUndefined();
+  }
 
   await search.fill("hugo");
   await expect(names).toHaveText(["HUGO_VERSION"]);
   await area.getByRole("button", { name: /^Filter & sort/ }).click();
+  await expect(
+    area.getByRole("combobox", { name: "Filter by usage" }).getByRole("option"),
+  ).toHaveText(["All uses", "Runtime", "Verification"]);
+  await expectNativeEnvironmentControls(area);
   await area.getByRole("combobox", { name: "Filter by usage" }).selectOption("runtime");
   await expect(area.getByText("No variables match these filters.")).toBeVisible();
   await area.getByRole("button", { name: "Clear filters", exact: true }).click();
@@ -407,8 +380,6 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   expect(bundles.get("development")?.variables).toHaveLength(3);
   expect(bundles.get("development")?.variables[0]?.value).toBe("replacement-value");
   expect(bundles.get("development")?.variables[0]?.verification).toBe(true);
-  expect(writes[0]?.registries[0]?.password).toBeUndefined();
-  expect(bundles.get("development")?.registries[0]?.password).toBe("saved-registry-secret");
   expect(await area.innerHTML()).not.toContain("replacement-value");
   await area.getByRole("button", { name: "Clear filters", exact: true }).click();
 
@@ -429,7 +400,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   expect(bundles.get("development")?.variables).toHaveLength(4);
   await save.click();
   await expect(
-    area.getByText("Saved. New starts use these settings; restart existing compute to apply."),
+    area.getByText("Saved. Restart existing compute to apply runtime variable changes."),
   ).toBeVisible();
   expect(bundles.get("development")?.variables).toHaveLength(3);
 
@@ -451,7 +422,7 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await expect(importAction).toBeFocused();
   await save.click();
   await expect(
-    area.getByText("Saved. New starts use these settings; restart existing compute to apply."),
+    area.getByText("Saved. Restart existing compute to apply runtime variable changes."),
   ).toBeVisible();
   expect(
     bundles.get("development")?.variables.find((item) => item.name === "MULTILINE")?.value,
@@ -473,29 +444,14 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await area.getByRole("button", { name: "Main-Preview", exact: true }).click();
   await expect(area.getByText("No variables in Main-Preview.")).toBeVisible();
   await expect(search).toHaveValue("");
-  await expect(
-    privateImages.getByText("No private credentials. Public images need none."),
-  ).toBeVisible();
-  await privateImages.getByRole("button", { name: "Add credentials", exact: true }).click();
-  await expect(registry).toBeFocused();
-  await registry.fill("preview-registry.example.invalid");
-  await imageAccess.click();
-  await expect(
-    area.getByRole("checkbox", { name: "Allow image pulls during Verification", exact: true }),
-  ).not.toBeChecked();
-  await expect(publication).not.toBeChecked();
-  await area
-    .getByRole("button", { name: "Remove registry preview-registry.example.invalid" })
-    .click();
-  await expect(
-    privateImages.getByText("No private credentials. Public images need none."),
-  ).toBeVisible();
+  await expectNativeEnvironmentControls(area);
   await expect(save).toHaveCount(0);
   await area.getByRole("button", { name: "Development", exact: true }).click();
   await expect(names).toHaveCount(5);
 
   for (const width of [1024, 760, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 });
+    await expectNativeEnvironmentControls(area);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       width,
     );
@@ -541,21 +497,6 @@ test("variable rows support search, filters, sorting, focused editing, imports a
   await expect(area.getByRole("combobox", { name: "Filter by usage" })).toBeVisible();
   await page.screenshot({ path: `${evidence}/filters-phone.png` });
   await area.getByRole("button", { name: /^Filter & sort/ }).click();
-  await editImage.click();
-  await expect(registry).toBeVisible();
-  await publication.scrollIntoViewIfNeeded();
-  expect(
-    await area.evaluate((element) => element.scrollWidth - element.clientWidth),
-  ).toBeLessThanOrEqual(1);
-  await page.screenshot({ path: `${evidence}/private-images-phone.png` });
-  await imageAccess.click();
-  await expect(
-    area.getByRole("checkbox", { name: "Allow image pulls during Verification", exact: true }),
-  ).toBeVisible();
-  await page.screenshot({ path: `${evidence}/private-image-access-phone.png` });
-  await imageAccess.click();
-  await area.getByRole("button", { name: "Done editing credentials", exact: true }).click();
-  await expect(registry).toBeHidden();
   await importAction.click();
   await expect(paste).toBeFocused();
   await page.screenshot({ path: `${evidence}/import-phone.png` });
@@ -584,7 +525,6 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
     storeConfigured: true,
     pending: Boolean(pending),
     pendingCommandID: pending?.commandID ?? null,
-    preparation: null,
   });
   await mockFactoryFunctions(page, {
     environments: {
@@ -614,9 +554,7 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
     .getByRole("button", { name: "Environments", exact: true })
     .click();
   const area = page.getByRole("region", { name: "Project environment", exact: true });
-  await area
-    .getByRole("button", { name: "Edit image credentials for registry.example.invalid" })
-    .click();
+  await expectNativeEnvironmentControls(area);
   await area.getByRole("button", { name: "Add variable", exact: true }).click();
   await area.getByRole("textbox", { name: "Variable 4 name" }).fill("RETRY_TOKEN");
   await area
@@ -630,19 +568,24 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
   await expect(
     area.getByRole("button", { name: "Actions for API_KEY", exact: true }),
   ).toBeDisabled();
-  await expect(area.getByRole("textbox", { name: "Registry 1 host" })).toBeDisabled();
   await expect(
-    area.getByRole("checkbox", {
-      name: "Allow publishing prepared images for this Project",
-      exact: true,
-    }),
+    area.getByRole("textbox", { name: "Value for RETRY_TOKEN", exact: true }),
   ).toBeDisabled();
-  await expect(area.getByRole("button", { name: "Add credentials", exact: true })).toBeDisabled();
+  await expect(
+    area
+      .getByRole("group", { name: "Available to", exact: true })
+      .getByRole("checkbox", { name: "Runtime", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    area
+      .getByRole("group", { name: "Available to", exact: true })
+      .getByRole("checkbox", { name: "Verification", exact: true }),
+  ).toBeDisabled();
   await expect(area.getByRole("button", { name: "Import .env", exact: true })).toBeDisabled();
   await page.screenshot({ path: `${evidence}/pending-save.png` });
   await area.getByRole("button", { name: "Retry save", exact: true }).click();
   await expect(
-    area.getByText("Saved. New starts use these settings; restart existing compute to apply."),
+    area.getByText("Saved. Restart existing compute to apply runtime variable changes."),
   ).toBeVisible();
   expect(commands).toHaveLength(2);
   expect(commands[0]).toEqual(commands[1]);
@@ -652,7 +595,7 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
   await area.getByRole("menuitem", { name: "Edit variable", exact: true }).click();
   await area
     .getByRole("group", { name: "Available to", exact: true })
-    .getByRole("checkbox", { name: "Image build", exact: true })
+    .getByRole("checkbox", { name: "Verification", exact: true })
     .check();
   await area.getByRole("button", { name: "Done editing", exact: true }).click();
   await area.getByRole("button", { name: "Save environment", exact: true }).click();
@@ -669,11 +612,7 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
   await expect(area.getByRole("button", { name: "Add variable", exact: true })).toHaveCount(0);
   await expect(area.getByRole("button", { name: /^Actions for/ })).toHaveCount(0);
   await expect(area.getByRole("button", { name: "Save environment", exact: true })).toHaveCount(0);
-  await expect(area.getByRole("textbox", { name: "Registry 1 host" })).toBeHidden();
-  const images = area.getByRole("region", { name: "Private container images", exact: true });
-  await expect(images.getByText("registry.example.invalid", { exact: true })).toBeVisible();
-  await expect(images.getByText("Verification", { exact: true })).toBeVisible();
-  await expect(images.getByRole("button")).toHaveCount(0);
+  await expectNativeEnvironmentControls(area);
   await expect(area.getByRole("button", { name: "Import .env", exact: true })).toHaveCount(0);
   await area.getByRole("searchbox", { name: "Search variables" }).fill("missing");
   await area.getByRole("button", { name: "Clear filters", exact: true }).click();
@@ -693,7 +632,6 @@ test.describe("touch environments", () => {
           storeConfigured: true,
           pending: false,
           pendingCommandID: null,
-          preparation: null,
         }),
       },
     });
@@ -705,27 +643,24 @@ test.describe("touch environments", () => {
     const box = await trigger.boundingBox();
     expect(box?.width ?? 0).toBeGreaterThanOrEqual(43.5);
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(43.5);
-    await area.getByRole("button", { name: "Add variable", exact: true }).click();
+    await area.getByRole("button", { name: "Add variable", exact: true }).tap();
+    await expectNativeEnvironmentControls(area);
     const choices = area.locator(".environment-grants label, .environment-check");
     await expect(choices.first()).toBeVisible();
     for (const choice of await choices.all())
       expect((await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(43.5);
     await page.screenshot({ path: `${evidence}/touch-targets.png` });
-    await area
-      .getByRole("button", { name: "Edit image credentials for registry.example.invalid" })
-      .tap();
-    const publication = area.getByRole("checkbox", {
-      name: "Allow publishing prepared images for this Project",
-      exact: true,
-    });
-    await publication.scrollIntoViewIfNeeded();
-    await expect(publication).not.toBeChecked();
-    const publicationLabel = await publication.locator("..").boundingBox();
-    expect(publicationLabel?.height ?? 0).toBeGreaterThanOrEqual(43.5);
-    expect(publicationLabel?.x ?? -1).toBeGreaterThanOrEqual(0);
-    expect((publicationLabel?.x ?? 0) + (publicationLabel?.width ?? 0)).toBeLessThanOrEqual(390);
-    await publication.tap();
-    await expect(publication).toBeChecked();
-    await page.screenshot({ path: `${evidence}/touch-publication-permission.png` });
+    const verification = area
+      .getByRole("group", { name: "Available to", exact: true })
+      .getByRole("checkbox", { name: "Verification", exact: true });
+    await verification.scrollIntoViewIfNeeded();
+    await expect(verification).not.toBeChecked();
+    const verificationLabel = await verification.locator("..").boundingBox();
+    expect(verificationLabel?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    expect(verificationLabel?.x ?? -1).toBeGreaterThanOrEqual(0);
+    expect((verificationLabel?.x ?? 0) + (verificationLabel?.width ?? 0)).toBeLessThanOrEqual(390);
+    await verification.tap();
+    await expect(verification).toBeChecked();
+    await page.screenshot({ path: `${evidence}/touch-verification-permission.png` });
   });
 });

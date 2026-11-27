@@ -1,0 +1,17 @@
+{
+  "containers": [
+    {
+      "name": "work",
+      "image": "registry.example.test/development@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "volumeMounts": [{ "name": "source", "mountPath": "/workspaces/monorepo" }]
+    },
+    {
+      "name": "database",
+      "image": "registry.example.test/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "command": ["/usr/local/bin/docker-entrypoint.sh", "postgres"],
+      "env": [{ "name": "PGDATA", "value": "/data/pgdata" }],
+      "volumeMounts": [{ "name": "database", "mountPath": "/data" }]
+    }
+  ],
+  "volumes": [{ "name": "source", "durableDir": {} }, { "name": "database", "durableDir": {} }]
+}

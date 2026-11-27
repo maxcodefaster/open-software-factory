@@ -1,0 +1,681 @@
+/* Kanban desktop, board lanes, epics, archive and ticket cards. */
+
+.kanban-desktop:focus {
+  outline: none;
+}
+
+.kanban-desktop:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.icon-button,
+.context-button,
+.quiet-button,
+.primary-button,
+.danger-button,
+.new-ticket-button,
+.bare-icon,
+.background-option,
+.ticket-card {
+  transition:
+    translate var(--duration-fast) var(--ease-standard),
+    scale var(--duration-fast) var(--ease-pop),
+    color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+.kanban-desktop {
+  position: absolute;
+  z-index: var(--layer-desktop);
+  inset: var(--topbar-height) var(--space-4) var(--space-3);
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  transition:
+    opacity var(--duration-normal) var(--ease-standard),
+    filter var(--duration-normal) var(--ease-standard);
+}
+
+.factory-desktop .kanban-desktop {
+  top: calc(var(--topbar-height) + var(--notices-inset));
+}
+
+.board-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  flex: none;
+  min-height: var(--control-height);
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1-5);
+  padding: 0 var(--space-1);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+}
+
+.board-new-ticket {
+  border-radius: var(--radius-xs);
+}
+
+.epic-stack {
+  position: relative;
+  margin: 0 0 var(--space-2);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 var(--space-1) 0 calc(-1 * var(--space-0-5)) var(--material-chrome);
+}
+
+.epic-stack-open {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.epic-stack-label {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.epic-stack-preview {
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+}
+
+.epic-progress {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+.epic-editor {
+  color: var(--color-ink);
+  border: 1px solid var(--line-subtle);
+  padding: var(--space-4);
+  max-width: calc(100vw - var(--space-8));
+  max-height: calc(100dvh - var(--space-8));
+  overflow: auto;
+}
+
+.board-history-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-control);
+  color: var(--color-ink);
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
+}
+
+.history-count {
+  display: grid;
+  min-width: var(--space-5);
+  height: var(--space-5);
+  place-items: center;
+  border-radius: var(--radius-pill);
+  color: var(--color-ink);
+  background: var(--material-accent-strong);
+  font: var(--weight-medium) var(--text-xs) var(--font-technical);
+}
+
+.board {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: repeat(var(--board-stage-count), minmax(0, 1fr));
+  gap: 0;
+  padding: var(--space-1) 0;
+  border: 0;
+  transition-property: none;
+}
+
+.board-history {
+  display: block;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: none;
+}
+
+.ticket-archive {
+  display: grid;
+  gap: var(--space-0-5);
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+  background: var(--material-window);
+  backdrop-filter: blur(var(--blur-window)) saturate(var(--frost-saturation-window));
+}
+
+.ticket-archive-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid var(--line-subtle);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.ticket-archive-row {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  text-align: left;
+}
+
+.ticket-archive-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-md);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-label);
+}
+
+.ticket-archive-reference,
+.ticket-archive-status {
+  color: var(--color-ink-muted);
+  font: var(--weight-regular) var(--text-xs) var(--font-technical);
+}
+
+.ticket-archive-status {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--material-code);
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .ticket-archive-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+
+  .ticket-archive-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+.board-enter {
+  animation: board-enter var(--duration-normal) var(--ease-enter);
+}
+
+.lane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-2) var(--board-lane-padding);
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.lane-heading {
+  display: flex;
+  flex: none;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-height: var(--board-heading-height);
+  margin: 0 0 var(--board-heading-gap);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--color-ink);
+  background: transparent;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-label);
+}
+
+.lane-empty {
+  margin: 0;
+  padding: var(--space-2) var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.lane-tickets {
+  flex: 1;
+  min-height: 0;
+  margin: calc(-1 * var(--space-1));
+  padding: var(--space-1);
+  overflow: auto;
+  overscroll-behavior-block: contain;
+}
+
+.epic-folder {
+  box-sizing: border-box;
+  width: min(76rem, calc(100vw - var(--space-8)));
+  max-height: calc(100dvh - var(--space-8));
+  padding: var(--space-5);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  box-shadow: none;
+}
+
+.epic-folder-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-3);
+}
+
+.epic-folder-parent,
+.epic-folder-title {
+  min-width: 0;
+}
+
+.epic-folder-title {
+  text-align: center;
+}
+
+.epic-folder-actions {
+  display: flex;
+  justify-self: end;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.epic-folder-content {
+  margin-top: var(--space-4);
+}
+
+.epic-folder-description,
+.epic-folder-empty {
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.epic-folder-description {
+  max-width: 65ch;
+  margin: var(--space-2) auto 0;
+  text-align: center;
+}
+
+.epic-folder-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.epic-folder-empty {
+  margin: 0;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .epic-folder {
+    width: calc(100vw - var(--space-4));
+    max-height: calc(100dvh - var(--space-4));
+    padding: var(--space-4);
+  }
+  .epic-folder-heading {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .epic-folder-title {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .epic-folder-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+.ticket-card {
+  display: grid;
+  width: 100%;
+  gap: var(--space-1-5);
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  box-shadow: none;
+  text-align: left;
+}
+
+.ticket-card,
+.epic-stack {
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
+}
+
+.ticket-card-body {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.ticket-card-body:hover:not(:disabled) {
+  background: transparent;
+}
+
+.ticket-card-blockers {
+  display: grid;
+  gap: var(--space-1);
+  padding-top: var(--space-1-5);
+  border-top: 1px solid var(--line-subtle);
+  font-size: var(--text-xs);
+}
+
+.dependency-link {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.ticket-dependencies {
+  display: grid;
+  gap: var(--space-1-5);
+  padding-block: var(--space-2);
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  .board-new-ticket {
+    min-height: 44px;
+  }
+
+  .kanban-desktop {
+    inset: var(--topbar-height) 0.75rem 0.75rem;
+  }
+
+  .board {
+    grid-template-columns: repeat(
+        var(--board-stage-count),
+        calc(100vw - var(--space-12) - var(--space-5))
+      );
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-snap-type: inline mandatory;
+    scrollbar-width: none;
+  }
+
+  .lane {
+    min-width: 0;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+  }
+}
+
+.epic-stack-open > svg {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.epic-stack-open > span {
+  flex: 1;
+}
+
+.epic-stack-label strong {
+  font-weight: var(--weight-medium);
+}
+
+.epic-stack-open small {
+  color: var(--muted-ink);
+  font-size: var(--text-xs);
+}
+
+.epic-editor label {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.epic-editor select {
+  width: 100%;
+}
+
+.epic-editor::backdrop {
+  background: var(--material-backdrop);
+  backdrop-filter: blur(var(--blur-backdrop));
+}
+
+.epic-folder::backdrop {
+  background: color-mix(in srgb, var(--color-paper-cool) 80%, transparent);
+  backdrop-filter: blur(var(--blur-card));
+}
+
+.epic-folder-heading h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+@media (pointer: coarse) {
+  .epic-folder-parent > button,
+  .epic-folder-actions > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.lane-heading > h2 {
+  display: flex;
+  align-items: center;
+  min-height: var(--board-heading-height);
+  margin: 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+  font: inherit;
+  background: var(--material-chrome);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(var(--frost-saturation-chrome));
+}
+
+.ticket-card small,
+.ticket-card span {
+  color: var(--color-ink-muted);
+  font: var(--weight-regular) var(--text-xs) var(--font-technical);
+}
+
+.ticket-card strong {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-label);
+}
+
+.ticket-dependencies header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ticket-dependencies small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.ticket-dependencies ul {
+  display: grid;
+  gap: var(--space-1-5);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.ticket-dependencies li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ticket-dependencies select {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .board::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.ticket-dependencies li > div {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+@media (hover: hover) {
+  .icon-button:hover,
+  .context-button:hover,
+  .quiet-button:hover,
+  .primary-button:hover,
+  .danger-button:hover,
+  .new-ticket-button:hover,
+  .bare-icon:hover,
+  .background-option:hover {
+    translate: 0 var(--motion-lift-y);
+  }
+}
+
+.icon-button:active,
+.context-button:active,
+.quiet-button:active,
+.primary-button:active,
+.danger-button:active,
+.new-ticket-button:active,
+.bare-icon:active,
+.background-option:active {
+  scale: var(--motion-active-scale);
+}
+
+.kanban-desktop.obscured {
+  opacity: 0.55;
+  filter: saturate(0.7) blur(var(--blur-obscured));
+}
+
+@media (min-width: 901px) {
+  .agent-is-open .kanban-desktop {
+    left: calc(var(--agent-panel-width) + var(--window-gutter) + var(--space-4));
+  }
+  .agent-is-open .board {
+    grid-template-columns: repeat(var(--board-stage-count), minmax(12rem, 1fr));
+    overflow-x: auto;
+  }
+}
+
+.board-toolbar > .board-history-button {
+  margin-right: auto;
+}
+
+.board-toolbar > .board-page-button {
+  margin-right: 0;
+}
+
+.ticket-archive-row:hover {
+  background: var(--material-accent);
+}
+
+.lane + .lane {
+  border-inline-start: 1px solid var(--line-subtle);
+}
+
+.epic-folder-parent .workspace-action {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.epic-folder-grid > :is(.ticket-card, .epic-stack) {
+  flex: 0 1 17rem;
+  min-width: 0;
+  margin: 0;
+  align-content: start;
+}
+
+.epic-folder-grid :is(.ticket-card-body, .epic-stack-open) {
+  overflow-wrap: anywhere;
+}
+
+.epic-stack-open:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.ticket-card:hover,
+.ticket-card.selected,
+.ticket-card:focus-within,
+.epic-stack:focus-within {
+  border-color: var(--line-accent);
+  background: var(--material-chrome-hover);
+}
+
+.dependency-link:hover {
+  text-decoration: underline;
+}
+
+.ticket-archive-heading > span:last-child {
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+}
+
+.epic-folder .ticket-card-body:focus-visible {
+  outline: none;
+}
+
+.epic-stack:has(.epic-stack-open:hover) {
+  border-color: var(--line-accent);
+  background: var(--material-chrome-hover);
+}
+
+.epic-folder .ticket-card:has(.ticket-card-body:focus-visible) {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}

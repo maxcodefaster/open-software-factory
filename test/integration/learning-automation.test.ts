@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import type { LearningEdit } from "#conversation-domain/learning";
+import type { createDatabase } from "#db/client";
 import { createLearningAutomation } from "../../apps/factory/src/learning/automation";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
-import { type WorkReviewInput } from "../../apps/factory/src/learning/judge-contract";
+import type { WorkReviewInput } from "../../apps/factory/src/learning/judge-contract";
 import { priorProposalEvidence } from "../../apps/factory/src/learning/prior-proposals";
-import { type ReplayInput } from "../../apps/factory/src/learning/replay-contract";
+import type { ReplayInput } from "../../apps/factory/src/learning/replay-contract";
 import { createLearningService } from "../../apps/factory/src/learning/service";
 import { createLearningTargets, learningEditDigest } from "../../apps/factory/src/learning/targets";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
-import type { createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { calibratedResult } from "../fixtures/learning";
@@ -339,7 +339,7 @@ test.each([false, true])(
             cases: { id: string }[];
           };
         }[]
-      >`SELECT proposal_id,input FROM factory.learning_trial`;
+      >`SELECT payload->>'proposalId' AS proposal_id,payload->'input' AS input FROM factory.operation WHERE kind='learning.trial'`;
       expect(trial?.proposal_id).toBe(value.proposalId);
       expect(trial?.input.problemIds).toEqual(value.example.cases.slice(0, 2).map((c) => c.id));
       expect(trial?.input.controlId).toBe(value.example.cases[2]?.id);
@@ -349,7 +349,9 @@ test.each([false, true])(
       expect(proposal?.content).toEqual(value.originalContent);
       expect(value.originalContent.caseIds).toHaveLength(1);
       expect(await database.client`SELECT id FROM factory.learning_proposal`).toHaveLength(1);
-      expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(1);
+      expect(
+        await database.client`SELECT id FROM factory.learning_proposal WHERE application IS NOT NULL`,
+      ).toHaveLength(1);
       const [linked] = await database.client<{ result: unknown }[]>`
       SELECT result FROM factory.learning_review WHERE id=(
         SELECT batch_id FROM factory.learning_case WHERE id=${value.example.cases[0]?.id ?? ""})`;
@@ -438,17 +440,36 @@ test.each([
           releasePrivate: fence === "commissioned",
           editDigest: learningEditDigest(value.edit),
         });
-      if (fence === "applied" || fence === "reverted")
-        await database.client`INSERT INTO factory.learning_application(id,proposal_id,target,edit_digest,activation,
-        applied_revision_id,applied_version,applied_by,state,reverted_at,reverted_by,reverted_revision_id,reverted_version)
-        VALUES(${crypto.randomUUID()},${value.proposalId},${JSON.stringify(value.edit.target)}::jsonb,
-          ${learningEditDigest(value.edit)},'[]'::jsonb,${value.revisionId},1,${value.userID},${fence},
-          ${fence === "reverted" ? new Date().toISOString() : null},${fence === "reverted" ? value.userID : null},
-          ${fence === "reverted" ? value.revisionId : null},${fence === "reverted" ? 2 : null})`;
+      if (fence === "applied" || fence === "reverted") {
+        const application = {
+          id: crypto.randomUUID(),
+          proposalId: value.proposalId,
+          target: value.edit.target,
+          editDigest: learningEditDigest(value.edit),
+          activation: [],
+          appliedRevisionId: value.revisionId,
+          appliedVersion: 1,
+          appliedBy: value.userID,
+          comparisonId: null,
+          createdAt: new Date().toISOString(),
+          state: fence,
+          revertedRevisionId: fence === "reverted" ? value.revisionId : null,
+          revertedVersion: fence === "reverted" ? 2 : null,
+          revertedBy: fence === "reverted" ? value.userID : null,
+          revertedComparisonId: null,
+          revertedAt: fence === "reverted" ? new Date().toISOString() : null,
+        };
+        await database.client`UPDATE factory.learning_proposal
+          SET state='applied',decision_id=${crypto.randomUUID()},decided_by=${value.userID},decided_at=now(),
+            application=${JSON.stringify(application)}::jsonb
+          WHERE id=${value.proposalId}`;
+      }
       worker = createLearningAutomation(database, value.dependencies);
       expect(await worker.sweep()).toBe(false);
       expect(value.calls()).toBe(0);
-      expect(await database.client`SELECT id FROM factory.learning_trial`).toHaveLength(0);
+      expect(
+        await database.client`SELECT id FROM factory.operation WHERE kind='learning.trial'`,
+      ).toHaveLength(0);
     } finally {
       worker?.close();
       await database.client.end({ timeout: 2 });
@@ -469,7 +490,8 @@ test("saved scoped permission adopts a demonstrated text fix, records real subse
     expect(await first.sweep()).toBe(true);
     expect(value.calls()).toBe(3);
     const [application] = await database.client<{ id: string; revisionId: string }[]>`
-      SELECT id,applied_revision_id AS "revisionId" FROM factory.learning_application WHERE proposal_id=${value.proposalId}`;
+      SELECT application->>'id' AS id,application->>'appliedRevisionId' AS "revisionId"
+      FROM factory.learning_proposal WHERE id=${value.proposalId} AND application IS NOT NULL`;
     expect(application).toBeDefined();
     const [saved] = await database.client<
       { content: { instructions: string } }[]
@@ -510,17 +532,17 @@ test("saved scoped permission adopts a demonstrated text fix, records real subse
       "reverted",
     );
     const [latest] = await database.client<{ content: { instructions: string } }[]>`
-      SELECT revision.content FROM factory.skill_library_revision link JOIN factory.skill_revision revision ON revision.id=link.revision_id
-      WHERE link.library_id=${value.libraryId} ORDER BY revision.revision DESC LIMIT 1`;
+      SELECT content FROM factory.skill_revision
+      WHERE library_id=${value.libraryId} ORDER BY revision DESC LIMIT 1`;
     expect(fixtureValue(latest, "latest").content.instructions).toBe(comparisonBefore);
     await expect(
       (async () => {
-        await database.client`UPDATE factory.learning_trial SET input='{}'::jsonb WHERE proposal_id=${value.proposalId}`;
+        await database.client`UPDATE factory.operation SET payload=jsonb_set(payload,'{input}','{}'::jsonb,true) WHERE kind='learning.trial' AND scope_type='learning_proposal' AND scope_id=${value.proposalId}`;
       })(),
     ).rejects.toThrow("immutable");
     await expect(
       (async () => {
-        await database.client`UPDATE factory.learning_trial_step SET result='{}'::jsonb WHERE trial_id=${fixtureValue(before.comparisons[0], "before.comparisons[0]").id}`;
+        await database.client`UPDATE factory.operation SET payload=jsonb_set(payload,'{steps}','[]'::jsonb,true) WHERE id=${fixtureValue(before.comparisons[0], "before.comparisons[0]").id} AND kind='learning.trial'`;
       })(),
     ).rejects.toThrow("immutable");
     expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
@@ -567,7 +589,7 @@ for (const fence of [
               value.projectID,
             );
           if (fence === "lease-loss")
-            await database.client`UPDATE factory.learning_trial SET owner_expires_at=now()-interval '1 second' WHERE proposal_id=${value.proposalId}`;
+            await database.client`UPDATE factory.operation SET lease_expires_at=now()-interval '1 second' WHERE kind='learning.trial' AND scope_type='learning_proposal' AND scope_id=${value.proposalId}`;
           if (fence === "policy-version")
             await value.service.set(value.userID, {
               commandId: crypto.randomUUID(),
@@ -609,22 +631,28 @@ for (const fence of [
       expect(calls).toBe(1);
       expect(await worker.sweep()).toBe(false);
       expect(calls).toBe(1);
-      expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
+      expect(
+        await database.client`SELECT id FROM factory.learning_proposal WHERE application IS NOT NULL`,
+      ).toHaveLength(0);
       const [trial] = await database.client<{ state: string; policyVersion: number }[]>`
-        SELECT state,policy_version AS "policyVersion" FROM factory.learning_trial`;
+        SELECT state,(payload->>'policyVersion')::int AS "policyVersion" FROM factory.operation WHERE kind='learning.trial'`;
       expect(trial?.state).toBe(fence === "unknown" || fence === "cancel" ? "uncertain" : "failed");
       expect(trial?.policyVersion).toBe(1);
       if (fence === "policy-version") {
         const [policy] = await database.client<
           { version: number; enabled: boolean; automatic: boolean }[]
         >`
-          SELECT version,enabled,automatic_skills AS automatic FROM factory.learning_policy WHERE project_id=${value.projectID}`;
+          SELECT (payload->>'version')::int AS version,(payload->>'enabled')::boolean AS enabled,(payload->>'automaticSkills')::boolean AS automatic
+          FROM factory.operation WHERE kind='learning.policy' AND scope_type='project' AND scope_id=${value.projectID}`;
         expect(policy).toEqual({ version: 2, enabled: true, automatic: true });
       }
       if (fence === "cancel") {
-        const [step] = await database.client<{ state: string; result: unknown }[]>`
-          SELECT state,result FROM factory.learning_trial_step`;
-        expect(step).toEqual({ state: "uncertain", result: null });
+        const [stepRow] = await database.client<
+          { steps: Array<{ state: string; result: unknown }> }[]
+        >`
+          SELECT payload->'steps' AS steps FROM factory.operation WHERE kind='learning.trial'`;
+        expect(stepRow?.steps).toHaveLength(1);
+        expect(stepRow?.steps[0]).toMatchObject({ state: "uncertain", result: null });
       }
     } finally {
       worker?.close();
@@ -683,7 +711,9 @@ test("private-to-shared edits, Build guidance and incomplete tasks stay manual w
       expect(await worker.sweep()).toBe(false);
       expect(value.calls()).toBe(0);
     }
-    expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.learning_proposal WHERE application IS NOT NULL`,
+    ).toHaveLength(0);
   } finally {
     for (const worker of workers) worker.close();
     await database.client.end({ timeout: 2 });
@@ -705,36 +735,39 @@ test("a rejected application insert rolls back the exact Skill revision and choi
     const before = await current();
     await database.client`CREATE FUNCTION factory.reject_owned_learning_application() RETURNS trigger
       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Owned application persistence failed'; END $$`;
-    await database.client`CREATE TRIGGER reject_owned_learning_application BEFORE INSERT
-      ON factory.learning_application FOR EACH ROW EXECUTE FUNCTION factory.reject_owned_learning_application()`;
+    await database.client`CREATE TRIGGER reject_owned_learning_application BEFORE UPDATE
+      ON factory.learning_proposal FOR EACH ROW WHEN (NEW.application IS NOT NULL)
+      EXECUTE FUNCTION factory.reject_owned_learning_application()`;
     worker = createLearningAutomation(database, value.dependencies);
     expect(await worker.sweep()).toBe(true);
     expect(value.calls()).toBe(3);
     expect(await current()).toEqual(before);
-    expect(await database.client`SELECT id FROM factory.learning_application`).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.learning_proposal WHERE application IS NOT NULL`,
+    ).toHaveLength(0);
     const [proposal] = await database.client<
       { state: string; decision: string | null; content: unknown }[]
     >`
       SELECT state,decision_id AS decision,content FROM factory.learning_proposal WHERE id=${value.proposalId}`;
     expect(proposal).toEqual({ state: "proposed", decision: null, content: value.originalContent });
     const [trial] = await database.client<{ id: string; state: string; result: unknown }[]>`
-      SELECT id,state,result FROM factory.learning_trial WHERE proposal_id=${value.proposalId}`;
+      SELECT id,state,coalesce(NULLIF(payload->'result','null'::jsonb),result) AS result FROM factory.operation WHERE kind='learning.trial' AND scope_type='learning_proposal' AND scope_id=${value.proposalId}`;
     expect(trial).toMatchObject({ state: "uncertain", result: null });
-    const evidence = await database.client`SELECT stage,state,input,input_digest,result
-      FROM factory.learning_trial_step WHERE trial_id=${fixtureValue(trial, "retained trial").id} ORDER BY stage`;
+    const [retainedTrial] = await database.client<{ steps: Array<Record<string, unknown>> }[]>`
+      SELECT payload->'steps' AS steps FROM factory.operation WHERE id=${fixtureValue(trial, "retained trial").id} AND kind='learning.trial'`;
+    const evidence = retainedTrial?.steps ?? [];
     expect(evidence).toHaveLength(3);
     expect(evidence.every((step) => step["state"] === "completed" && step["result"] !== null)).toBe(
       true,
     );
-    await database.client`DROP TRIGGER reject_owned_learning_application ON factory.learning_application`;
+    await database.client`DROP TRIGGER reject_owned_learning_application ON factory.learning_proposal`;
     await database.client`DROP FUNCTION factory.reject_owned_learning_application()`;
     expect(await worker.sweep()).toBe(false);
     expect(value.calls()).toBe(3);
     expect(await current()).toEqual(before);
-    expect(
-      await database.client`SELECT stage,state,input,input_digest,result
-      FROM factory.learning_trial_step WHERE trial_id=${fixtureValue(trial, "retained trial").id} ORDER BY stage`,
-    ).toEqual(evidence);
+    const [afterTrial] = await database.client<{ steps: Array<Record<string, unknown>> }[]>`
+      SELECT payload->'steps' AS steps FROM factory.operation WHERE id=${fixtureValue(trial, "retained trial").id} AND kind='learning.trial'`;
+    expect(afterTrial?.steps).toEqual(evidence);
   } finally {
     worker?.close();
     await database.client.end({ timeout: 2 });

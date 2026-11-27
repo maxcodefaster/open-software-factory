@@ -1,12 +1,12 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import type { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
+import type { libraryCoverInput } from "#conversation-domain/library-covers";
 import type {
   mcpChoiceInput,
   mcpConnectInput,
   mcpReviewInput,
   mcpSaveInput,
-} from "../../../../packages/conversation-domain/src/mcp-library";
+} from "#conversation-domain/mcp-library";
 import type { mcpGrantInput, mcpSharingInput } from "../mcp/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

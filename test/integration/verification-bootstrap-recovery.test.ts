@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import type { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
@@ -9,9 +12,6 @@ import { createDeliveryService } from "../../apps/factory/src/delivery/service";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
-import type { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -68,18 +68,15 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
       await database.client`UPDATE factory.change_agent_session SET state='stopped',
         stop_id=${stopID},stop_turn_id=${f.initial.id},stop_pending=false,updated_at=clock_timestamp()
         WHERE change_id=${f.changeID}`;
-      await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${f.attemptID}`;
-      await database.client`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
-        WHERE runtime_attempt_id=${f.attemptID}`;
+      await database.client`UPDATE factory.runtime_attempt SET state='stopped',delete_intended_at=now(),deleted_at=now() WHERE id=${f.attemptID}`;
       await database.client.begin(async (sql) => {
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,
-          generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          VALUES(${workspaceAttemptID},${f.projectID},${f.changeID},${f.workspaceID},2,${f.commit},
-            'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-          SELECT ${workspaceAttemptID},${`fa-${workspaceAttemptID.replaceAll("-", "")}`},
-            ${`runtime-${workspaceAttemptID.replaceAll("-", "")}`},intent
-          FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+          generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,
+          atespace,actor_name,binding_intent)
+          SELECT ${workspaceAttemptID},${f.projectID},${f.changeID},${f.workspaceID},2,${f.commit},
+            'create-intended',${"b".repeat(64)},now(),${f.userID},
+            ${`fa-${workspaceAttemptID.replaceAll("-", "")}`},${`runtime-${workspaceAttemptID.replaceAll("-", "")}`},binding_intent
+          FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         await freezeRuntimeEnvironment(sql, workspaceAttemptID);
         await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${workspaceAttemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${workspaceAttemptID} WHERE id=${f.changeID}`;
@@ -124,18 +121,18 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
       await database.client`UPDATE factory.change_agent_session SET state='committed'
         WHERE change_id=${f.changeID}`;
       await database.client`INSERT INTO factory.verification(
-        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by)
-        VALUES(${f.verificationID},${f.changeID},${commit},1,'owned-human-bootstrap',1,${f.userID})`;
+        id,change_id,commit_sha,pull_request_number,action_run_id,created_by)
+        VALUES(${f.verificationID},${f.changeID},${commit},1,1,${f.userID})`;
     }
     for (let index = 0; index < integrations; index++) {
       const next = String(index + 3).repeat(40);
       await database.client`INSERT INTO factory.change_commit_operation(
         id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
-        integration_base_sha,merge_parent_sha,commit_sha,observed_remote_sha,
+        integration_base_sha,is_merge,commit_sha,observed_remote_sha,
         commit_message,idempotency_key,state,created_by,completed_at,source)
         SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,
           (SELECT max(sequence)+1 FROM factory.change_commit_operation WHERE change_id=${f.changeID}),branch_name,
-          ${commit},${String(index + 5).repeat(40)},${String(index + 5).repeat(40)},
+          ${commit},${String(index + 5).repeat(40)},true,
           ${next},${next},'Integrate current main',${crypto.randomUUID()},'succeeded',
           created_by,now(),'integration'
         FROM factory.change_commit_operation WHERE id=${submittedID}`;
@@ -152,12 +149,17 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
     await database.client`UPDATE factory.runtime_attempt SET state='failed',
       failure='Dev Container postCreateCommand failed: owned browser download failed'
       WHERE id=${attemptID}`;
-    await database.client`INSERT INTO factory.pull_request_operation(
-      id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
-      title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','review','main',branch_name,${f.commit},
-        'Owned bootstrap recovery','','owned-'||id,'succeeded',1,
-        'https://forge.invalid/owned/review/pulls/1',now()
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.pull_request','change',id::text,
+        'delivery.pull_request:owned-'||id,NULL,'succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+          'baseBranch','main','headBranch',branch_name,'commitSha',${f.commit}::text,
+          'firstHeadSha',${f.commit}::text,'title','Owned bootstrap recovery','body',''
+        ),
+        jsonb_build_object('number',1,'url','https://forge.invalid/owned/review/pulls/1'),
+        created_by,now()
       FROM factory.change WHERE id=${f.changeID}`;
     let registrations = 0;
     let starts = 0;
@@ -220,6 +222,9 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
           return null;
         },
         startStagingReplacement: async () => null,
+        pause: async () => {
+          throw new Error("Verification recovery must not pause Coding compute");
+        },
         stop: async (id) => {
           stopped.push(id);
           if (cleanup) await jobs.stop(id);
@@ -305,8 +310,8 @@ async function setup(integrations = 0, human?: "retained-session" | "absent-sess
           SELECT
             (SELECT jsonb_agg(to_jsonb(session)-'updated_at'-'state'-'last_error')
               FROM factory.change_agent_session session WHERE change_id=${f.changeID}) AS session,
-            (SELECT jsonb_agg(to_jsonb(submission)) FROM factory.workspace_submission submission
-              WHERE id=${submittedID}) AS submission,
+            (SELECT jsonb_agg(to_jsonb(submission)) FROM factory.operation submission
+              WHERE id=${submittedID} AND kind='workspace.submission') AS submission,
             (SELECT jsonb_agg(to_jsonb(operation)) FROM factory.change_commit_operation operation
               WHERE id=${submittedID}) AS operation,
             (SELECT jsonb_agg(to_jsonb(turn)) FROM factory.agent_turn turn
@@ -364,7 +369,8 @@ test.each(["retained-session", "absent-session"] as const)(
       expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
       expect(await f.identities()).toEqual(identity);
       const [receipt] = await f.database.client<{ result: unknown }[]>`
-        SELECT result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+        SELECT payload->'result' AS result FROM factory.audit_event
+        WHERE id=${commandID} AND kind='usage.policy_command'`;
       expect(receipt?.result).toMatchObject({
         verificationID: f.verificationID,
         runtimeAttemptID: f.bootstrapAttemptID,
@@ -449,7 +455,8 @@ test.each([
   try {
     await f.controller.reconcile(f.changeID);
     if (condition === "missing-receipt")
-      await f.database.client`DELETE FROM factory.workspace_submission WHERE id=${f.submittedID}`;
+      await f.database
+        .client`DELETE FROM factory.operation WHERE id=${f.submittedID} AND kind='workspace.submission'`;
     if (condition === "newer-writer-epoch")
       await f.database.client`UPDATE factory.change_writer SET epoch=epoch+1
         WHERE change_id=${f.changeID}`;
@@ -464,9 +471,9 @@ test.each([
         fence_attempt_id=${f.workspaceAttemptID} WHERE change_id=${f.changeID}`;
     if (condition === "dirty-buffer" || condition === "conflicted-buffer")
       await f.database.client`INSERT INTO factory.workspace_shared_document(
-        workspace_id,path,y_state,disk_version,dirty,conflict)
+        workspace_id,path,y_state,disk_version,sync_state)
         VALUES(${f.workspaceID},'src/owned.ts',decode('','hex'),'owned-saved-version',
-          ${condition === "dirty-buffer"},${condition === "conflicted-buffer"})`;
+          ${condition === "dirty-buffer" ? "dirty" : "conflict"})`;
     if (condition === "pending-stop")
       await f.database
         .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=true
@@ -594,10 +601,9 @@ test("a failed bootstrap is retained and cleaned up without silently starting an
     expect(f.stopped).toEqual([f.bootstrapAttemptID]);
     expect(f.removed).toEqual([16]);
     const [stopped] = await f.database.client`
-      SELECT attempt.state,attempt.failure,binding.deleted_at IS NOT NULL AS deleted
-      FROM factory.runtime_attempt attempt
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      WHERE attempt.id=${f.bootstrapAttemptID}`;
+      SELECT state,failure,deleted_at IS NOT NULL AS deleted
+      FROM factory.runtime_attempt
+      WHERE id=${f.bootstrapAttemptID}`;
     expect(stopped).toEqual({
       state: "stopped",
       failure: "Dev Container postCreateCommand failed: owned browser download failed",
@@ -655,7 +661,8 @@ test.each([0, 1, 2])(
       expect(retried.runtime).not.toBe(f.bootstrapAttemptID);
       expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
       const [receipt] = await f.database.client<{ result: unknown }[]>`
-      SELECT result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+      SELECT payload->'result' AS result FROM factory.audit_event
+      WHERE id=${commandID} AND kind='usage.policy_command'`;
       expect(receipt?.result).toMatchObject({
         verificationID: f.verificationID,
         runtimeAttemptID: f.bootstrapAttemptID,
@@ -738,8 +745,8 @@ test.each(["stale-verification", "later-submission"] as const)(
         FROM factory.change_commit_operation WHERE id=${f.initial.id}`;
       if (condition === "stale-verification")
         await f.database.client`INSERT INTO factory.verification(
-          id,change_id,commit_sha,pull_request_number,runner_name,created_by)
-          VALUES(${crypto.randomUUID()},${f.changeID},${later},1,'owned-later-job',${f.userID})`;
+          id,change_id,commit_sha,pull_request_number,created_by)
+          VALUES(${crypto.randomUUID()},${f.changeID},${later},1,${f.userID})`;
       await expect(
         f.database.client`UPDATE factory.verification SET commit_sha=${later}
           WHERE id=${f.verificationID}`.execute(),

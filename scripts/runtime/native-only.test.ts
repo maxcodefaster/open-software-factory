@@ -363,10 +363,24 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
   }
   expect(launched.sort()).toEqual(Object.keys(expected).sort());
   expect(tlsClients).toBe(2); // Initialize and validate only the isolated OpenBao.
-  // Check real runtime imports, including embedded clients' dynamic imports, not source keywords.
-  const imports = scanner.scanImports(
-    await readFile("scripts/kubernetes/restore-rehearsal.ts", "utf8"),
-  );
+  // Check real runtime imports across restore-rehearsal and its siblings, never Factory reconcilers.
+  const rehearsalFiles = [
+    "scripts/kubernetes/restore-rehearsal.ts",
+    "scripts/kubernetes/restore-rehearsal-archive.ts",
+    "scripts/kubernetes/restore-rehearsal-common.ts",
+    "scripts/kubernetes/restore-rehearsal-components.ts",
+    "scripts/kubernetes/restore-rehearsal-docker.ts",
+    "scripts/kubernetes/restore-rehearsal-fixture.ts",
+    "scripts/kubernetes/restore-rehearsal-forgejo.ts",
+    "scripts/kubernetes/restore-rehearsal-openbao.ts",
+    "scripts/kubernetes/restore-rehearsal-types.ts",
+    "scripts/kubernetes/restore-rehearsal-witness.ts",
+  ];
+  const imports = (
+    await Promise.all(
+      rehearsalFiles.map(async (file) => scanner.scanImports(await readFile(file, "utf8"))),
+    )
+  ).flat();
   const allowed = new Set([
     "../../deploy/helm/factory/image-pins.json",
     "../../upstream.json",
@@ -374,11 +388,21 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
     "node:fs",
     "node:fs/promises",
     "node:path",
+    "node:url",
     "node:zlib",
     "node:sqlite",
     "node:https",
     "node:tls",
     "./restore-source-contract",
+    "./restore-rehearsal-archive",
+    "./restore-rehearsal-common",
+    "./restore-rehearsal-components",
+    "./restore-rehearsal-docker",
+    "./restore-rehearsal-fixture",
+    "./restore-rehearsal-forgejo",
+    "./restore-rehearsal-openbao",
+    "./restore-rehearsal-types",
+    "./restore-rehearsal-witness",
   ]);
   for (const entry of imports) expect(allowed.has(entry.path), entry.path).toBe(true);
   expect(imports.filter((entry) => entry.path === "node:tls")).toEqual(tlsImport);
@@ -395,9 +419,9 @@ git --git-dir='/var/lib/gitea/git/repositories/owned/project.git' fsck --full --
 });
 
 test.each([
-  "factory.substrate_binding",
+  "factory.runtime_attempt",
   "factory.substrate_source",
-  "factory.substrate_capacity_installation",
+  "factory.operation",
   "factory.change_writer",
 ])(
   "isolated restore rejects a changed %s digest instead of rebinding native identity",
@@ -427,6 +451,27 @@ test("remaining release implementations do not query retired runtime tables or i
 
 test("the Factory application import graph has no legacy execution or Source Pod adapter", async () => {
   const root = resolve(".");
+  const packageImports = (
+    (await Bun.file(resolve(root, "package.json")).json()) as {
+      imports?: Record<string, string>;
+    }
+  ).imports;
+  const resolveSubpathImport = (specifier: string): string | undefined => {
+    if (!packageImports) return undefined;
+    const exact = packageImports[specifier];
+    if (exact) return resolve(root, exact);
+    for (const [pattern, target] of Object.entries(packageImports)) {
+      const star = pattern.indexOf("*");
+      if (star === -1) continue;
+      const prefix = pattern.slice(0, star);
+      const suffix = pattern.slice(star + 1);
+      if (specifier.startsWith(prefix) && specifier.endsWith(suffix)) {
+        const wildcard = specifier.slice(prefix.length, specifier.length - suffix.length);
+        return resolve(root, target.replace("*", wildcard));
+      }
+    }
+    return undefined;
+  };
   const pending = [resolve("apps/factory/src/server/application.ts")];
   const visited = new Set<string>();
   const scanners = {
@@ -442,8 +487,13 @@ test("the Factory application import graph has no legacy execution or Source Pod
     );
     const scanner = path.endsWith(".tsx") ? scanners.tsx : scanners.ts;
     for (const entry of scanner.scanImports(await readFile(path, "utf8"))) {
-      if (!entry.path.startsWith(".")) continue;
-      const base = resolve(dirname(path), entry.path);
+      let base: string;
+      if (entry.path.startsWith(".")) base = resolve(dirname(path), entry.path);
+      else if (entry.path.startsWith("#")) {
+        const mapped = resolveSubpathImport(entry.path);
+        if (!mapped) throw Error(`Unresolved subpath import ${entry.path} in ${path}`);
+        base = mapped;
+      } else continue;
       if (!base.startsWith(`${root}/`)) throw Error("Application import left its repository");
       const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.json`, `${base}/index.ts`];
       let found: string | undefined;

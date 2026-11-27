@@ -2,7 +2,7 @@ import type {
   AgentTurnAuthority,
   AgentTurnCommand,
   AgentTurnState,
-} from "../../../../packages/conversation-domain/src/agent-turn";
+} from "#conversation-domain/agent-turn";
 
 // Turn history owns this record. Attachment admission only needs its pinned context.
 export type AgentTurnRecord = {

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startServiceForward } from "../../packages/runtime-kubernetes/src/service-forward";
+import { startServiceForward } from "#runtime-kubernetes/service-forward";
 
 test("the editor waits for a slow forwarding handshake in the installation's context", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-owned-forward-"));

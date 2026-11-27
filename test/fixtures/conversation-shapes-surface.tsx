@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createMemo, For, Show } from "solid-js";
-import { type AgentMessage } from "../../apps/factory/src/agent/contracts";
+import type { AgentMessage } from "../../apps/factory/src/agent/contracts";
 import { groupConversationActivities } from "../../apps/factory/src/conversation-activity";
 import {
   ChangeAgentActivityGroup,

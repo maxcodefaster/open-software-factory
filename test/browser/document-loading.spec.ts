@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
@@ -15,9 +15,9 @@ test.beforeEach(async () => {
     SELECT user_id AS id FROM factory.administrator LIMIT 1`;
   if (!administrator) throw new Error("Owned browser administrator is missing");
   await database.client`INSERT INTO factory.project
-    (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    (id,slug,name,repository_url,default_branch,actor_template_path,created_by)
     VALUES(${projectID},${`document-loading-${projectID}`},'Document loading',
-      'https://example.invalid/document-loading.git','main','.devcontainer/devcontainer.json',
+      'https://example.invalid/document-loading.git','main','.factory/actor-template.json',
       ${administrator.id})`;
 });
 test.afterEach(async ({ context }) => {

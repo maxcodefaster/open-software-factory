@@ -1,7 +1,4 @@
-import type {
-  InterviewAnswer,
-  InterviewQuestion,
-} from "../../../../packages/conversation-domain/src/conversation";
+import type { InterviewAnswer, InterviewQuestion } from "#conversation-domain/conversation";
 
 // Declared independent choices are safe to advance without inference. A custom
 // choice leaves that declaration; explicit corrections of free text also replan.

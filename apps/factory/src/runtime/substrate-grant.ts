@@ -8,11 +8,7 @@ import {
   isNull,
   notExists,
 } from "drizzle-orm";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   change,
   changeAgentSession,
@@ -20,13 +16,13 @@ import {
   changeCommitOperation,
   developmentWorkspace,
   runtimeAttempt,
-  substrateBinding,
   substrateSource,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn, workspaceWriteAuthorityIn } from "../access/change-writer";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
+import { retainedSourcePreparationIn } from "../workspace/source-role-fence";
 
 export const substrateBootstrapContinuationBlocked =
   "Initial startup has an unsettled outcome with Source retained in its original Actor. Reconcile the startup outcome before continuing; no Feature or lifecycle hook was repeated.";
@@ -79,12 +75,11 @@ export async function substrateBootstrapRetentionIn(
         eq(developmentWorkspace.projectId, runtimeAttempt.projectId),
       ),
     )
-    .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
     .innerJoin(
       substrateSource,
       and(
         eq(substrateSource.workspaceId, developmentWorkspace.id),
-        eq(substrateSource.actorUid, substrateBinding.actorUid),
+        eq(substrateSource.actorUid, runtimeAttempt.actorUid),
       ),
     )
     .where(
@@ -140,28 +135,38 @@ export async function substrateTicketSourcePauseIn(sql: DatabaseTransaction, att
       AND original.state IN ('failed','completed','stopped')
     JOIN factory.change_agent_turn_intent input ON input.turn_id=original.id
       AND input.runtime_attempt_id=a.id AND input.session_id=session.opencode_session_id
-    JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id AND b.actor_uid IS NOT NULL
-      AND b.create_attempted_at IS NOT NULL AND NOT b.create_rejected
-      AND b.delete_intended_at IS NULL AND b.deleted_at IS NULL
-    JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=b.actor_uid
-      AND s.owner='actor' AND NOT s.writable AND s.writer_epoch>1 AND s.checkpoint_id IS NOT NULL
-    JOIN factory.substrate_actor_rpc pause ON pause.runtime_attempt_id=a.id AND pause.action='suspend'
-      AND pause.actor_uid=b.actor_uid AND pause.stop_id IS NULL AND pause.attempted_at IS NULL
-      AND pause.origin_key=COALESCE(b.checkpoint->>'uuid','initial')
-      AND pause.origin_checkpoint IS NOT DISTINCT FROM b.checkpoint
-      AND pause.native_version=b.observation#>>'{metadata,version}'
-    JOIN factory.substrate_actor_rpc resumed ON resumed.runtime_attempt_id=a.id AND resumed.action='resume'
-      AND resumed.origin_key=pause.origin_key AND resumed.actor_uid=b.actor_uid
-      AND resumed.attempted_at IS NOT NULL AND resumed.outcome->>'state'='ACTOR_STATE_RUNNING'
+    JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=a.actor_uid
+      AND s.owner='actor' AND s.writable AND s.checkpoint_id IS NULL
+    JOIN factory.operation pause ON pause.kind='runtime.actor_rpc'
+      AND pause.scope_type='runtime_attempt' AND pause.scope_id=a.id::text
+      AND pause.idempotency_key='runtime.actor_rpc:'||a.id::text||':suspend:'||COALESCE(a.checkpoint->>'uuid','initial')
+      AND pause.payload->>'action'='suspend'
+      AND (pause.payload->>'actorUid')::uuid=a.actor_uid AND (pause.payload->>'stopId') IS NULL
+      AND (pause.payload->>'attemptedAt') IS NULL
+      AND pause.payload->>'originKey'=COALESCE(a.checkpoint->>'uuid','initial')
+      AND NULLIF(pause.payload->'originCheckpoint','null'::jsonb) IS NOT DISTINCT FROM a.checkpoint
+      AND pause.payload->>'nativeVersion'=a.observation#>>'{metadata,version}'
+    JOIN factory.operation resumed ON resumed.kind='runtime.actor_rpc'
+      AND resumed.scope_type='runtime_attempt' AND resumed.scope_id=a.id::text
+      AND resumed.idempotency_key='runtime.actor_rpc:'||a.id::text||':resume:'||(pause.payload->>'originKey')
+      AND resumed.payload->>'action'='resume'
+      AND resumed.payload->>'originKey'=pause.payload->>'originKey'
+      AND (resumed.payload->>'actorUid')::uuid=a.actor_uid
+      AND (resumed.payload->>'attemptedAt') IS NOT NULL AND resumed.result->>'state'='ACTOR_STATE_RUNNING'
     WHERE a.id=${attemptID} AND a.state='pausing'
-      AND a.stop_intended_at IS NULL AND b.observation#>>'{status,state}'='ACTOR_STATE_RUNNING'
+      AND a.stop_intended_at IS NULL AND a.actor_uid IS NOT NULL
+      AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected
+      AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
+      AND a.observation#>>'{status,state}'='ACTOR_STATE_RUNNING'
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
         WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
       AND NOT EXISTS(SELECT 1 FROM factory.agent_turn active WHERE active.change_id=c.id
         AND active.state IN ('pending','dispatching','running','uncertain'))
       AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation operation
         WHERE operation.change_id=c.id AND operation.state NOT IN ('succeeded','failed'))
-      AND NOT EXISTS(SELECT 1 FROM factory.substrate_input_stop stopped WHERE stopped.runtime_attempt_id=a.id)`;
+      AND NOT EXISTS(SELECT 1 FROM factory.operation stopped
+        WHERE stopped.kind='runtime.input_stop' AND stopped.scope_type='runtime_attempt'
+          AND stopped.scope_id=a.id::text)`;
   if (pause) await projectAuthorityIn(sql, pause.userID, pause.projectID);
   return pause ?? null;
 }
@@ -174,6 +179,8 @@ export async function substrateRuntimePrincipalIn(
   attemptID: string,
   retainedSourceParent = false,
 ) {
+  const preparation = await retainedSourcePreparationIn(sql, attemptID);
+  if (preparation) return preparation.userID;
   const [principal] = await sql<{ userID: string | null }[]>`
     SELECT CASE WHEN w.kind='personal' THEN w.owner_user_id
       WHEN writer.state='human' THEN writer.user_id
@@ -187,14 +194,58 @@ export async function substrateRuntimePrincipalIn(
     WHERE a.id=${attemptID} AND a.stop_intended_at IS NULL
        AND (a.state IN ('starting','ready') OR (${retainedSourceParent} AND a.state IN ('failed','pausing')
          AND w.kind='personal'
-         AND EXISTS(SELECT 1 FROM factory.substrate_source s JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-           WHERE s.workspace_id=w.id AND s.actor_uid=b.actor_uid AND s.owner='actor'
+         AND EXISTS(SELECT 1 FROM factory.substrate_source s
+           WHERE s.workspace_id=w.id AND s.actor_uid=a.actor_uid AND s.owner='actor'
              AND ((a.ready_at IS NULL AND a.failure IS NOT NULL)
                OR (a.state='pausing' AND a.ready_at IS NOT NULL AND NOT s.writable AND s.checkpoint_id IS NOT NULL)))))
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt n WHERE n.workspace_id=w.id AND n.generation>a.generation)`;
   if (!principal?.userID)
     throw new CommandError("forbidden", "Current native execution principal is unavailable");
   return principal.userID;
+}
+
+// Read-only control admission for an already started, durably paused canonical
+// Actor. No writer/turn is acquired; no initial import or Stop-only wake qualifies.
+// The native Parent capability may reconnect Source under these same retained
+// facts, but Project entry and Child execution keep their separate writer grant.
+// Successful Delivery's inference-stop marker does not cancel retained file access.
+export async function substrateRetainedSourceIn(
+  sql: DatabaseTransaction,
+  workspaceID: string,
+  attemptID: string,
+) {
+  const [source] = await sql<{ projectID: string }[]>`
+    SELECT a.project_id AS "projectID"
+    FROM factory.runtime_attempt a
+    JOIN factory.development_workspace w ON w.id=a.workspace_id AND w.project_id=a.project_id
+      AND w.change_id IS NOT DISTINCT FROM a.change_id AND w.kind IN ('personal','ticket')
+    JOIN factory.substrate_provision provision ON provision.owner_id=w.id
+      AND provision.kind='workspace' AND provision.generation=a.generation
+    JOIN factory.substrate_source s ON s.workspace_id=w.id AND s.actor_uid=a.actor_uid
+      AND s.owner='actor' AND s.writable AND s.checkpoint_id IS NULL
+    WHERE w.id=${workspaceID} AND a.id=${attemptID}
+      AND a.actor_uid IS NOT NULL AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected
+      AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
+      AND a.checkpoint->>'actorUID'=a.actor_uid::text
+      AND a.checkpoint#>>'{durableSnapshot,state}'='SNAPSHOT_STORAGE_STATE_COMPLETED'
+      AND a.state IN ('paused','resuming','starting','ready')
+      AND a.ready_at IS NOT NULL AND a.stop_intended_at IS NULL
+      AND (w.kind='personal' OR EXISTS(
+        SELECT 1 FROM factory.change c JOIN factory.ticket ticket ON ticket.id=c.ticket_id
+        WHERE c.id=w.change_id AND c.runtime_attempt_id=a.id AND c.project_id=a.project_id
+          AND ticket.id=w.ticket_id AND ticket.trashed_at IS NULL
+          AND (c.cancel_requested_at IS NULL OR c.state='delivered')))
+      AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
+        WHERE newer.workspace_id=w.id AND newer.generation>a.generation)
+      AND NOT EXISTS(SELECT 1 FROM factory.agent_turn active WHERE active.change_id=a.change_id
+        AND active.state IN ('pending','dispatching','running','uncertain'))
+      AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session
+        WHERE session.runtime_attempt_id=a.id
+          AND (session.stop_pending OR session.state IN ('starting','working')))
+      AND NOT EXISTS(SELECT 1 FROM factory.operation stopped
+        WHERE stopped.kind='runtime.input_stop' AND stopped.scope_type='runtime_attempt'
+          AND stopped.scope_id=a.id::text AND stopped.completed_at IS NULL)`;
+  return source ?? null;
 }
 
 // Runtime access is not permission to dispatch a prompt. Fresh Ticket execution
@@ -245,6 +296,21 @@ export async function substrateWorkspaceGrantIn(
     return workspace;
   }
   await projectAuthorityIn(sql, userID, workspace.projectID);
+  if (writer.state === "agent-preparing" && writer.fenceAttemptID) {
+    const preparation = await retainedSourcePreparationIn(sql, writer.fenceAttemptID);
+    if (
+      preparation?.workspaceID === workspaceID &&
+      preparation.userID === userID &&
+      preparation.turnID === writer.turnID &&
+      preparation.epoch === writer.epoch &&
+      (await createAgentTurnStore(database).validateExecutionIn(
+        sql,
+        preparation.turnID,
+        preparation.ownerToken,
+      ))
+    )
+      return workspace;
+  }
   const [turn] = await sql<{ id: string; ownerToken: string | null }[]>`
     SELECT t.id,t.owner_token AS "ownerToken" FROM factory.agent_turn t
     JOIN factory.change c ON c.id=t.change_id
@@ -274,8 +340,10 @@ export async function substrateWorkspaceGrantIn(
       JOIN factory.change_agent_session session ON session.change_id=c.id
       JOIN factory.agent_turn completed ON completed.id=session.active_turn_id
       JOIN factory.runtime_attempt attempt ON attempt.id=c.runtime_attempt_id
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      JOIN factory.project_delivery_queue queue ON queue.project_id=c.project_id AND queue.change_id=c.id
+      JOIN factory.operation queue ON queue.kind='project.delivery_queue'
+        AND queue.scope_type='project' AND queue.scope_id=c.project_id::text
+        AND queue.idempotency_key='project.delivery_queue:'||c.project_id::text
+        AND queue.active_key='project.delivery_queue.change:'||c.id::text
       WHERE c.id=${workspace.changeID} AND c.project_id=${workspace.projectID}
         AND c.state='active' AND c.cancel_requested_at IS NULL
         AND operation.source='integration' AND operation.state IN ('commit-intended','push-intended')
@@ -283,8 +351,8 @@ export async function substrateWorkspaceGrantIn(
         AND operation.runtime_attempt_id=attempt.id AND attempt.workspace_id=${workspaceID}
  AND attempt.stop_intended_at IS NULL
         AND attempt.state IN ('starting','ready','paused','resuming')
-        AND binding.actor_uid IS NOT NULL AND binding.create_attempted_at IS NOT NULL
-        AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL AND NOT binding.create_rejected
+        AND attempt.actor_uid IS NOT NULL AND attempt.create_attempted_at IS NOT NULL
+        AND attempt.delete_intended_at IS NULL AND attempt.deleted_at IS NULL AND NOT attempt.create_rejected
         AND session.runtime_attempt_id=attempt.id AND session.state='committed' AND NOT session.stop_pending
         AND completed.id=${turn.id} AND completed.change_id=c.id AND completed.state='completed'
         AND operation.expected_parent_sha=(SELECT commit_sha FROM factory.change_commit_operation
@@ -338,13 +406,12 @@ export async function substrateWorkspaceSourceIn(
       ON w.id=a.workspace_id AND w.kind IN ('personal','ticket')
         AND w.project_id=a.project_id AND w.change_id IS NOT DISTINCT FROM a.change_id
     JOIN factory.project project ON project.id=a.project_id
-    JOIN factory.substrate_workspace provision ON provision.workspace_id=w.id AND provision.generation=a.generation
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
+    JOIN factory.substrate_provision provision ON provision.owner_id=w.id AND provision.kind='workspace' AND provision.generation=a.generation
     WHERE a.id=${attemptID} AND a.state='starting' AND a.ready_at IS NULL AND a.stop_intended_at IS NULL
       AND provision.intent->>'repositoryURL'=project.repository_url
       AND provision.intent->>'revision'=a.revision AND provision.intent->>'branch'=w.source_branch
-      AND binding.actor_uid IS NOT NULL AND binding.create_attempted_at IS NOT NULL AND NOT binding.create_rejected
-      AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+      AND a.actor_uid IS NOT NULL AND a.create_attempted_at IS NOT NULL AND NOT a.create_rejected
+      AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer WHERE newer.workspace_id=w.id AND newer.generation>a.generation)`;
   if (!scope) throw new CommandError("forbidden", "Current native Workspace Source grant required");
   const principal = await substrateRuntimePrincipalIn(sql, attemptID);

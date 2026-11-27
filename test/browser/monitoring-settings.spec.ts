@@ -1,15 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import type { z } from "zod";
+import type { MCPLibraryView, MCPRole, mcpSaveInput } from "#conversation-domain/mcp-library";
+import type { monitoringSave } from "#conversation-domain/monitoring";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import type {
-  MCPLibraryView,
-  MCPRole,
-  mcpSaveInput,
-} from "../../packages/conversation-domain/src/mcp-library";
-import type { monitoringSave } from "../../packages/conversation-domain/src/monitoring";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-host-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -94,8 +90,8 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
       { id: string }[]
     >`SELECT user_id AS id FROM factory.administrator`;
     if (!admin) throw new Error("Owned monitoring administrator is missing");
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectId},${`monitoring-ui-${projectId}`},${projectName},'https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${admin.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectId},${`monitoring-ui-${projectId}`},${projectName},'https://example.invalid/owned.git','main','.factory/actor-template.json',${admin.id})`;
     await open(page);
     await expect(monitoring.getByText("Give external requests a place to land")).toBeVisible();
     await monitoring.getByRole("button", { name: "Add input", exact: true }).click();
@@ -248,11 +244,12 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await expect(save).toBeEnabled();
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await chooseSettingsPage(page, "MCP connections");
-    const libraryActions = page.locator('summary[aria-label="MCP library actions"]');
-    await expect(libraryActions).toBeVisible();
-    await libraryActions.click();
-    await expect(page.getByRole("button", { name: "Manage", exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
+    const mcpActions = page.getByRole("group", { name: "MCP library actions", exact: true });
+    await mcpActions.getByRole("button", { name: "Manage", exact: true }).click();
+    await expect(
+      mcpActions.getByRole("button", { name: "Browse connections", exact: true }),
+    ).toBeVisible();
+    await mcpActions.getByRole("button", { name: "Browse connections", exact: true }).click();
     await chooseSettingsPage(page, "Inputs");
     await stopConnectMock();
     const sourceView = await serverCall(browserFunction(page, "getMCPLibrary", [projectId]));
@@ -399,7 +396,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     const [counts] = await database.client<{ hooks: number; policies: number; commands: number }[]>`
       SELECT (SELECT count(*)::int FROM factory.monitoring_hook) AS hooks,
         (SELECT count(*)::int FROM factory.monitoring_policy) AS policies,
-        (SELECT count(*)::int FROM factory.monitoring_command) AS commands`;
+        (SELECT count(*)::int FROM factory.audit_event WHERE kind='monitoring.command') AS commands`;
     expect(counts).toEqual({ hooks: 1, policies: 1, commands: 1 });
     const url = await secret.getByLabel("Webhook URL", { exact: true }).inputValue();
     await expect(secret.getByLabel("Webhook URL", { exact: true })).toHaveAttribute(

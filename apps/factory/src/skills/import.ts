@@ -1,6 +1,6 @@
 import { parse } from "yaml";
 import { z } from "zod";
-import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
+import { skillContentInput } from "#conversation-domain/skills";
 import { repositorySkillImportInput, skillImportInput } from "./commands";
 
 export function previewSkillImport(value: unknown) {

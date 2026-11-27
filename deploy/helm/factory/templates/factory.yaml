@@ -182,8 +182,12 @@ spec:
             items: [{key: token, path: token}]
         - name: substrate-control
           projected:
-            defaultMode: 0444
+            defaultMode: 292
             sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
               - serviceAccountToken:
                   audience: api.ate-system.svc
                   expirationSeconds: 600

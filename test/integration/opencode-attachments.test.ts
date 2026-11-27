@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { attachmentMarkdown } from "#conversation-domain/attachments";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
@@ -6,7 +7,6 @@ import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
 import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { createAttachmentTools } from "../../apps/factory/src/attachments/tools";
-import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
 import { ownedBrowserJPEG } from "../fixtures/browser-image";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";

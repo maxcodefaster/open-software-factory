@@ -17,6 +17,7 @@ import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/s
 import { WorkspaceService } from "@theia/workspace/lib/browser/workspace-service";
 import { FactoryActivityNavigation } from "./factory-activity-navigation";
 import { FactoryChromeContribution } from "./factory-chrome";
+import { FactoryCollaboration } from "./factory-collaboration";
 import { FactoryLanguageGrammars } from "./factory-language-grammars";
 import { FactoryLanguageTools } from "./factory-language-tools";
 import {
@@ -39,7 +40,6 @@ import { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 import { FactoryWorkspaceTree } from "./factory-workspace-tree";
 import { FactoryWorkspaceWidget } from "./factory-workspace-widget";
 import { FactoryWriterContribution } from "./factory-writer";
-import { FactoryCollaboration } from "./factory-collaboration";
 import "./factory-ide.css";
 import { FactoryGitContribution, FactoryGitWidget, factoryGitWidgetID } from "./factory-git-widget";
 

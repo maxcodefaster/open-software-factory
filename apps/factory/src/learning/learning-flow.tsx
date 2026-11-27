@@ -8,7 +8,7 @@ import {
   Show,
   untrack,
 } from "solid-js";
-import type { LearningView } from "../../../../packages/conversation-domain/src/learning";
+import type { LearningView } from "#conversation-domain/learning";
 import { learningFlowLayout, learningFlowRecords } from "./flow";
 import { LearningFlowPreview } from "./flow-preview";
 import "./learning-flow.css";

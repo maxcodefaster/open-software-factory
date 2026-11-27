@@ -1,4 +1,4 @@
-import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
+import type { TurnObservation } from "#conversation-domain/turn-observation";
 
 export function projectFailureNotice(turn: Pick<TurnObservation, "state" | "summary">) {
   if (turn.state === "uncertain")

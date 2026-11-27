@@ -35,14 +35,15 @@ function compact(value: unknown, depth = 0): unknown {
   if (depth > 7) return "[depth limit]";
   if (typeof value === "string") {
     if (/^https?:\/\//i.test(value)) {
-      try {
-        const url = new URL(value);
+      // Malformed http(s)-prefixed text is not a URL; fall back to bounded plain text.
+      const url = URL.parse(value);
+      if (url) {
         url.username = "";
         url.password = "";
         url.search = "";
         url.hash = "";
         return url.href.slice(0, 2_000);
-      } catch {}
+      }
     }
     return value.slice(0, 2_000);
   }
@@ -65,14 +66,12 @@ function compact(value: unknown, depth = 0): unknown {
 function reference(...values: unknown[]) {
   for (const value of values) {
     if (typeof value !== "string" || value.length > 2_000) continue;
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "https:" || url.username || url.password) continue;
-      // Never retain URL query secrets. References are citations, never fetch targets.
-      url.search = "";
-      url.hash = "";
-      return url.href;
-    } catch {}
+    const url = URL.parse(value);
+    if (url?.protocol !== "https:" || url.username || url.password) continue;
+    // Never retain URL query secrets. References are citations, never fetch targets.
+    url.search = "";
+    url.hash = "";
+    return url.href;
   }
   return null;
 }

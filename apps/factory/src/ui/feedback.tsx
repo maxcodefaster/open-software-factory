@@ -75,8 +75,7 @@ export function CopyButton(props: {
       >
         <span class="feedback-mark" aria-hidden="true" />
         <Show when={!props.iconOnly}>
-          <span class="copy-feedback-label" aria-hidden="true">
-            <span class="copy-feedback-reserve">{props.label ?? "Copy"}</span>
+          <span class="copy-feedback-label" data-reserve={props.label ?? "Copy"} aria-hidden="true">
             <span>{copyFeedbackLabel(clipboard.state(), props.label)}</span>
           </span>
         </Show>

@@ -1,15 +1,15 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { Show, untrack } from "solid-js";
-import type { BoardStage } from "../../../../packages/interface-domain/src/ticket-board";
-import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
-import { type PersonalTicketDraft, type Ticket } from "../change/contracts";
-import type { EpicEdit } from "../epic-controls";
-import { type Epic } from "../projects/contracts";
+import type { BoardStage } from "#interface-domain/ticket-board";
+import type { PrerequisiteView } from "#ticket-domain/dependency";
+import type { PersonalTicketDraft, Ticket } from "../change/contracts";
+import type { Epic } from "../projects/contracts";
 import type { createProjectPlanning } from "../projects/planning";
 import { ticketReference } from "../projects/ticket-content";
 import { SetupEmptyBoard } from "../setup/panel";
-import { TicketBoardContents } from "../ticket-board";
-import { TicketQuickFind } from "../ticket-quick-find";
+import type { EpicEdit } from "../tickets/epic-controls";
+import { TicketBoardContents } from "../tickets/ticket-board";
+import { TicketQuickFind } from "../tickets/ticket-quick-find";
 import { DesktopEmpty } from "../workspace-chrome";
 import type { DesktopProject } from "./contracts";
 
@@ -19,8 +19,8 @@ export interface ProjectBoardModel {
   setupVisible: () => boolean;
   selectedProject: Accessor<DesktopProject | undefined>;
   projectsLoading: () => boolean;
-  setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
-  narrowViewport: SourceAccessor<boolean>;
+  setProjectMenuOpen: (value: boolean | ((previous: boolean) => boolean)) => boolean;
+  narrowViewport: Accessor<boolean>;
   historyTickets: () => Ticket[];
   boardHasMore: () => boolean;
   ticketLimit: ReturnType<typeof createProjectPlanning>["ticketLimit"];
@@ -145,9 +145,7 @@ export function ProjectBoard(props: { model: ProjectBoardModel }) {
         <TicketBoardContents
           tickets={model.scopedTickets()}
           epics={model.epicList()}
-          archivedTickets={props.model
-            .scopedTickets()
-            .filter((ticket) => model.lane(ticket) === "history")}
+          archivedTickets={model.historyTickets()}
           historyOpen={model.boardHistoryOpen()}
           pending={model.pending()}
           selectedTicketID={model.selectedTicketID()}

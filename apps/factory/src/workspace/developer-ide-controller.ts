@@ -1,30 +1,19 @@
 import { and, eq, sql as expression, inArray, isNull, ne } from "drizzle-orm";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  accountAccess,
-  administrator,
-  developerIde,
-  projectMembership,
-} from "../../../../packages/db/src/schema";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { accountAccess, administrator, operation, projectMembership } from "#db/schema";
 import {
   createDeveloperIDEClient,
   type DeveloperIDEClient,
   DeveloperIDEIntentConflict,
   type DeveloperIDEObservation,
-} from "../../../../packages/runtime-kubernetes/src/developer-ide";
-import type { DeveloperIDEResources } from "../../../../packages/runtime-kubernetes/src/developer-ide-manifest";
-import {
-  type DeveloperIDEState,
-  developerIDEIdentity,
-} from "../../../../packages/workspace-domain/src/developer-ide";
+} from "#runtime-kubernetes/developer-ide";
+import type { DeveloperIDEResources } from "#runtime-kubernetes/developer-ide-manifest";
+import { type DeveloperIDEState, developerIDEIdentity } from "#workspace-domain/developer-ide";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 
+const DEVELOPER_IDE_KIND = "workspace.developer_ide";
 type Database = ReturnType<typeof createDatabase>;
 type IDEQuery = Database["client"] | DatabaseTransaction;
 interface IDERow {
@@ -82,17 +71,23 @@ export function createDeveloperIDEController(
   async function row(userID: string, sql: IDEQuery = database.client) {
     const [current] = await drizzleTransaction(sql)
       .select({
-        userID: developerIde.userId,
-        resourceID: developerIde.resourceId,
-        epoch: expression<string>`${developerIde.serviceEpoch}::text`,
-        state: developerIde.state,
-        image: developerIde.image,
-        namespaceUID: developerIde.namespaceUid,
-        podUID: developerIde.podUid,
-        failure: developerIde.failure,
+        userID: operation.scopeId,
+        resourceID: expression<string>`${operation.payload}->>'resourceId'`,
+        epoch: expression<string>`COALESCE(${operation.payload}->>'serviceEpoch','1')`,
+        state: expression<DeveloperIDEState>`${operation.state}`,
+        image: expression<string>`${operation.payload}->>'image'`,
+        namespaceUID: expression<string | null>`${operation.payload}->>'namespaceUid'`,
+        podUID: expression<string | null>`${operation.payload}->>'podUid'`,
+        failure: operation.error,
       })
-      .from(developerIde)
-      .where(eq(developerIde.userId, userID));
+      .from(operation)
+      .where(
+        and(
+          eq(operation.kind, DEVELOPER_IDE_KIND),
+          eq(operation.scopeType, "user"),
+          eq(operation.scopeId, userID),
+        ),
+      );
     return current ?? null;
   }
   function resources(current: IDERow): DeveloperIDEResources {
@@ -108,24 +103,32 @@ export function createDeveloperIDEController(
     return { serviceID, epoch, state: current.state, failure: current.failure };
   }
   async function record(current: IDERow, observed: DeveloperIDEObservation, sql: IDEQuery) {
+    const failure = observed.failed
+      ? "Editor preparation failed. Stop and retry the editor."
+      : null;
     const updated = await drizzleTransaction(sql)
-      .update(developerIde)
+      .update(operation)
       .set({
-        namespaceUid: observed.namespaceUID,
-        podUid: observed.podUID,
         state: observed.failed ? "failed" : observed.ready ? "ready" : "preparing",
-        failure: observed.failed ? "Editor preparation failed. Stop and retry the editor." : null,
-        createObservedAt: expression`COALESCE(${developerIde.createObservedAt},now())`,
+        error: failure,
+        payload: expression`${operation.payload} || jsonb_build_object(
+          'namespaceUid',${observed.namespaceUID}::text,
+          'podUid',${observed.podUID}::text,
+          'failure',${failure}::text,
+          'createObservedAt',COALESCE(${operation.payload}->>'createObservedAt',now()::text)
+        )`,
         updatedAt: expression`now()`,
       })
       .where(
         and(
-          eq(developerIde.userId, current.userID),
-          eq(developerIde.serviceEpoch, expression`${current.epoch}::bigint`),
-          inArray(developerIde.state, ["create-intended", "preparing", "ready"]),
+          eq(operation.kind, DEVELOPER_IDE_KIND),
+          eq(operation.scopeType, "user"),
+          eq(operation.scopeId, current.userID),
+          expression`(${operation.payload}->>'serviceEpoch')::bigint=${current.epoch}::bigint`,
+          inArray(operation.state, ["create-intended", "preparing", "ready"]),
         ),
       )
-      .returning({ userID: developerIde.userId });
+      .returning({ userID: operation.scopeId });
     if (!updated.length)
       throw new CommandError("conflict", "Editor lifecycle changed during preparation");
   }
@@ -143,13 +146,22 @@ export function createDeveloperIDEController(
       } catch (cause) {
         if (!(cause instanceof CommandError)) throw cause;
         await drizzleTransaction(sql)
-          .update(developerIde)
+          .update(operation)
           .set({
             state: "stop-intended",
-            stopIntendedAt: expression`COALESCE(${developerIde.stopIntendedAt},now())`,
+            payload: expression`${operation.payload} || jsonb_build_object(
+              'stopIntendedAt',COALESCE(${operation.payload}->>'stopIntendedAt',now()::text)
+            )`,
             updatedAt: expression`now()`,
           })
-          .where(and(eq(developerIde.userId, userID), ne(developerIde.state, "stopped")));
+          .where(
+            and(
+              eq(operation.kind, DEVELOPER_IDE_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.scopeId, userID),
+              ne(operation.state, "stopped"),
+            ),
+          );
         current = await row(userID, sql);
         if (!current) return false;
       }
@@ -157,18 +169,24 @@ export function createDeveloperIDEController(
       if (current.state === "stop-intended") {
         await client.stop(input);
         await drizzleTransaction(sql)
-          .update(developerIde)
+          .update(operation)
           .set({
             state: "stopped",
-            failure: null,
-            stoppedAt: expression`now()`,
+            error: null,
+            completedAt: expression`now()`,
+            payload: expression`${operation.payload} || jsonb_build_object(
+              'failure',NULL,
+              'stoppedAt',now()::text
+            )`,
             updatedAt: expression`now()`,
           })
           .where(
             and(
-              eq(developerIde.userId, userID),
-              eq(developerIde.serviceEpoch, expression`${current.epoch}::bigint`),
-              eq(developerIde.state, "stop-intended"),
+              eq(operation.kind, DEVELOPER_IDE_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.scopeId, userID),
+              expression`(${operation.payload}->>'serviceEpoch')::bigint=${current.epoch}::bigint`,
+              eq(operation.state, "stop-intended"),
             ),
           );
         return false;
@@ -185,19 +203,23 @@ export function createDeveloperIDEController(
       if (!observed) {
         // A confirmed missing Pod is not permission to create another Pod
         // under its immutable recorded identity.
+        const missingFailure =
+          "The recorded editor service is no longer available. Restart the editor to prepare a new service.";
         await drizzleTransaction(sql)
-          .update(developerIde)
+          .update(operation)
           .set({
             state: "failed",
-            failure:
-              "The recorded editor service is no longer available. Restart the editor to prepare a new service.",
+            error: missingFailure,
+            payload: expression`${operation.payload} || jsonb_build_object('failure',${missingFailure}::text)`,
             updatedAt: expression`now()`,
           })
           .where(
             and(
-              eq(developerIde.userId, userID),
-              eq(developerIde.serviceEpoch, expression`${current.epoch}::bigint`),
-              inArray(developerIde.state, ["create-intended", "preparing", "ready"]),
+              eq(operation.kind, DEVELOPER_IDE_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.scopeId, userID),
+              expression`(${operation.payload}->>'serviceEpoch')::bigint=${current.epoch}::bigint`,
+              inArray(operation.state, ["create-intended", "preparing", "ready"]),
             ),
           );
         return false;
@@ -206,38 +228,42 @@ export function createDeveloperIDEController(
       return !observed.ready && !observed.failed;
     } catch (cause) {
       if (cause instanceof DeveloperIDEIntentConflict) {
+        const conflictFailure =
+          "Editor resources conflict with this recorded intent. Existing resources were not changed. Restart the editor to prepare a separate service.";
         await drizzleTransaction(sql)
-          .update(developerIde)
+          .update(operation)
           .set({
-            state: expression`CASE WHEN ${developerIde.state}='stop-intended' THEN ${developerIde.state} ELSE 'failed' END`,
-            failure:
-              "Editor resources conflict with this recorded intent. Existing resources were not changed. Restart the editor to prepare a separate service.",
+            state: expression`CASE WHEN ${operation.state}='stop-intended' THEN ${operation.state} ELSE 'failed' END`,
+            error: conflictFailure,
+            payload: expression`${operation.payload} || jsonb_build_object('failure',${conflictFailure}::text)`,
             updatedAt: expression`now()`,
           })
           .where(
             and(
-              eq(developerIde.userId, userID),
-              inArray(developerIde.state, [
-                "create-intended",
-                "preparing",
-                "ready",
-                "stop-intended",
-              ]),
+              eq(operation.kind, DEVELOPER_IDE_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.scopeId, userID),
+              inArray(operation.state, ["create-intended", "preparing", "ready", "stop-intended"]),
             ),
           );
         return false;
       }
+      const unavailableFailure =
+        "Editor resources are unavailable. Factory is checking the recorded intent.";
       await drizzleTransaction(sql)
-        .update(developerIde)
+        .update(operation)
         .set({
-          state: expression`CASE WHEN ${developerIde.state}='ready' THEN 'preparing' ELSE ${developerIde.state} END`,
-          failure: "Editor resources are unavailable. Factory is checking the recorded intent.",
+          state: expression`CASE WHEN ${operation.state}='ready' THEN 'preparing' ELSE ${operation.state} END`,
+          error: unavailableFailure,
+          payload: expression`${operation.payload} || jsonb_build_object('failure',${unavailableFailure}::text)`,
           updatedAt: expression`now()`,
         })
         .where(
           and(
-            eq(developerIde.userId, userID),
-            inArray(developerIde.state, ["create-intended", "preparing", "ready", "stop-intended"]),
+            eq(operation.kind, DEVELOPER_IDE_KIND),
+            eq(operation.scopeType, "user"),
+            eq(operation.scopeId, userID),
+            inArray(operation.state, ["create-intended", "preparing", "ready", "stop-intended"]),
           ),
         );
       return (await row(userID, sql))?.state === "stop-intended" ? false : "unavailable";
@@ -283,21 +309,26 @@ export function createDeveloperIDEController(
           if (retry === true) deadline = now() + 150_000;
           await Bun.sleep(500);
         } while (!closed && now() < deadline);
-        if (!closed)
+        if (!closed) {
+          const timeoutFailure =
+            "Editor resources could not be confirmed. Retry the connection to observe the retained editor.";
           await database.db
-            .update(developerIde)
+            .update(operation)
             .set({
               state: "failed",
-              failure:
-                "Editor resources could not be confirmed. Retry the connection to observe the retained editor.",
+              error: timeoutFailure,
+              payload: expression`${operation.payload} || jsonb_build_object('failure',${timeoutFailure}::text)`,
               updatedAt: expression`now()`,
             })
             .where(
               and(
-                eq(developerIde.userId, userID),
-                inArray(developerIde.state, ["create-intended", "preparing"]),
+                eq(operation.kind, DEVELOPER_IDE_KIND),
+                eq(operation.scopeType, "user"),
+                eq(operation.scopeId, userID),
+                inArray(operation.state, ["create-intended", "preparing"]),
               ),
             );
+        }
       } finally {
         pending.delete(userID);
         if (worker.wakeup) schedule(userID);
@@ -319,20 +350,24 @@ export function createDeveloperIDEController(
         (outdated.state === "ready" || outdated.state === "preparing")
       ) {
         const stopping = await database.db
-          .update(developerIde)
+          .update(operation)
           .set({
             state: "stop-intended",
-            stopIntendedAt: expression`COALESCE(${developerIde.stopIntendedAt},now())`,
+            payload: expression`${operation.payload} || jsonb_build_object(
+              'stopIntendedAt',COALESCE(${operation.payload}->>'stopIntendedAt',now()::text)
+            )`,
             updatedAt: expression`now()`,
           })
           .where(
             and(
-              eq(developerIde.userId, userID),
-              eq(developerIde.serviceEpoch, expression`${outdated.epoch}::bigint`),
-              inArray(developerIde.state, ["ready", "preparing"]),
+              eq(operation.kind, DEVELOPER_IDE_KIND),
+              eq(operation.scopeType, "user"),
+              eq(operation.scopeId, userID),
+              expression`(${operation.payload}->>'serviceEpoch')::bigint=${outdated.epoch}::bigint`,
+              inArray(operation.state, ["ready", "preparing"]),
             ),
           )
-          .returning({ userID: developerIde.userId });
+          .returning({ userID: operation.scopeId });
         if (stopping.length) restartEpoch = outdated.epoch;
         schedule(userID);
         const deadline = now() + 60_000;
@@ -344,44 +379,99 @@ export function createDeveloperIDEController(
         await projectDevelopmentAuthorityIn(sql, userID, projectID);
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`developer-ide-intent:${userID}`}))`;
         const current = await row(userID, sql);
-        if (!current)
-          await db.insert(developerIde).values({ userId: userID, state: "create-intended", image });
-        else if (current.state === "stopped" && current.epoch === restartEpoch)
-          // A request already opening/observing this epoch cannot turn a later
-          // owner Stop into permission for another epoch.
-          await db
-            .update(developerIde)
-            .set({
-              serviceEpoch: expression`${developerIde.serviceEpoch}+1`,
-              state: "create-intended",
+        if (!current) {
+          const resourceId = crypto.randomUUID();
+          const nowIso = new Date().toISOString();
+          await db.insert(operation).values({
+            id: crypto.randomUUID(),
+            kind: DEVELOPER_IDE_KIND,
+            scopeType: "user",
+            scopeId: userID,
+            idempotencyKey: `workspace.developer_ide:${userID}`,
+            activeKey: `workspace.developer_ide.resource:${resourceId}`,
+            state: "create-intended",
+            error: null,
+            createdBy: userID,
+            completedAt: null,
+            payload: {
+              userId: userID,
+              serviceEpoch: 1,
               image,
+              namespaceUid: null,
               podUid: null,
               failure: null,
-              createIntendedAt: expression`now()`,
+              createIntendedAt: nowIso,
               createObservedAt: null,
               stopIntendedAt: null,
               stoppedAt: null,
-              lastActiveAt: expression`now()`,
+              lastActiveAt: nowIso,
+              resourceId,
+            },
+          });
+        } else if (current.state === "stopped" && current.epoch === restartEpoch)
+          // A request already opening/observing this epoch cannot turn a later
+          // owner Stop into permission for another epoch.
+          await db
+            .update(operation)
+            .set({
+              state: "create-intended",
+              error: null,
+              completedAt: null,
+              payload: expression`${operation.payload} || jsonb_build_object(
+                'serviceEpoch',(${operation.payload}->>'serviceEpoch')::bigint+1,
+                'image',${image}::text,
+                'podUid',NULL,
+                'failure',NULL,
+                'createIntendedAt',now()::text,
+                'createObservedAt',NULL,
+                'stopIntendedAt',NULL,
+                'stoppedAt',NULL,
+                'lastActiveAt',now()::text
+              )`,
               updatedAt: expression`now()`,
             })
-            .where(eq(developerIde.userId, userID));
+            .where(
+              and(
+                eq(operation.kind, DEVELOPER_IDE_KIND),
+                eq(operation.scopeType, "user"),
+                eq(operation.scopeId, userID),
+              ),
+            );
         else if (current.state === "failed")
           // Explicit Retry observes the same immutable intent. A preparation deadline
           // does not establish that its Pod failed or permit a replacement epoch.
           await db
-            .update(developerIde)
+            .update(operation)
             .set({
               state: "preparing",
-              failure: null,
-              lastActiveAt: expression`now()`,
+              error: null,
+              payload: expression`${operation.payload} || jsonb_build_object(
+                'failure',NULL,
+                'lastActiveAt',now()::text
+              )`,
               updatedAt: expression`now()`,
             })
-            .where(and(eq(developerIde.userId, userID), eq(developerIde.state, "failed")));
+            .where(
+              and(
+                eq(operation.kind, DEVELOPER_IDE_KIND),
+                eq(operation.scopeType, "user"),
+                eq(operation.scopeId, userID),
+                eq(operation.state, "failed"),
+              ),
+            );
         else
           await db
-            .update(developerIde)
-            .set({ lastActiveAt: expression`now()` })
-            .where(eq(developerIde.userId, userID));
+            .update(operation)
+            .set({
+              payload: expression`${operation.payload} || jsonb_build_object('lastActiveAt',now()::text)`,
+            })
+            .where(
+              and(
+                eq(operation.kind, DEVELOPER_IDE_KIND),
+                eq(operation.scopeType, "user"),
+                eq(operation.scopeId, userID),
+              ),
+            );
       });
       const current = await row(userID);
       if (!current) throw new CommandError("unavailable", "Editor intent was not recorded");
@@ -415,13 +505,22 @@ export function createDeveloperIDEController(
     async stop(userID: string) {
       // An authenticated owner may also stop their own editor after losing their last Developer role.
       await database.db
-        .update(developerIde)
+        .update(operation)
         .set({
           state: "stop-intended",
-          stopIntendedAt: expression`COALESCE(${developerIde.stopIntendedAt},now())`,
+          payload: expression`${operation.payload} || jsonb_build_object(
+            'stopIntendedAt',COALESCE(${operation.payload}->>'stopIntendedAt',now()::text)
+          )`,
           updatedAt: expression`now()`,
         })
-        .where(and(eq(developerIde.userId, userID), ne(developerIde.state, "stopped")));
+        .where(
+          and(
+            eq(operation.kind, DEVELOPER_IDE_KIND),
+            eq(operation.scopeType, "user"),
+            eq(operation.scopeId, userID),
+            ne(operation.state, "stopped"),
+          ),
+        );
       schedule(userID);
     },
     async revokeMember(_projectID: string, userID: string) {
@@ -429,10 +528,14 @@ export function createDeveloperIDEController(
     },
     async recover() {
       const rows = await database.db
-        .select({ userID: developerIde.userId })
-        .from(developerIde)
+        .select({ userID: operation.scopeId })
+        .from(operation)
         .where(
-          inArray(developerIde.state, ["create-intended", "preparing", "ready", "stop-intended"]),
+          and(
+            eq(operation.kind, DEVELOPER_IDE_KIND),
+            eq(operation.scopeType, "user"),
+            inArray(operation.state, ["create-intended", "preparing", "ready", "stop-intended"]),
+          ),
         );
       for (const current of rows) schedule(current.userID);
     },

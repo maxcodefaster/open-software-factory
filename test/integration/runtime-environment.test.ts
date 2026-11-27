@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import { hashConnectorToken } from "#runtime-domain/identity";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
 import {
   createRuntimeEnvironmentEndpoint,
   freezeRuntimeEnvironment,
 } from "../../apps/factory/src/environments/runtime";
-import { hashConnectorToken } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
@@ -42,21 +42,12 @@ test("runtime environment freezes version, authenticates parent generation, isol
       name,
       value: `owned-${name}`,
       runtime: true,
-      build: false,
       verification,
     });
     await controller.save(owned.projectID, owned.userID, "development", {
       commandID: crypto.randomUUID(),
       version: 0,
       variables: [variable("PRIVATE_DEV", false), variable("TEST_TOKEN", true)],
-      registries: [
-        {
-          host: "private.registry.test",
-          username: "robot",
-          password: "owned-registry",
-          verification: false,
-        },
-      ],
     });
     // The shared fixture already admitted its original runtime before settings
     // existed. Saving settings cannot retarget that immutable empty admission.
@@ -98,8 +89,8 @@ test("runtime environment freezes version, authenticates parent generation, isol
     // is exercised separately, not simulated by the environment endpoint.
     const actorUID = crypto.randomUUID();
     await database.client.begin(async (sql) => {
-      await sql`UPDATE factory.substrate_binding SET actor_uid=${actorUID},create_attempted_at=now()
-        WHERE runtime_attempt_id=${developmentAttempt}`;
+      await sql`UPDATE factory.runtime_attempt SET actor_uid=${actorUID},create_attempted_at=now()
+        WHERE id=${developmentAttempt}`;
       await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
         VALUES(${owned.workspaceID},${actorUID})`;
     });
@@ -125,14 +116,6 @@ test("runtime environment freezes version, authenticates parent generation, isol
       commandID: crypto.randomUUID(),
       version: 1,
       variables: [variable("NEW_VALUE", false), variable("TEST_TOKEN", true)],
-      registries: [
-        {
-          host: "test.registry.test",
-          username: "robot",
-          password: "owned-test-registry",
-          verification: true,
-        },
-      ],
     });
     expect((await freezeRuntimeEnvironment(database.client, developmentAttempt)).version).toBe(1);
     expect(
@@ -140,9 +123,9 @@ test("runtime environment freezes version, authenticates parent generation, isol
     ).toBe("PRIVATE_DEV");
     const verificationID = crypto.randomUUID();
     await database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,
+      id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,
       runner_token,runner_job_handle,created_by)
-      VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-environment-runner',
+      VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,
         1,${crypto.randomUUID()},'owned-environment-runner-token','owned-environment-job',${owned.userID})`;
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${developmentAttempt}`;
     native = await nativeJobsFixture(database, owned.projectID);
@@ -164,20 +147,16 @@ test("runtime environment freezes version, authenticates parent generation, isol
       await endpoint(request(verificationAttempt, verificationToken, 1), verificationAttempt)
     ).json();
     expect(verified.bundle.variables.map((v: { name: string }) => v.name)).toEqual(["TEST_TOKEN"]);
-    expect(verified.bundle.registries.map((v: { host: string }) => v.host)).toEqual([
-      "test.registry.test",
-    ]);
-    await expect(
-      database.client`UPDATE factory.runtime_environment_intent SET version=2 WHERE runtime_attempt_id=${developmentAttempt}`.execute(),
-    ).rejects.toThrow("immutable");
+    expect(verified.bundle).not.toHaveProperty("registries");
     await controller.save(owned.projectID, owned.userID, "main-preview", {
       commandID: crypto.randomUUID(),
       version: 0,
       variables: [variable("PREVIEW_ONLY", false)],
-      registries: [],
     });
-    await database.client`INSERT INTO factory.staging_preview(project_id,revision)
-      VALUES(${owned.projectID},${"a".repeat(40)})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${owned.projectID},
+        ${`delivery.staging_preview:${owned.projectID}`},'pending',
+        ${JSON.stringify({ projectId: owned.projectID, revision: "a".repeat(40), runtimeAttemptId: null })}::jsonb)`;
     const stagingAttempt = await native.startStaging(owned.userID);
     const stagingToken = native.tokens(stagingAttempt, 1).parent;
     expect(await freezeRuntimeEnvironment(database.client, stagingAttempt)).toMatchObject({
@@ -197,7 +176,9 @@ test("runtime environment freezes version, authenticates parent generation, isol
     expect((await endpoint(request(), developmentAttempt)).status).toBe(401);
     expect((await endpoint(request(owned.attemptID, token, 1), owned.attemptID)).status).toBe(401);
     expect(
-      JSON.stringify(await database.client`SELECT * FROM factory.runtime_environment_intent`),
+      JSON.stringify(
+        await database.client`SELECT * FROM factory.operation WHERE kind='runtime.environment_intent'`,
+      ),
     ).not.toContain("owned-PRIVATE_DEV");
   } finally {
     try {

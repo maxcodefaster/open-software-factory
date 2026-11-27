@@ -1,10 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import {
   openRepositoryDocumentSchema,
   repositoryDocumentsSchema,
 } from "../../apps/factory/src/knowledge/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -28,9 +28,9 @@ const settingsTest = test.extend<{ settingsProjectID: string }>({
         SELECT user_id AS id FROM factory.administrator LIMIT 1`;
       if (!administrator) throw new Error("Owned browser administrator is missing");
       await database.client`INSERT INTO factory.project
-        (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        (id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${id},${`library-actions-${id}`},'Library actions',
-          'https://example.invalid/library-actions.git','main','.devcontainer/devcontainer.json',
+          'https://example.invalid/library-actions.git','main','.factory/actor-template.json',
           ${administrator.id})`;
       await use(id);
     } finally {
@@ -149,9 +149,9 @@ test("Wiki page and revision actions share text controls and keep history keyboa
     `;
     if (!admin) throw new Error("Fixture admin missing");
     await database.client`
-      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectId},${slug},'Workspace actions','https://example.invalid/actions.git',
-        'main','.devcontainer/devcontainer.json',${admin.id})
+        'main','.factory/actor-template.json',${admin.id})
     `;
     await database.client`
       INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
@@ -163,9 +163,11 @@ test("Wiki page and revision actions share text controls and keep history keyboa
       VALUES(${revisionId},${pageId},1,'human','Earlier review process','Earlier saved guidance.',
         'Earlier saved guidance.',${commit},${admin.id})
     `;
+    const generationId = crypto.randomUUID();
     await database.client`
-      INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
-      VALUES(${crypto.randomUUID()},${projectId},${commit},'succeeded',${admin.id},now())
+      INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+      VALUES(${generationId},'knowledge.generation','project',${projectId},${`knowledge.generation:${generationId}`},NULL,'succeeded',${admin.id},now(),
+        ${JSON.stringify({ id: generationId, projectId, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: admin.id, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)
     `;
     await mockFactoryFunctions(page, {
       knowledge: {
@@ -355,9 +357,9 @@ test("Settings connection and Input headers use the same actions without changin
     `;
     if (!admin) throw new Error("Fixture admin missing");
     await database.client`
-      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectId},${slug},'Settings actions','https://example.invalid/settings-actions.git',
-        'main','.devcontainer/devcontainer.json',${admin.id})
+        'main','.factory/actor-template.json',${admin.id})
     `;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();

@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-  type TurnUsage,
-  unavailableTurnUsage,
-} from "../../../../packages/conversation-domain/src/turn-usage";
+import { type TurnUsage, unavailableTurnUsage } from "#conversation-domain/turn-usage";
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const tokensInput = z.object({

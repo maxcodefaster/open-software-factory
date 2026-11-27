@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-  type EnvironmentBundle,
-  environmentBundle,
-} from "../../../../packages/project-domain/src/environment";
+import { type EnvironmentBundle, environmentBundle } from "#project-domain/environment";
 import { createOpenBaoKV, type OpenBaoOptions } from "../secrets/openbao";
 
 const storedEnvironment = z
@@ -35,4 +32,4 @@ export function createOpenBaoEnvironmentSecrets(input?: OpenBaoOptions): Environ
   };
 }
 
-export const emptyEnvironment: EnvironmentBundle = { variables: [], registries: [] };
+export const emptyEnvironment: EnvironmentBundle = { variables: [] };

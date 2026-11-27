@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import type { createForgejoClient } from "#forge/forge";
 import { createAgentCandidates } from "../../apps/factory/src/agent/candidate-agent";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { fixture } from "../fixtures/change-agent-turns";
 
 const writing = { fenceSource: async () => {}, protect: async () => {} };
@@ -60,7 +60,7 @@ test("Agent recovery leaves an unconfirmed Workspace candidate to its original s
   } finally {
     await submission.close();
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
     await f.dispose();
   }
 }, 30000);
@@ -122,7 +122,7 @@ test.each([
     } finally {
       await submission.close();
       await f.database
-        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+        .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       await f.dispose();
     }
   },
@@ -196,7 +196,7 @@ test("shared submission fences human Source and confirms the Factory branch writ
   } finally {
     await service.close();
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
     await f.dispose();
   }
 }, 30000);
@@ -254,10 +254,10 @@ test.each(["Source fence", "branch protection"])(
       expect(sent).toEqual(boundary === "Source fence" ? [] : ["git-prepare-commit"]);
       const [intent] = await f.database.client<
         { state: string; attempted: boolean; commit: string | null }[]
-      >`SELECT operation.state,submission.prepare_attempted_at IS NOT NULL AS attempted,
-        operation.commit_sha AS commit FROM factory.workspace_submission submission
-        JOIN factory.change_commit_operation operation ON operation.id=submission.id
-        WHERE submission.id=${input.requestID}`;
+      >`SELECT commit_op.state,(submission.payload->>'prepareAttemptedAt') IS NOT NULL AS attempted,
+        commit_op.commit_sha AS commit FROM factory.operation submission
+        JOIN factory.change_commit_operation commit_op ON commit_op.id=submission.id
+        WHERE submission.id=${input.requestID} AND submission.kind='workspace.submission'`;
       expect(intent).toEqual(
         boundary === "Source fence"
           ? { state: "commit-intended", attempted: false, commit: null }
@@ -268,7 +268,7 @@ test.each(["Source fence", "branch protection"])(
     } finally {
       await service.close();
       await f.database
-        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+        .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       await f.dispose();
     }
   },
@@ -329,7 +329,7 @@ test.each(["writer epoch", "Project access"])(
     } finally {
       await service.close();
       await f.database
-        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+        .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       await f.dispose();
     }
   },
@@ -420,7 +420,7 @@ test("a collaborator submits the saved shared Ticket checkout once without grant
   } finally {
     await service.close();
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
     await f.dispose();
   }
 }, 30000);
@@ -476,7 +476,9 @@ test.each([
         }),
       ).rejects.toThrow("Native Git");
       expect(calls).toEqual([]);
-      expect(await f.database.client`SELECT id FROM factory.workspace_submission`).toHaveLength(0);
+      expect(
+        await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.submission'`,
+      ).toHaveLength(0);
       const [writer] = await f.database.client<{ state: string }[]>`
         SELECT state FROM factory.change_writer WHERE change_id=${f.changeID}`;
       expect(writer?.state).toBe("human");
@@ -526,7 +528,7 @@ test.each([
                 WHERE change_id=${f.changeID}`;
             else if (boundary === "native Delete")
               await f.database
-                .client`UPDATE factory.substrate_binding SET delete_intended_at=now() WHERE runtime_attempt_id=${f.attemptID}`;
+                .client`UPDATE factory.runtime_attempt SET delete_intended_at=now() WHERE id=${f.attemptID}`;
             else
               await f.database
                 .client`UPDATE factory.project_membership SET role='product-contributor'
@@ -569,7 +571,7 @@ test.each([
     } finally {
       await service.close();
       await f.database
-        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+        .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       await f.dispose();
     }
   },
@@ -667,6 +669,9 @@ test.each([
           return null;
         },
         startStagingReplacement: async () => null,
+        pause: async () => {
+          throw new Error("Submitted checks must not pause the canonical Workspace");
+        },
         stop: async () => null,
       },
       {
@@ -764,7 +769,7 @@ test.each([
       await delivery.close();
       await submission.close();
       await f.database
-        .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+        .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       await f.dispose();
     }
   },
@@ -816,17 +821,17 @@ test("a lost native push retains its original repository and cannot be retargete
   try {
     await expect(service.submit(f.userID, input)).rejects.toThrow("lost original push");
     const [saved] = await f.database.client<{ repository: string; attempted: string }[]>`
-      SELECT repository_url AS repository,prepare_attempted_at::text AS attempted
-      FROM factory.workspace_submission WHERE id=${requestID}`;
+      SELECT payload->>'repositoryUrl' AS repository,payload->>'prepareAttemptedAt' AS attempted
+      FROM factory.operation WHERE id=${requestID} AND kind='workspace.submission'`;
     expect(saved?.repository).toBe(original);
     expect(saved?.attempted).not.toBeNull();
     for (const query of [
       f.database
-        .client`UPDATE factory.workspace_submission SET repository_url='https://owned-build.factory.invalid/other/project.git' WHERE id=${requestID}`,
+        .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{repositoryUrl}','"https://owned-build.factory.invalid/other/project.git"'::jsonb) WHERE id=${requestID} AND kind='workspace.submission'`,
       f.database
-        .client`UPDATE factory.workspace_submission SET remote_head=${"f".repeat(40)} WHERE id=${requestID}`,
+        .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{remoteHead}',to_jsonb(${"f".repeat(40)}::text)) WHERE id=${requestID} AND kind='workspace.submission'`,
       f.database
-        .client`UPDATE factory.workspace_submission SET prepare_attempted_at=NULL WHERE id=${requestID}`,
+        .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{prepareAttemptedAt}','null'::jsonb) WHERE id=${requestID} AND kind='workspace.submission'`,
     ])
       await expect(Promise.resolve(query)).rejects.toThrow(
         "identity and dispatch facts are immutable",
@@ -841,7 +846,7 @@ test("a lost native push retains its original repository and cannot be retargete
   } finally {
     await service.close();
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
     await f.dispose();
   }
 }, 30000);
@@ -887,7 +892,9 @@ test("shared submission refuses unsaved buffers and recovers a lost push by obse
   };
   try {
     await expect(service.submit(f.userID, input)).rejects.toThrow("Save shared buffers");
-    expect(await f.database.client`SELECT id FROM factory.workspace_submission`).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.submission'`,
+    ).toHaveLength(0);
     dirty = false;
     await expect(service.submit(f.userID, input)).rejects.toThrow("lost push");
     await f.database
@@ -903,7 +910,7 @@ test("shared submission refuses unsaved buffers and recovers a lost push by obse
   } finally {
     await service.close();
     await f.database
-      .client`DELETE FROM factory.workspace_submission WHERE workspace_id=${f.workspaceID}`;
+      .client`DELETE FROM factory.operation WHERE kind='workspace.submission' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
     await f.dispose();
   }
 }, 30000);

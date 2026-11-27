@@ -6,11 +6,8 @@ import {
   type LearningResult,
   learningEvidence,
   validateLearningResult,
-} from "../../../../packages/conversation-domain/src/learning";
-import {
-  comparisonCases,
-  learningComparisonPlan,
-} from "../../../../packages/conversation-domain/src/learning-comparison";
+} from "#conversation-domain/learning";
+import { comparisonCases, learningComparisonPlan } from "#conversation-domain/learning-comparison";
 import {
   comparisonAfter,
   comparisonBefore,
@@ -466,7 +463,7 @@ test("maximal admitted identities use required objects within provider enum and 
   expect(validateLearningResult(contract.parse(output), packet).cases).toHaveLength(8);
 });
 
-test("the model generation schema requires every admitted case and maps verdicts in input order", async () => {
+test("model generation receives the activity-based contract and maps every admitted case in input order", async () => {
   // judge.test.ts replaces judge-engine globally. Keep this real-engine check in
   // its own process and stub only generation, with no provider requests.
   const child = Bun.spawn(
@@ -486,8 +483,22 @@ output.cases = Object.fromEntries(Object.entries(output.cases).reverse());
 let responseOutput = output;
 let generations = 0, authorizations = 0, admissions = 0;
 const settlements = [];
-const generate = spyOn(Agent.prototype, "generate").mockImplementation(async (prompt, options) => {
+const generate = spyOn(Agent.prototype, "generate").mockImplementation(async function (prompt, options) {
   generations++;
+  const instructions = (await this.getInstructions()).replace(/\\s+/g, " ");
+  expect(instructions).toContain(
+    "Judge the requested activity, not the quality of a candidate it correctly rejects.",
+  );
+  expect(instructions).toContain(
+    "Correctly detecting and blocking a defective candidate fulfills a review task; the candidate's defect is not a finding against that review.",
+  );
+  expect(instructions).toContain(
+    "If the task explicitly forbids a behavior or diagnostic and it is observed on the exact candidate, fulfillment is a problem, not unknown;",
+  );
+  expect(instructions).toContain(
+    "required checks passed is a verification problem, not by itself proof of a product defect.",
+  );
+  expect(instructions).not.toContain("calibration:");
   const packet = JSON.parse(prompt).cases;
   expect(packet.map(item => item.id)).toEqual(["c0", "c1", "c2"]);
   expect(packet[0].evidence[0].id).toBe("e0");

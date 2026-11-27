@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 
@@ -46,14 +46,11 @@ test.each(["same Workspace", "Stop"])(
       // lifecycle and independent Source qualification have their own lane.
       await owned.database.client.begin(async (sql) => {
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
-          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent)
           SELECT ${replacementID},project_id,change_id,${original.workspace}::uuid,2,revision,'create-intended',
-            parent_connector_token_hash,child_connector_token_hash,now(),created_by
+            parent_connector_token_hash,now(),created_by,
+            ${`fa-${replacementID.replaceAll("-", "")}`},${`runtime-${replacementID.replaceAll("-", "")}`},binding_intent
           FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-          SELECT ${replacementID},${`fa-${replacementID.replaceAll("-", "")}`},
-            ${`runtime-${replacementID.replaceAll("-", "")}`},intent
-          FROM factory.substrate_binding WHERE runtime_attempt_id=${owned.attemptID}`;
         await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacementID}`;
       });
       await owned.database

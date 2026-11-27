@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { runCommand } from "#runtime-kubernetes/command";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import upstream from "../../upstream.json";
 
@@ -19,6 +19,7 @@ test("packaged browser worker initializes the pinned MCP with its restricted too
   const directory = await mkdtemp(join(tmpdir(), "factory-browser-package-"));
   let id = "";
   let child: ReturnType<typeof Bun.spawn> | undefined;
+  let stderr: Promise<string> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const docker = async (args: string[]) => {
     const result = await runCommand(["docker", ...args], undefined, {
@@ -79,9 +80,26 @@ test("packaged browser worker initializes the pinned MCP with its restricted too
     const worker = Bun.spawn(["docker", "start", "--attach", "--interactive", id], {
       stdin: "pipe",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
     });
     child = worker;
+    stderr = (async () => {
+      const reader = worker.stderr.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      let bytes = 0;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return text + decoder.decode();
+        bytes += next.value.byteLength;
+        if (bytes > 64 * 1024) {
+          worker.kill("SIGTERM");
+          await reader.cancel();
+          return text + "\nBrowser package stderr exceeded its 64 KiB bound";
+        }
+        text += decoder.decode(next.value, { stream: true });
+      }
+    })();
     deadline = setTimeout(() => child?.kill("SIGTERM"), 15_000);
     const reader = worker.stdout.getReader();
     const decoder = new TextDecoder();
@@ -98,7 +116,8 @@ test("packaged browser worker initializes the pinned MCP with its restricted too
           return message.result;
         }
         const next = await reader.read();
-        if (next.done) throw new Error("Pinned browser worker exited before its MCP reply");
+        if (next.done)
+          throw new Error(`Pinned browser worker exited before its MCP reply: ${await stderr}`);
         pending += decoder.decode(next.value, { stream: true });
         if (Buffer.byteLength(pending) > 1 << 20)
           throw new Error("Browser package reply exceeds its bound");
@@ -144,7 +163,7 @@ test("packaged browser worker initializes the pinned MCP with its restricted too
     ])
       expect(tools).not.toContain(denied);
     worker.stdin.end();
-    expect(await worker.exited).toBe(0);
+    expect(await worker.exited, await stderr).toBe(0);
   } finally {
     if (deadline) clearTimeout(deadline);
     try {
@@ -157,6 +176,7 @@ test("packaged browser worker initializes the pinned MCP with its restricted too
     } finally {
       if (child?.exitCode === null) child.kill("SIGTERM");
       await child?.exited;
+      await stderr;
       await rm(directory, { recursive: true, force: true });
     }
   }

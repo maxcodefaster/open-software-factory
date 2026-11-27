@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { hashConnectorToken, runtimeConnectorTokens } from "#runtime-domain/identity";
+import {
+  type NativeActor,
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -12,21 +19,10 @@ import {
   dispatchActorRPCIn,
   intendActorRPCIn,
 } from "../../apps/factory/src/runtime/substrate-rpc-facts";
-import { objectDigest } from "../../apps/factory/src/storage/objects";
 import {
   createSubstrateSources,
   type SubstrateSourceHandoff,
 } from "../../apps/factory/src/workspace/substrate-source";
-import {
-  hashConnectorToken,
-  runtimeConnectorTokens,
-} from "../../packages/runtime-domain/src/identity";
-import {
-  type NativeActor,
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 function controlledGrantedSource(
@@ -61,29 +57,18 @@ async function handoffEvent<T>(promise: Promise<T>, name: string) {
   }
 }
 
-async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everReady = true) {
+async function retainedTicketPause(everReady = true) {
   const f = await substrateFixture("a".repeat(40), "ticket");
   f.config.deployment = "fresh-workspaces";
   let actor: NativeActor | null = null;
   const effects: string[] = [];
-  const stored = new Map<string, Uint8Array>();
-  const bytes = new TextEncoder().encode("Owned complete Source protocol fixture");
-  const bundle = {
-    version: 1,
-    bytes: bytes.length,
-    sha256: objectDigest(bytes),
-    chunks: [objectDigest(bytes)],
-  };
-  let lost = false;
-  const checkpoints: Array<{ checkpointId: string; writerEpoch: number }> = [];
+  let lostSuspendResponse: "running" | "completed" | undefined;
   const source = createSubstrateSources(f.database, f.hub, {
-    async put(key, value) {
-      stored.set(key, new Uint8Array(value));
+    async put() {
+      throw Error("Ordinary Pause must not export Source objects");
     },
-    async read(key) {
-      const value = stored.get(key);
-      if (!value) throw Error("Missing owned Source object");
-      return value;
+    async read() {
+      throw Error("Ordinary Pause must not restore Source objects");
     },
     async remove() {
       throw Error("Source must not be discarded");
@@ -119,18 +104,19 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
         expect(lease).toMatchObject({
           actorUID: actor.metadata.uid,
           owner: "actor",
-          writerEpoch: 2,
-          writable: false,
-          generation: 1,
+          writerEpoch: 1,
+          writable: true,
+          generation: 0,
+          checkpoint: null,
+          checkpointID: null,
         });
-        if (!lease?.checkpoint || !lease.checkpointID)
-          throw Error("Source checkpoint must be confirmed before native Suspend");
-        expect(lease.checkpoint.id).toBe(lease.checkpointID);
         const [dispatch] = await f.database.client`
-        SELECT attempted_at IS NOT NULL AS attempted FROM factory.substrate_actor_rpc
-        WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
+        SELECT (payload->>'attemptedAt') IS NOT NULL AS attempted FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`;
         expect(dispatch?.["attempted"]).toBe(true);
         effects.push(method);
+        if (lostSuspendResponse === "running") throw Error("Native Suspend response timed out");
         const uuid = crypto.randomUUID();
         actor.metadata.version = "4";
         actor.status = {
@@ -153,20 +139,20 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
             },
           ],
         };
+        if (lostSuspendResponse === "completed") throw Error("Native Suspend response timed out");
         return { actor: structuredClone(actor) };
       }
       throw Error(`Uncommissioned handoff effect: ${method}`);
     },
     {
       attach: controlledGrantedSource(f, source).attach,
-      freezeActor: source.freezeActor,
+      async freezeActor() {
+        throw Error("Ordinary Pause must not freeze canonical Source");
+      },
       resume: source.resume,
       requireIndependent: source.requireIndependent,
       async makeIndependent() {
-        // This controller seam proves confirmation before native dispatch. Actual
-        // Linux materialization/service ownership has its separate Source tests.
-        expect(nativeActor.parse(actor).status.state).toBe("ACTOR_STATE_SUSPENDED");
-        effects.push("Source handoff");
+        throw Error("Ordinary Pause must not transfer canonical Source");
       },
     },
   );
@@ -220,46 +206,25 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
     await f.database.client`INSERT INTO factory.change_agent_session(
       change_id,runtime_attempt_id,opencode_session_id,state,created_by,active_turn_id)
       VALUES(${f.changeID},${f.attemptID},${sessionID},'failed',${f.userID},${original})`;
-    const connected = f.hub.sourceConnected.bind(f.hub);
-    const parentOperation = f.hub.parentOperation.bind(f.hub);
-    f.hub.sourceConnected = () => true;
-    f.hub.parentOperation = async () => ({});
-    f.hub.request = async (_attempt, channel, request, path) => {
-      expect(channel).toBe("source");
-      const identity = (await request.json()) as { checkpointId: string; writerEpoch: number };
-      expect(identity.writerEpoch).toBe(2); // Not the separate Change writer epoch.
-      checkpoints.push(identity);
-      if (!lost && path.endsWith(`/${lostOperation}`)) {
-        lost = true;
-        throw Error("Runtime request timed out");
-      }
-      return path.endsWith("/checkpoint") ? Response.json(bundle) : new Response(bytes);
+    f.hub.childOperation = async () => {
+      throw Error("Ordinary Pause must not request Child input or Source export");
     };
-    await expect(controller.pause(f.attemptID)).rejects.toThrow("Runtime request timed out");
-    const frozen = await source.lease(f.workspaceID);
-    if (!frozen?.actorUID || !frozen.checkpointID)
-      throw Error("Owned frozen Source identity is missing");
-    const frozenIdentity = {
-      ...frozen,
-      actorUID: frozen.actorUID,
-      checkpointID: frozen.checkpointID,
+    f.hub.parentOperation = async () => {
+      throw Error("Ordinary Pause must not request a Source drain");
     };
-    expect(frozen).toMatchObject({
+    f.hub.request = async () => {
+      throw Error("Observation and Pause must not send Source or inference requests");
+    };
+    const retained = await source.lease(f.workspaceID);
+    if (!retained?.actorUID) throw Error("Owned retained Source Actor is missing");
+    expect(retained).toMatchObject({
       owner: "actor",
-      writable: false,
-      writerEpoch: 2,
+      writable: true,
+      writerEpoch: 1,
       generation: 0,
       checkpoint: null,
+      checkpointID: null,
     });
-    const retry = await failedTurn("Source owner is frozen; writing fence is unconfirmed");
-    expect(
-      (
-        await f.database
-          .client`SELECT state,epoch FROM factory.change_writer WHERE change_id=${f.changeID}`
-      )[0],
-    ).toMatchObject({ state: "agent-preparing", epoch: "3" });
-    f.hub.sourceConnected = connected;
-    f.hub.parentOperation = parentOperation;
     const uid = nativeActor.parse(actor).metadata.uid;
     const request = (role: "parent" | "child", override: Record<string, string> = {}) =>
       new Request("https://factory.test/internal/runtime-connect", {
@@ -276,11 +241,26 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
       f,
       source,
       controller,
-      frozen: frozenIdentity,
+      retained: { ...retained, actorUID: retained.actorUID },
       effects,
-      checkpoints,
       request,
-      retry,
+      original,
+      loseSuspendResponse(state: "running" | "completed") {
+        lostSuspendResponse = state;
+      },
+      async intendPause() {
+        // Controlled crash after persisted native intent, before its dispatch.
+        // No Source checkpoint/export participates in ordinary user Pause.
+        await intendActorRPCIn(
+          f.database.client,
+          f.attemptID,
+          "suspend",
+          null,
+          nativeActor.parse(actor),
+        );
+        await f.database
+          .client`UPDATE factory.runtime_attempt SET state='pausing' WHERE id=${f.attemptID}`;
+      },
       actor: () => nativeActor.parse(actor),
       async retainedExecution(call: SubstrateCall, changed = false) {
         const [saved] = await f.database.client<
@@ -290,7 +270,7 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
               sourceRestoreProtocol?: number;
             };
           }[]
-        >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+        >`SELECT binding_intent AS intent FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         if (!saved) throw Error("Original binding missing");
         const { actorSelector, sourceRestoreProtocol, ...config } = saved.intent;
         expect(actorSelector).toEqual(f.config.workerSelector);
@@ -317,25 +297,25 @@ async function frozenTicketPause(lostOperation: "checkpoint" | "chunk", everRead
   }
 }
 
-test.each([
-  ["checkpoint", true],
-  ["chunk", true],
-  ["checkpoint", false],
-  ["chunk", false],
-] as const)(
-  "lost Ticket Source %s response continues the same frozen handoff on original Parent reconnect, previously ready=%s",
-  async (operation, everReady) => {
-    const t = await frozenTicketPause(operation, everReady);
+test.each([true, false])(
+  "Ticket native Pause continues its original undispatched intent on Parent reconnect without Source handoff, previously ready=%s",
+  async (everReady) => {
+    const t = await retainedTicketPause(everReady);
     try {
       const { f, controller, source } = t;
+      await t.intendPause();
+      const writerBefore = await f.database
+        .client`SELECT * FROM factory.change_writer WHERE change_id=${f.changeID}`;
+      const turnBefore = await createAgentTurnStore(f.database).get(t.original);
       expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
       expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
       expect(await controller.authorizeConnector(t.request("child"))).toBe(false);
       await expect(controller.startPersisted(f.changeID, f.userID)).rejects.toThrow();
       await expect(controller.resumeForApp(f.attemptID, f.userID)).rejects.toThrow();
       const [intent] = await f.database
-        .client`SELECT attempted_at,outcome FROM factory.substrate_actor_rpc
-        WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
+        .client`SELECT payload->>'attemptedAt' AS attempted_at,result AS outcome FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`;
       expect(intent).toMatchObject({ attempted_at: null, outcome: null });
       f.hub.revoke(f.attemptID);
       const allowed = Promise.withResolvers<void>();
@@ -348,6 +328,12 @@ test.each([
       activate();
       await handoffEvent(allowed.promise, "Parent admission");
       expect(f.hub.authorize(t.request("parent"), hashConnectorToken)).not.toBeNull();
+      expect(
+        f.hub.authorize(
+          t.request("parent", { authorization: "Bearer not-this-Actor" }),
+          hashConnectorToken,
+        ),
+      ).toBeNull();
       expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
       const settled = Promise.withResolvers<void>();
       const status = controller.status;
@@ -389,23 +375,14 @@ test.each([
         }),
       );
       await handoffEvent(settled.promise, "Source continuation");
-      expect(t.effects).toEqual(["CreateActor", "ResumeActor", "SuspendActor", "Source handoff"]);
-      expect(await source.lease(f.workspaceID)).toMatchObject({
-        actorUID: t.frozen?.actorUID,
-        writerEpoch: 2,
-        generation: 1,
-        checkpointID: t.frozen?.checkpointID,
-      });
-      expect(new Set(t.checkpoints.map((identity) => identity.checkpointId))).toEqual(
-        new Set([t.frozen?.checkpointID]),
-      );
+      expect(t.effects).toEqual(["CreateActor", "ResumeActor", "SuspendActor"]);
+      expect(await source.lease(f.workspaceID)).toEqual(t.retained);
       expect(
-        (
-          await f.database
-            .client`SELECT state,epoch FROM factory.change_writer WHERE change_id=${f.changeID}`
-        )[0],
-      ).toMatchObject({ state: "agent-preparing", epoch: "3" });
-      expect(t.actor().metadata.uid).toBe(t.frozen?.actorUID);
+        await f.database.client`SELECT * FROM factory.change_writer WHERE change_id=${f.changeID}`,
+      ).toEqual(writerBefore);
+      expect(await createAgentTurnStore(f.database).get(t.original)).toEqual(turnBefore);
+      expect((await controller.get(f.attemptID))?.state).toBe("paused");
+      expect(t.actor().metadata.uid).toBe(t.retained?.actorUID);
     } finally {
       await t.dispose();
     }
@@ -414,11 +391,12 @@ test.each([
 );
 
 test.each([true, false])(
-  "Ticket handoff reconnect rejects wrong identity, intent, epochs and revoked authority without new native effects, previously ready=%s",
+  "Ticket native Pause reconnect rejects wrong identity, intent, epochs and revoked authority without new native effects, previously ready=%s",
   async (everReady) => {
-    const t = await frozenTicketPause("checkpoint", everReady);
+    const t = await retainedTicketPause(everReady);
     try {
       const { f, controller } = t;
+      await t.intendPause();
       expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
       const wrongIdentity: Array<Record<string, string>> = [
         { "x-factory-runtime-actor-uid": crypto.randomUUID() },
@@ -427,7 +405,7 @@ test.each([true, false])(
       ];
       for (const override of wrongIdentity)
         expect(await controller.authorizeConnector(t.request("parent", override))).toBe(false);
-      const frozen = await t.source.lease(f.workspaceID);
+      const retained = await t.source.lease(f.workspaceID);
       const changeCheckpoint = async () =>
         await f.database.client`
       UPDATE factory.substrate_source SET checkpoint_id=${crypto.randomUUID()} WHERE workspace_id=${f.workspaceID}`;
@@ -435,13 +413,8 @@ test.each([true, false])(
         await f.database.client`
       UPDATE factory.substrate_source SET writer_epoch=3 WHERE workspace_id=${f.workspaceID}`;
       await expect(changeCheckpoint()).rejects.toThrow("Source lease facts");
-      await expect(changeEpoch()).rejects.toThrow("Source lease facts");
-      expect(await t.source.lease(f.workspaceID)).toEqual(frozen);
-      const changeOrigin = async () =>
-        await f.database.client`
-      UPDATE factory.substrate_actor_rpc SET native_version='99'
-      WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
-      await expect(changeOrigin()).rejects.toThrow("immutable");
+      await expect(changeEpoch()).rejects.toThrow("Source identity/epoch/generation changed");
+      expect(await t.source.lease(f.workspaceID)).toEqual(retained);
       const version = f.template.metadata.version;
       f.template.metadata.version = "99";
       expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
@@ -468,23 +441,27 @@ test.each([
   ["active-turn", false],
   ["suspend-dispatched", false],
 ] as const)(
-  "Ticket frozen handoff does not admit a Parent or continue when %s, previously ready=%s",
+  "Ticket native Pause does not admit a Parent or continue when %s, previously ready=%s",
   async (scenario, everReady) => {
-    const t = await frozenTicketPause("checkpoint", everReady);
+    const t = await retainedTicketPause(everReady);
     try {
       const { f, controller } = t;
+      await t.intendPause();
       expect(await controller.authorizeConnector(t.request("parent"))).toBe(true);
       if (scenario === "active-turn") {
         const store = createAgentTurnStore(f.database);
-        const previous = await store.get(t.retry);
+        const previous = await store.get(t.original);
         if (!previous) throw Error("Owned failed turn missing");
         await store.admit(
           { ...previous.command, commandId: crypto.randomUUID() },
           previous.authority,
         );
+        await expect(controller.pause(f.attemptID)).rejects.toThrow("Stop Coding before pausing");
       } else {
-        await f.database.client`UPDATE factory.substrate_actor_rpc SET attempted_at=now()
-          WHERE runtime_attempt_id=${f.attemptID} AND action='suspend'`;
+        await f.database.client`UPDATE factory.operation
+          SET state='attempted',payload=payload || jsonb_build_object('attemptedAt',now()),updated_at=now()
+          WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+            AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`;
         await expect(controller.pause(f.attemptID)).rejects.toThrow("RPC was not repeated");
       }
       f.hub.revoke(f.attemptID);
@@ -501,11 +478,71 @@ test.each([
       expect(f.hub.authorize(t.request("parent"), hashConnectorToken)).toBeNull();
       expect(t.effects).toEqual(["CreateActor", "ResumeActor"]);
       expect(await t.source.lease(f.workspaceID)).toMatchObject({
-        checkpointID: t.frozen?.checkpointID,
-        writerEpoch: 2,
+        checkpointID: null,
+        writerEpoch: 1,
         generation: 0,
-        writable: false,
+        writable: true,
       });
+    } finally {
+      await t.dispose();
+    }
+  },
+  60_000,
+);
+
+test.each([
+  ["running", true],
+  ["completed", true],
+  ["running", false],
+  ["completed", false],
+] as const)(
+  "lost native Suspend response retains Ticket Source and reconciles only observed completion: %s, previously ready=%s",
+  async (observed, everReady) => {
+    const t = await retainedTicketPause(everReady);
+    try {
+      const { f, controller, source } = t;
+      const writerBefore = await f.database
+        .client`SELECT * FROM factory.change_writer WHERE change_id=${f.changeID}`;
+      const turnBefore = await createAgentTurnStore(f.database).get(t.original);
+      t.loseSuspendResponse(observed);
+      await expect(controller.pause(f.attemptID)).rejects.toThrow(
+        "Native Suspend response timed out",
+      );
+      expect((await controller.get(f.attemptID))?.state).toBe("pausing");
+      expect(await source.lease(f.workspaceID)).toEqual(t.retained);
+      expect(t.effects).toEqual(["CreateActor", "ResumeActor", "SuspendActor"]);
+      const [dispatch] = await f.database.client`
+        SELECT payload->>'attemptedAt' AS attempted_at,result AS outcome FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`;
+      expect(dispatch?.["attempted_at"]).not.toBeNull();
+      expect(dispatch?.["outcome"]).toBeNull();
+      expect(await controller.authorizeConnector(t.request("parent"))).toBe(false);
+      expect(await controller.authorizeConnector(t.request("child"))).toBe(false);
+      const recovered = await t.retainedExecution(async (method) => {
+        if (method === "GetAtespace") return f.space;
+        if (method === "GetActorTemplate") return f.template;
+        if (method === "GetActor") return t.actor();
+        throw Error(`Read-only native Pause recovery dispatched ${method}`);
+      });
+      await recovered.recover();
+      if (observed === "running") {
+        await expect(controller.pause(f.attemptID)).rejects.toThrow("RPC was not repeated");
+        expect((await controller.get(f.attemptID))?.state).toBe("pausing");
+      } else {
+        expect((await controller.pause(f.attemptID))?.state).toBe("paused");
+        const [confirmed] = await f.database.client`
+          SELECT result AS outcome FROM factory.operation
+          WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+            AND scope_id=${f.attemptID} AND payload->>'action'='suspend'`;
+        expect(confirmed?.["outcome"]).not.toBeNull();
+      }
+      expect(t.effects).toEqual(["CreateActor", "ResumeActor", "SuspendActor"]);
+      expect(await source.lease(f.workspaceID)).toEqual(t.retained);
+      expect(
+        await f.database.client`SELECT * FROM factory.change_writer WHERE change_id=${f.changeID}`,
+      ).toEqual(writerBefore);
+      expect(await createAgentTurnStore(f.database).get(t.original)).toEqual(turnBefore);
     } finally {
       await t.dispose();
     }
@@ -567,14 +604,15 @@ test("failed personal bootstrap reconnect admits its retained Source Parent only
   }
 }, 60_000);
 
-test("a previously ready personal Workspace with its original frozen pause recovers only Source Parent authority, not Child execution", async () => {
+test("a previously ready personal Workspace retains writable Source but does not reconnect or replay an unconfirmed native Pause", async () => {
   const f = await substrateFixture();
   f.config.deployment = "fresh-workspaces";
   let actor: NativeActor | null = null;
   let resumes = 0;
+  let suspends = 0;
   const source = createSubstrateSources(f.database, f.hub);
   const granted = controlledGrantedSource(f, source);
-  const controller = await f.controller(async (method) => {
+  const call: SubstrateCall = async (method) => {
     if (method === "GetAtespace") return f.space;
     if (method === "GetActorTemplate") return f.template;
     if (method === "GetActor") {
@@ -594,14 +632,22 @@ test("a previously ready personal Workspace with its original frozen pause recov
       };
       return { actor: structuredClone(actor) };
     }
+    if (method === "SuspendActor") {
+      suspends++;
+      throw Error("Native Suspend response timed out");
+    }
     throw Error(`Read-only pause recovery dispatched ${method}`);
-  }, granted);
+  };
+  const controller = await f.controller(call, granted);
   try {
     await controller.start(f.projectID, f.userID);
     const uid = nativeActor.parse(actor).metadata.uid;
-    const checkpointID = crypto.randomUUID();
+    const retained = await source.lease(f.workspaceID);
     await f.database
-      .client`UPDATE factory.runtime_attempt SET state='pausing',ready_at=now(),failure=NULL WHERE id=${f.attemptID}`;
+      .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now(),failure=NULL WHERE id=${f.attemptID}`;
+    await expect(controller.pause(f.attemptID)).rejects.toThrow(
+      "Native Suspend response timed out",
+    );
     const request = (role: "parent" | "child") =>
       new Request("https://factory.test/internal/runtime-connect", {
         headers: {
@@ -613,39 +659,42 @@ test("a previously ready personal Workspace with its original frozen pause recov
         },
       });
     expect(await controller.authorizeConnector(request("parent"))).toBe(false);
-    await f.database
-      .client`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,checkpoint_id=${checkpointID} WHERE workspace_id=${f.workspaceID}`;
-    expect(await controller.authorizeConnector(request("parent"))).toBe(true);
     expect(await controller.authorizeConnector(request("child"))).toBe(false);
     f.hub.revoke(f.attemptID);
     expect(f.hub.authorize(request("parent"), hashConnectorToken)).toBeNull();
-    const restored = Promise.withResolvers<void>();
-    const allow = f.hub.allow.bind(f.hub);
-    f.hub.allow = (...args) => {
-      allow(...args);
-      restored.resolve();
-    };
-    // Recovery activation deliberately follows listener readiness; observe its
-    // real admission event rather than polling or starting another runtime.
-    const activate = await controller.recover();
-    activate();
-    await restored.promise;
-    expect(f.hub.authorize(request("parent"), hashConnectorToken)).not.toBeNull();
-    expect(await controller.authorizeConnector(request("parent"))).toBe(true);
+    const [saved] = await f.database.client<
+      {
+        intent: SubstrateConfiguration & {
+          actorSelector: Record<string, string>;
+          sourceRestoreProtocol: number;
+        };
+      }[]
+    >`SELECT binding_intent AS intent FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+    if (!saved) throw Error("Original personal binding is unavailable");
+    const { actorSelector, sourceRestoreProtocol, ...configuration } = saved.intent;
+    if (!f.config.workerSelector) throw Error("Original personal Actor selector is unavailable");
+    expect(actorSelector).toEqual(f.config.workerSelector);
+    expect(sourceRestoreProtocol).toBe(2);
+    await createSubstrateExecution(
+      f.database,
+      f.hub,
+      "owned-native-secret",
+      configuration,
+      createCodingRuntimeShutdown(f.database, f.hub),
+      call,
+      granted,
+    ).recover();
+    await expect(controller.pause(f.attemptID)).rejects.toThrow("RPC was not repeated");
+    expect(f.hub.authorize(request("parent"), hashConnectorToken)).toBeNull();
+    expect(await controller.authorizeConnector(request("parent"))).toBe(false);
     expect(await controller.authorizeConnector(request("child"))).toBe(false);
     expect((await controller.get(f.attemptID))?.state).toBe("pausing");
-    expect(await source.lease(f.workspaceID)).toMatchObject({
-      owner: "actor",
-      writable: false,
-      writerEpoch: 2,
-      checkpointID,
-      generation: 0,
-    });
-    expect(resumes).toBe(1);
+    expect(await source.lease(f.workspaceID)).toEqual(retained);
+    expect({ resumes, suspends }).toEqual({ resumes: 1, suspends: 1 });
     await f.database
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     expect(await controller.authorizeConnector(request("parent"))).toBe(false);
-    expect(resumes).toBe(1);
+    expect({ resumes, suspends }).toEqual({ resumes: 1, suspends: 1 });
   } finally {
     await source.close();
     await f.dispose();
@@ -789,7 +838,7 @@ test.each(["starting", "failed"])(
       );
       expect(resumes).toBe(1);
       const [savedBeforeCrash] = await f.database
-        .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+        .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       const crashed = nativeActor.parse(actor);
       crashed.metadata.version = String(BigInt(crashed.metadata.version) + 1n);
       crashed.status.state = "ACTOR_STATE_CRASHED";
@@ -801,7 +850,7 @@ test.each(["starting", "failed"])(
       expect(
         (
           await f.database
-            .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`
+            .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`
         )[0]?.["checkpoint"],
       ).toEqual(savedBeforeCrash?.["checkpoint"]);
       expect(suspends).toBe(0);
@@ -819,7 +868,7 @@ test.each(["starting", "failed"])(
       expect((await controller.get(f.attemptID))?.updatedAt).toBe(observedMemoryFailure?.updatedAt);
       const [retainedAfterMemoryFailure] = await f.database
         .client`SELECT checkpoint,observation#>>'{status,crash,message}' AS reason
-        FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+        FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       expect(retainedAfterMemoryFailure?.["checkpoint"]).toEqual(savedBeforeCrash?.["checkpoint"]);
       expect(retainedAfterMemoryFailure?.["reason"]).toBe("killed for exceeding its memory limit");
       // Final Stop is not another Pause. Its retained intent blocks all later wakes.
@@ -837,7 +886,7 @@ test.each(["starting", "failed"])(
 );
 
 test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
-  "retained-bootstrap pause cannot bypass normal Source or Coding fences: %s",
+  "destructive Stop after retained bootstrap cannot bypass Source or Coding fences: %s",
   async (scenario) => {
     const f = await substrateFixture("a".repeat(40), scenario === "ticket" ? "ticket" : "personal");
     f.config.deployment = "fresh-workspaces";
@@ -845,7 +894,17 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
     let suspends = 0;
     const source = createSubstrateSources(f.database, f.hub);
     f.hub.sourceConnected = () => scenario === "connected-parent";
+    let childDrained = false;
+    f.hub.childOperation = async (attemptID, operation) => {
+      expect(attemptID).toBe(f.attemptID);
+      expect(operation["action"]).toBe("source-drain");
+      const checkpointID = (await source.lease(f.workspaceID))?.checkpointID;
+      if (!checkpointID) throw Error("Owned Stop Source checkpoint intent is unavailable");
+      expect(operation["operationId"]).toBe(checkpointID);
+      childDrained = true;
+    };
     f.hub.parentOperation = async () => {
+      expect(childDrained).toBe(true);
       throw new Error("Source drain remains unconfirmed");
     };
     const granted = controlledGrantedSource(f, source);
@@ -895,7 +954,7 @@ test.each(["previously-ready", "connected-parent", "frozen-source", "ticket"])(
       expect((await source.lease(f.workspaceID))?.owner).toBe("actor");
       expect([
         ...(await f.database
-          .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`),
+          .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`),
       ]).toMatchObject([{ checkpoint: null }]);
     } finally {
       await source.close();

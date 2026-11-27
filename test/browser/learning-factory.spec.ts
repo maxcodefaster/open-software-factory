@@ -3,9 +3,9 @@ import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
 import { z } from "zod";
+import type { LearningEdit } from "#conversation-domain/learning";
+import { createDatabase } from "#db/client";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
-import { createDatabase } from "../../packages/db/src/client";
 import { prepareBrowserBuild } from "../fixtures/browser-build";
 import { test } from "../fixtures/browser-test";
 import { learningFixture } from "../fixtures/learning";
@@ -61,8 +61,8 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     if (!admin) throw new Error("Owned administrator is missing");
     const project = crypto.randomUUID(),
       review = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`monitoring-${project}`},'Monitoring proof','https://example.invalid/monitoring.git','main','.devcontainer/devcontainer.json',${admin.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`monitoring-${project}`},'Monitoring proof','https://example.invalid/monitoring.git','main','.factory/actor-template.json',${admin.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${project},${admin.id},'developer',true,${admin.id})`;
     const source = {
@@ -257,7 +257,7 @@ test("real Settings show monitoring, save learning policy and isolate private ev
         async () =>
           (
             await fixtureValue(database, "database")
-              .client`SELECT automatic_skills FROM factory.learning_policy WHERE project_id=${project} AND owner_id IS NULL`
+              .client`SELECT (payload->>'automaticSkills')::boolean AS automatic_skills FROM factory.operation WHERE kind='learning.policy' AND idempotency_key=${`learning.policy:${project}:project`}`
           )[0]?.["automatic_skills"],
       )
       .toBe(true);
@@ -273,7 +273,8 @@ test("real Settings show monitoring, save learning policy and isolate private ev
         await fixtureValue(database, "database").client<
           { id: string; revisionId: string; state: string }[]
         >`
-      SELECT id,applied_revision_id AS "revisionId",state FROM factory.learning_application WHERE proposal_id=${editProposal.id}`
+      SELECT application->>'id' AS id,application->>'appliedRevisionId' AS "revisionId",application->>'state' AS state
+      FROM factory.learning_proposal WHERE id=${editProposal.id} AND application IS NOT NULL`
       )[0];
     await expect.poll(async () => (await application())?.state).toBe("applied");
     const applied = fixtureValue(await application(), "(await application())");
@@ -325,8 +326,9 @@ test("real Settings show monitoring, save learning policy and isolate private ev
       .poll(async () =>
         (
           await fixtureValue(database, "database").client<{ cases: number; actor: string }[]>`
-              SELECT (input->>'cases')::int AS cases,actor_id AS actor FROM factory.learning_command
-              WHERE input->>'kind'='review-now' AND input->>'projectId'=${project}`
+              SELECT (payload->'input'->>'cases')::int AS cases,actor_id AS actor FROM factory.audit_event
+              WHERE kind='learning.command' AND scope_type='learning' AND scope_id=${project}
+                AND payload->'input'->>'kind'='review-now' AND payload->'input'->>'projectId'=${project}`
         ).map((row) => [row.cases, row.actor]),
       )
       .toEqual([[1, admin.id]]);
@@ -338,7 +340,7 @@ test("real Settings show monitoring, save learning policy and isolate private ev
         async () =>
           (
             await fixtureValue(database, "database")
-              .client`SELECT enabled FROM factory.learning_policy WHERE project_id=${project} AND owner_id IS NULL`
+              .client`SELECT (payload->>'enabled')::boolean AS enabled FROM factory.operation WHERE kind='learning.policy' AND idempotency_key=${`learning.policy:${project}:project`}`
           )[0]?.["enabled"],
       )
       .toBe(false);

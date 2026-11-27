@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -91,10 +91,10 @@ test.beforeEach(async ({ page }) => {
   });
   await database.client`
     INSERT INTO factory.project(
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by, desktop_background_key
+      id, slug, name, repository_url, default_branch, actor_template_path, created_by, desktop_background_key
     ) VALUES (
       ${projectID}, ${projectSlug}, 'Renaissance workspace',
-      'https://example.invalid/visual.git', 'main', '.devcontainer/devcontainer.json', ${userID}, 'river-landscape'
+      'https://example.invalid/visual.git', 'main', '.factory/actor-template.json', ${userID}, 'river-landscape'
     )
   `;
   await database.client`

@@ -1,10 +1,7 @@
 import { createEffect, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
-import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
-import {
-  type CodingReasoning,
-  codingReasoningInput,
-} from "../../../../packages/conversation-domain/src/model-settings";
-import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
+import type { InheritedModelSettingsView } from "#conversation-domain/model-inheritance";
+import { type CodingReasoning, codingReasoningInput } from "#conversation-domain/model-settings";
+import type { TurnObservation } from "#conversation-domain/turn-observation";
 import { reasoningLabels } from "../models/reasoning";
 import { getProjectModels } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";

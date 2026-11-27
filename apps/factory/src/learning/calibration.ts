@@ -1,7 +1,4 @@
-import type {
-  LearningCase,
-  LearningResult,
-} from "../../../../packages/conversation-domain/src/learning";
+import type { LearningCase, LearningResult } from "#conversation-domain/learning";
 
 // These are fixed product checks, never editable by the optimizer. They test
 // Evidence failures and healthy test cleanup must not be confused with each other.

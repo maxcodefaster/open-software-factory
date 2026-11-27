@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import type { runNativeCapacityKubernetes } from "#runtime-kubernetes/substrate-capacity";
 import {
   beginInstallationMaintenance,
   finishInstallationMaintenance,
 } from "../../apps/factory/src/installation/maintenance";
 import { createSubstrateCapacity } from "../../apps/factory/src/runtime/substrate-capacity";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import type { runNativeCapacityKubernetes } from "../../packages/runtime-kubernetes/src/substrate-capacity";
 import { substrateFixture } from "../fixtures/substrate";
 import { nativeCapacityFixture } from "../fixtures/substrate-capacity";
 
@@ -74,21 +74,13 @@ test.each(["amd64", "arm64"] as const)(
       await capacity.requireReady(resources);
       expect((await capacity.ensure()).ready).toContainEqual({ cpuMilli: 6000, memoryMiB: 12288 });
       expect(
-        await f.database.client`SELECT owner FROM factory.substrate_worker_capacity`,
+        await f.database.client`SELECT payload->>'owner' AS owner FROM factory.operation
+          WHERE kind='runtime.worker_capacity' AND scope_type='worker'`,
       ).toHaveLength(0);
       expect(
-        await f.database.client`SELECT owner FROM factory.substrate_capacity_installation`,
+        await f.database.client`SELECT payload->>'owner' AS owner FROM factory.operation
+          WHERE kind='runtime.capacity_installation' AND scope_type='installation'`,
       ).toHaveLength(1);
-      await expect(
-        Promise.resolve(f.database.client`
-        UPDATE factory.substrate_capacity_installation SET intent='{}'::jsonb
-      `),
-      ).rejects.toThrow("immutable");
-      await expect(
-        Promise.resolve(f.database.client`
-        DELETE FROM factory.substrate_capacity_installation
-      `),
-      ).rejects.toThrow("immutable");
       expect(fixture.base).toEqual(original);
       expect(calls.every((args) => args[0] === "get")).toBe(true);
       const restarted = createSubstrateCapacity(f.database, config, run);
@@ -101,8 +93,9 @@ test.each(["amd64", "arm64"] as const)(
       const bootID = node.status.nodeInfo.bootID;
       node.status.nodeInfo.bootID = crypto.randomUUID();
       await restarted.requireReady(resources);
-      const [retained] = await f.database
-        .client`SELECT intent FROM factory.substrate_capacity_installation`;
+      const [retained] = await f.database.client`
+        SELECT payload->'intent' AS intent FROM factory.operation
+        WHERE kind='runtime.capacity_installation' AND scope_type='installation'`;
       expect(retained?.["intent"].node.bootID).toBe(bootID);
       expect(calls.every((args) => args[0] === "get")).toBe(true);
       node.status.nodeInfo.bootID = bootID;
@@ -297,8 +290,11 @@ test.each(["amd64", "arm64"] as const)(
             intended.spec.template.nodeSelector["kubernetes.io/hostname"],
         );
         if (!node) throw new Error("Native capacity create selected an unknown fixture node");
-        const [saved] = await f.database
-          .client`SELECT attempted_at,intent FROM factory.substrate_worker_capacity WHERE node_uid=${node.metadata.uid}`;
+        const [saved] = await f.database.client`
+          SELECT payload->>'attemptedAt' AS attempted_at,payload->'intent' AS intent
+          FROM factory.operation
+          WHERE kind='runtime.worker_capacity' AND scope_type='worker'
+            AND payload->>'nodeUid'=${node.metadata.uid}`;
         expect(saved?.["attempted_at"]).not.toBeNull();
         expect(saved?.["intent"].pool).toEqual(intended);
         expect(saved?.["intent"].node.architecture).toBe(architecture);
@@ -341,7 +337,9 @@ test.each(["amd64", "arm64"] as const)(
       await finishInstallationMaintenance(f.database);
       await expect(capacity.ensure()).rejects.toThrow("owned undispatched pool observation");
       const [undispatched] = await f.database.client`
-        SELECT attempted_at,intent FROM factory.substrate_worker_capacity`;
+        SELECT payload->>'attemptedAt' AS attempted_at,payload->'intent' AS intent
+        FROM factory.operation
+        WHERE kind='runtime.worker_capacity' AND scope_type='worker'`;
       expect(undispatched?.["attempted_at"]).toBeNull();
       expect(creates).toBe(0);
       const freshNode = nodes[0];
@@ -390,7 +388,9 @@ test.each(["amd64", "arm64"] as const)(
       await capacity.requireReady(resources);
       expect((await capacity.ensure()).ready).toHaveLength(1);
       const [retained] = await f.database.client`
-        SELECT intent FROM factory.substrate_worker_capacity WHERE node_uid=${admittedNode.metadata.uid}`;
+        SELECT payload->'intent' AS intent FROM factory.operation
+        WHERE kind='runtime.worker_capacity' AND scope_type='worker'
+          AND payload->>'nodeUid'=${admittedNode.metadata.uid}`;
       expect(retained?.["intent"].node.bootID).toBe(admittedBoot);
       expect(creates).toBe(1);
       const retainedSpec = structuredClone(first[1]["spec"]);
@@ -421,11 +421,6 @@ test.each(["amd64", "arm64"] as const)(
       expect([
         ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
       ]).toEqual([{ worker: null }]);
-      await expect(
-        Promise.resolve(
-          f.database.client`UPDATE factory.substrate_worker_capacity SET attempted_at=NULL`,
-        ),
-      ).rejects.toThrow("immutable");
       const pool = pools.values().next().value;
       if (!pool) throw Error("No owned pool");
       const metadata = pool["metadata"] as { uid: string; name: string };

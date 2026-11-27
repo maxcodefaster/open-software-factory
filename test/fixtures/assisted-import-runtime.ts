@@ -1,11 +1,11 @@
 import { expect } from "bun:test";
 import { chromium } from "@playwright/test";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { setupInspectionView } from "../../packages/project-domain/src/setup";
-import { eventually, type factoryProcess } from "./factory-process";
-import { starterPreviewBrowser } from "./starter-preview-browser";
-import { callFactoryFunction } from "./server-functions";
+import type { createForgejoClient } from "#forge/forge";
+import { setupInspectionView } from "#project-domain/setup";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { eventually, type factoryProcess } from "./factory-process";
+import { callFactoryFunction } from "./server-functions";
+import { starterPreviewBrowser } from "./starter-preview-browser";
 
 export async function assistedImportRuntime(input: {
   factory: Awaited<ReturnType<typeof factoryProcess>>;
@@ -184,7 +184,7 @@ export async function assistedImportRuntime(input: {
         { name: "POSTGRES_PASSWORD", value: password },
         { name: "DATABASE_URL", value: `postgresql://app:${password}@postgres:5432/app` },
         { name: "BETTER_AUTH_SECRET", value: secret },
-      ].map((variable) => ({ ...variable, runtime: true, build: false, verification: true }));
+      ].map((variable) => ({ ...variable, runtime: true, verification: true }));
       const saved = await serverCall(
         callFactoryFunction(
           factory.base,
@@ -196,7 +196,6 @@ export async function assistedImportRuntime(input: {
               commandID: crypto.randomUUID(),
               version: metadata.version,
               variables,
-              registries: [],
             },
           ],
           { cookie },
@@ -238,7 +237,8 @@ export async function assistedImportRuntime(input: {
       600_000,
     );
     const [preview] = await database.client<{ id: string }[]>`
-      SELECT runtime_attempt_id AS id FROM factory.staging_preview WHERE project_id=${projectID}`;
+      SELECT payload->>'runtimeAttemptId' AS id FROM factory.operation
+      WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${projectID}`;
     if (!preview) throw new Error("Imported Starter preview missing");
     await starterPreviewBrowser({
       browser,

@@ -1,8 +1,5 @@
 import { For, Show } from "solid-js";
-import type {
-  ReviewFeedback,
-  VisualReview,
-} from "../../../../packages/conversation-domain/src/visual-review";
+import type { ReviewFeedback, VisualReview } from "#conversation-domain/visual-review";
 import { Icon } from "../icon";
 import { adjacentScenario, reviewTime, timedScenarios } from "./playback";
 

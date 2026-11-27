@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import type { MCPSourceTool } from "../mcp/source-tool-contract";
 import { projectReadInput, projectSearchInput, readResearch, searchResearch } from "./research";
 

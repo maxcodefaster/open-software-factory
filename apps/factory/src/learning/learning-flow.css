@@ -1,22 +1,22 @@
 .learning-flow {
   min-width: 0;
-  padding-bottom: var(--space-5);
-  margin-bottom: var(--space-5);
+  padding-bottom: var(--space-4);
+  margin-bottom: var(--space-4);
   border-bottom: 1px solid var(--line-subtle);
 }
 .learning-flow-heading h3 {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-1);
   font: var(--weight-medium) var(--text-lg) / var(--leading-label) var(--font-interface);
 }
 .learning-flow-heading p {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }
 .learning-flow-field {
   position: relative;
   width: 100%;
-  margin-top: var(--space-4);
+  margin-top: var(--space-3);
   --flow-active: var(--color-river-deep);
 }
 .learning-flow [data-tone="applied"] {
@@ -150,13 +150,13 @@
   flex-wrap: wrap;
   justify-content: space-between;
   gap: var(--space-1) var(--space-4);
-  margin: var(--space-2) 0 var(--space-4);
+  margin: var(--space-2) 0 var(--space-3);
   font-size: var(--text-xs);
   color: var(--color-ink-muted);
 }
 .learning-flow-detail {
   border-top: 1px solid var(--line-subtle);
-  padding-top: var(--space-4);
+  padding-top: var(--space-3);
 }
 .learning-flow-meta {
   display: flex;
@@ -174,7 +174,7 @@
   border-radius: var(--radius-xs);
 }
 .learning-flow-detail h4 {
-  margin: var(--space-3) 0 var(--space-2);
+  margin: var(--space-2) 0 var(--space-1-5);
   font-size: var(--text-lg);
   font-weight: var(--weight-medium);
   line-height: 1.3;
@@ -188,7 +188,7 @@
   line-height: var(--leading-body);
 }
 .learning-flow-timestamp {
-  margin: var(--space-3) 0;
+  margin: var(--space-2) 0;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }
@@ -214,7 +214,7 @@
   width: min(320px, calc(100vw - 24px));
   max-height: calc(100dvh - 24px);
   margin: 0;
-  padding: var(--space-4);
+  padding: var(--space-3);
   border: 0;
   border-radius: var(--radius-md);
   background: var(--material-popover);
@@ -225,7 +225,7 @@
 }
 .learning-flow-preview > strong {
   display: block;
-  margin-block: var(--space-3) var(--space-2);
+  margin-block: var(--space-2) var(--space-1-5);
   font-weight: var(--weight-medium);
   overflow-wrap: anywhere;
 }
@@ -235,7 +235,7 @@
   overflow-wrap: anywhere;
 }
 .learning-flow-preview-date {
-  margin: var(--space-3) 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { approvedModelCatalogue, modelDefaultsInput, modelRulesInput } from "./model-settings";
 import { modelRoleConnectionInput } from "./model-connection";
+import { approvedModelCatalogue, modelDefaultsInput, modelRulesInput } from "./model-settings";
 
 test("model checks accept Coding reasoning only for the Coding role and enforce its floor", () => {
   const input = {

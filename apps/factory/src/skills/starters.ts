@@ -1,4 +1,4 @@
-import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillContent } from "#conversation-domain/skills";
 import { requirementsInterviewSkill } from "./reviewed";
 import sources from "./starter-sources.json" with { type: "json" };
 

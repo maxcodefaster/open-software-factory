@@ -3,10 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import {
-  applicationFixNonGoals,
-  applicationFixPath,
-} from "../../../../packages/requirement-domain/src/autofix";
+import { applicationFixNonGoals, applicationFixPath } from "#requirement-domain/autofix";
 import { codeReadInput, codeReadResult } from "../knowledge/contracts";
 import { mcpSourceAlias } from "../mcp/sources-api";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";

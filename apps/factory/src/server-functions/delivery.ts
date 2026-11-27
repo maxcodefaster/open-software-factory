@@ -1,13 +1,10 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import {
-  deliveryDelegationInput,
-  promotionRetryInput,
-} from "../../../../packages/change-domain/src/delivery";
+import { deliveryDelegationInput, promotionRetryInput } from "#change-domain/delivery";
 import {
   candidateReviewRetryInput,
   verificationResumeInput,
-} from "../../../../packages/conversation-domain/src/candidate-review";
+} from "#conversation-domain/candidate-review";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

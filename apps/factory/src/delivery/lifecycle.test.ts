@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import type { createDatabase } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
 import { createDeliveryController } from "./controller";
 
 test("Delivery shutdown joins a directly admitted observation and refuses new observations", async () => {
@@ -21,6 +21,9 @@ test("Delivery shutdown joins a directly admitted observation and refuses new ob
     {
       startVerification: async () => null,
       startStagingReplacement: async () => null,
+      pause: async () => {
+        throw new Error("Observation must not pause Workspace compute");
+      },
       stop: async () => null,
     },
     { prompt: async () => {} },

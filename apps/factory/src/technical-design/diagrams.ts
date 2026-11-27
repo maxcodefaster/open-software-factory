@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   architectureDiagramInput,
   type TechnicalDesignContent,
-} from "../../../../packages/requirement-domain/src/technical-design";
+} from "#requirement-domain/technical-design";
 
 export const diagramRendererVersion = "plantuml-mcp-js@0.2.4/viz@3.31.0";
 let active = 0;

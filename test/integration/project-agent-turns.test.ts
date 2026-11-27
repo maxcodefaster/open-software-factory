@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as timers from "node:timers/promises";
+import type { ProjectAgentOutput } from "#conversation-domain/conversation";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import type { ProjectAgentOutput } from "../../packages/conversation-domain/src/conversation";
 import { factoryProcess } from "../fixtures/factory-process";
 
 // Real controller, Mastra adapter and PostgreSQL. Only model output is injected.
@@ -167,10 +167,10 @@ async function fixture(
       `;
       await transaction`
         INSERT INTO factory.project(
-          id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+          id, slug, name, repository_url, default_branch, actor_template_path, created_by
         ) VALUES (
           ${projectID}, ${`turn-${suffix}`}, 'Owned Turn Regression',
-          'https://example.invalid/turn-regression.git', 'main', '.devcontainer/devcontainer.json', ${userID}
+          'https://example.invalid/turn-regression.git', 'main', '.factory/actor-template.json', ${userID}
         )
       `;
       await transaction`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)

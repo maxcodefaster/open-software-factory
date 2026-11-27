@@ -4,8 +4,8 @@ import type {
   LibraryChoice,
   SkillLibraryEntry,
   SkillScope,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+} from "#conversation-domain/skill-library";
+import type { SkillRole } from "#conversation-domain/skills";
 import { type SkillChoiceState, skillAvailability, skillRoleLabel } from "./gallery-state";
 
 export type ChooseSkill = (

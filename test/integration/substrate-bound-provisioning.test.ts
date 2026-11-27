@@ -3,25 +3,17 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
+import { substrateProvision } from "#db/schema";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { type SubstrateCall, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { createSubstrateIsolated } from "../../apps/factory/src/runtime/substrate-isolated";
 import { substrateStagingOwner } from "../../apps/factory/src/runtime/substrate-isolated-grant";
-import { createSubstratePrebuild } from "../../apps/factory/src/runtime/substrate-prebuild";
 import { createSubstrateVerification } from "../../apps/factory/src/runtime/substrate-verification";
 import type { SubstrateWorkspaceConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import {
-  projectImagePreparation,
-  substrateIsolated,
-  substratePrebuild,
-  substrateVerification,
-} from "../../packages/db/src/schema";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { substrateFixture } from "../fixtures/substrate";
 
-async function provisioningFixture(kind: "prebuild" | "verification" | "isolated") {
+async function provisioningFixture(kind: "verification" | "isolated") {
   const f = await substrateFixture("a".repeat(40), "ticket");
   const directory = await mkdtemp(join(tmpdir(), "bound-provisioning-"));
   const ca = join(directory, "ca.pem");
@@ -31,12 +23,7 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
   const ownerID = kind === "isolated" ? substrateStagingOwner(f.projectID) : crypto.randomUUID();
   const attemptID = runtimeIdentity(ownerID, 1).attemptID;
   const atespace = `fa-${attemptID.replaceAll("-", "")}`;
-  const table =
-    kind === "prebuild"
-      ? substratePrebuild
-      : kind === "verification"
-        ? substrateVerification
-        : substrateIsolated;
+  const table = substrateProvision;
   const config: SubstrateWorkspaceConfiguration = {
     deployment: "owned-test",
     database: f.config.database,
@@ -47,7 +34,6 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
     connectorURL: f.config.connectorURL,
     factoryCAFile: ca,
     workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
-    prebuildRegistry: "registry.test",
     profile: f.config.profile,
     runtime: f.config.runtime,
     workerSelector: {
@@ -56,26 +42,18 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
     },
     egressHosts: ["registry.test", "git.native.test"],
   };
-  if (kind === "prebuild") {
-    const manifest = { registries: [{ host: "registry.test", hasPassword: true, publish: true }] };
-    const secretKey = `owned-prebuild-${ownerID}`;
-    await f.database.client.begin(async (tx) => {
-      await tx`INSERT INTO factory.environment_write(command_id,project_id,environment,base_version,fingerprint,manifest,secret_key,state,created_by,committed_at)
-        VALUES(${crypto.randomUUID()},${f.projectID},'development',0,${"f".repeat(64)},${JSON.stringify(manifest)}::jsonb,${secretKey},'committed',${f.userID},now())`;
-      await tx`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
-        VALUES(${f.projectID},'development',1,${JSON.stringify(manifest)}::jsonb,${secretKey})`;
-      await tx`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
-        VALUES(${ownerID},${f.projectID},'development',${"a".repeat(40)},1)`;
-    });
-  } else if (kind === "verification") {
+  if (kind === "verification") {
     await f.database.client`UPDATE factory.project
       SET repository_url='http://127.0.0.1:1/owned/verification.git' WHERE id=${f.projectID}`;
     await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,runner_uuid,runner_token,runner_job_handle,created_by)
-      VALUES(${ownerID},${f.changeID},${"a".repeat(40)},1,1,'owned-verification',${crypto.randomUUID()},'owned-token','owned-exact-job',${f.userID})`;
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,runner_token,runner_job_handle,created_by)
+      VALUES(${ownerID},${f.changeID},${"a".repeat(40)},1,1,${crypto.randomUUID()},'owned-token','owned-exact-job',${f.userID})`;
   } else {
-    await f.database.client`INSERT INTO factory.staging_preview(project_id,revision)
-      VALUES(${f.projectID},${"a".repeat(40)})`;
+    await f.database
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${f.projectID},
+        ${`delivery.staging_preview:${f.projectID}`},'pending',
+        ${JSON.stringify({ projectId: f.projectID, revision: "a".repeat(40), runtimeAttemptId: null })}::jsonb)`;
   }
   const identity = eq(table.runtimeAttemptId, attemptID);
   const facts = async () => (await f.database.db.select().from(table).where(identity))[0];
@@ -110,11 +88,12 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
       expect(saved?.runtimeAttemptId).toBe(attemptID);
       const attempted =
         nativeKind === "Atespace"
-          ? saved?.atespaceAttemptedAt
+          ? saved?.resources.atespace?.attemptedAt
           : nativeKind === "AtespaceAccessPolicy"
-            ? saved?.policyAttemptedAt
-            : saved?.templateAttemptedAt;
-      expect(attempted).toBeInstanceOf(Date);
+            ? saved?.resources.policy?.attemptedAt
+            : saved?.resources.template?.attemptedAt;
+      expect(typeof attempted).toBe("string");
+      expect(Number.isNaN(Date.parse(attempted ?? ""))).toBe(false);
       // The committed dispatch fact must be visible from a different DB session
       // before any external Create, including after retrying a lost reply.
       creates.set(nativeKind, (creates.get(nativeKind) ?? 0) + 1);
@@ -152,18 +131,17 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
     };
   const owner = call("owner");
   const editor = call("editor");
+  const readConfiguration = async (repository: string, revision: string, path: string) => {
+    expect(repository).toBe(
+      kind === "verification"
+        ? "http://127.0.0.1:1/owned/verification.git"
+        : "https://example.invalid/fixture.git",
+    );
+    expect(revision).toBe("a".repeat(40));
+    expect(path).toBe(nativeProjectTemplate.path);
+    return { systemContract: null, actorTemplate: nativeProjectTemplate };
+  };
   const create = (selected = config) => {
-    if (kind === "prebuild") {
-      const runtime = createSubstratePrebuild(
-        f.database,
-        f.hub,
-        "owned-secret",
-        selected,
-        editor,
-        owner,
-      );
-      return { start: () => runtime.start(ownerID), forAttempt: runtime.forAttempt };
-    }
     if (kind === "verification") {
       const runtime = createSubstrateVerification(
         f.database,
@@ -172,6 +150,9 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
         selected,
         editor,
         owner,
+        undefined,
+        undefined,
+        readConfiguration,
       );
       return { start: () => runtime.start(ownerID, f.userID), forAttempt: runtime.forAttempt };
     }
@@ -189,6 +170,9 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
       }),
       editor,
       owner,
+      undefined,
+      undefined,
+      readConfiguration,
     );
     return { start: () => runtime.stage(f.userID), forAttempt: runtime.forAttempt };
   };
@@ -230,7 +214,7 @@ async function provisioningFixture(kind: "prebuild" | "verification" | "isolated
   };
 }
 
-test.each(["prebuild", "verification", "isolated"] as const)(
+test.each(["verification", "isolated"] as const)(
   "%s Drizzle provisioning retains lost replies, scoped observation and immutable dispatch/identity",
   async (kind) => {
     const owned = await provisioningFixture(kind);
@@ -245,18 +229,20 @@ test.each(["prebuild", "verification", "isolated"] as const)(
         await expect(runtime.start()).rejects.toThrow("owned lost Create reply");
         const row = await owned.facts();
         expect(row?.generation).toBe(1);
-        expect([row?.atespaceRejected, row?.policyRejected, row?.templateRejected]).toEqual([
-          false,
-          false,
-          false,
-        ]);
+        expect([
+          row?.resources.atespace?.rejected ?? false,
+          row?.resources.policy?.rejected ?? false,
+          row?.resources.template?.rejected ?? false,
+        ]).toEqual([false, false, false]);
       }
       await expect(runtime.start()).rejects.toThrow("owned Actor lifecycle boundary");
       const row = await owned.facts();
       expect(await owned.f.database.db.select().from(owned.table)).toHaveLength(1);
-      expect(row?.atespace).toEqual(owned.objects.get("Atespace"));
-      expect(row?.policy).toEqual(owned.objects.get("AtespaceAccessPolicy"));
-      expect(row?.template).toEqual({ metadata: owned.objects.get("ActorTemplate")?.["metadata"] });
+      expect(row?.resources.atespace?.value).toEqual(owned.objects.get("Atespace"));
+      expect(row?.resources.policy?.value).toEqual(owned.objects.get("AtespaceAccessPolicy"));
+      expect(row?.resources.template?.value).toEqual({
+        metadata: owned.objects.get("ActorTemplate")?.["metadata"],
+      });
       expect([...owned.creates.values()]).toEqual([1, 1, 1]);
       expect(owned.calls).toContainEqual({ role: "owner", method: "GetAtespaceAccessPolicy" });
       expect(owned.calls).toContainEqual({ role: "editor", method: "GetAtespace" });
@@ -265,8 +251,12 @@ test.each(["prebuild", "verification", "isolated"] as const)(
       for (const changes of [
         { intent: { changed: true } },
         { runtimeAttemptId: crypto.randomUUID() },
-        { atespaceAttemptedAt: sql`now()` },
-        { atespace: { metadata: { uid: crypto.randomUUID() } } },
+        {
+          resources: sql`jsonb_set(${owned.table.resources}, '{atespace,attemptedAt}', to_jsonb(now()))`,
+        },
+        {
+          resources: sql`jsonb_set(${owned.table.resources}, '{atespace,value}', ${JSON.stringify({ metadata: { uid: crypto.randomUUID() } })}::text::jsonb)`,
+        },
       ]) {
         await expect(
           owned.f.database.db.update(owned.table).set(changes).where(owned.identity).execute(),
@@ -290,8 +280,7 @@ test.each(["prebuild", "verification", "isolated"] as const)(
     }
   },
 );
-
-test.each(["prebuild", "verification", "isolated"] as const)(
+test.each(["verification", "isolated"] as const)(
   "%s concurrent provisioning waits on the same owned PostgreSQL lock after lost Create",
   async (kind) => {
     const owned = await provisioningFixture(kind);
@@ -339,8 +328,7 @@ test.each(["prebuild", "verification", "isolated"] as const)(
     }
   },
 );
-
-test.each(["prebuild", "verification", "isolated"] as const)(
+test.each(["verification", "isolated"] as const)(
   "%s rejected Create never adopts a foreign native resource",
   async (kind) => {
     const owned = await provisioningFixture(kind);
@@ -348,7 +336,7 @@ test.each(["prebuild", "verification", "isolated"] as const)(
       const runtime = owned.create();
       owned.reject("CreateAtespace");
       await expect(runtime.start()).rejects.toThrow("owned rejected Create");
-      expect((await owned.facts())?.atespaceRejected).toBe(true);
+      expect((await owned.facts())?.resources.atespace?.rejected).toBe(true);
       owned.objects.set("Atespace", {
         metadata: {
           name: owned.atespace,
@@ -359,45 +347,16 @@ test.each(["prebuild", "verification", "isolated"] as const)(
       });
       await expect(runtime.start()).rejects.toThrow("foreign resources are never adopted");
       expect(owned.creates.get("Atespace")).toBe(1);
-      expect((await owned.facts())?.atespace).toBeNull();
+      expect((await owned.facts())?.resources.atespace?.value ?? null).toBeNull();
       await expect(
         owned.f.database.db
           .update(owned.table)
-          .set({ atespaceRejected: false })
+          .set({
+            resources: sql`jsonb_set(${owned.table.resources}, '{atespace,rejected}', 'false'::jsonb)`,
+          })
           .where(owned.identity)
           .execute(),
       ).rejects.toMatchObject({ cause: { message: expect.stringContaining("immutable") } });
-    } finally {
-      await owned.dispose();
-    }
-  },
-);
-
-test.each(["TLS", "publication grant"] as const)(
-  "prebuild %s refusal retains unsupported state without native dispatch",
-  async (refusal) => {
-    const owned = await provisioningFixture("prebuild");
-    try {
-      const selected = { ...owned.config };
-      if (refusal === "TLS") delete selected.prebuildRegistry;
-      else {
-        selected.prebuildRegistry = "ungranted.test";
-        selected.egressHosts = ["ungranted.test"];
-      }
-      await expect(owned.create(selected).start()).rejects.toThrow(
-        refusal === "TLS" ? "admitted TLS registry" : "publication grant",
-      );
-      const [preparation] = await owned.f.database.db
-        .select()
-        .from(projectImagePreparation)
-        .where(eq(projectImagePreparation.id, owned.ownerID));
-      expect(preparation?.state).toBe("unsupported");
-      expect(preparation?.runtimeAttemptId).toBeNull();
-      expect(preparation?.failure).toContain(
-        refusal === "TLS" ? "not configured" : "not authorized",
-      );
-      expect(owned.creates.size).toBe(0);
-      expect(await owned.f.database.db.select().from(substratePrebuild)).toHaveLength(0);
     } finally {
       await owned.dispose();
     }

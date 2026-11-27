@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { documentBlocks } from "../../apps/factory/src/document-model";
+import { documentBlocks } from "../../apps/factory/src/editor/client";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -31,9 +31,9 @@ test.beforeEach(async ({ page }) => {
   projectID = crypto.randomUUID();
   ticketID = crypto.randomUUID();
   try {
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
       VALUES (${projectID}, ${`product-ux-${projectID}`}, 'Product UX', 'https://example.invalid/product-ux.git',
-        'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
+        'main', '.factory/actor-template.json', ${session.user.id})`;
     await database.client`INSERT INTO factory.ticket(id, project_id, title, description, state, created_by)
       VALUES (${ticketID}, ${projectID}, ${title}, 'A useful starter application', 'ready', ${userID})`;
   } finally {

@@ -1,22 +1,22 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
-import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
-import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-adapter";
-import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
 import {
   candidateReviewInstructions,
   candidateReviewPermissions,
   candidateReviewResultInput,
   findingCheckInstructions,
-} from "../../packages/conversation-domain/src/candidate-review";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+} from "#conversation-domain/candidate-review";
+import type { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import {
   openCodeModelConfiguration,
   openCodeModelMetadata,
-} from "../../packages/runtime-kubernetes/src/opencode-model";
+} from "#runtime-kubernetes/opencode-model";
+import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
+import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
+import { confirmSettledOpenCodeInput } from "../../apps/factory/src/agent/opencode-adapter";
+import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
@@ -324,7 +324,6 @@ test.skipIf(process.env["FACTORY_REVIEW_MODEL_LIVE"] !== "1")(
           });
           const configuration = openCodeModelConfiguration({ modelID, reasoningEffort: "medium" });
           owned = await pinnedOpenCode(
-            undefined,
             undefined,
             undefined,
             `http://host.orb.internal:${proxy.port}/v1`,

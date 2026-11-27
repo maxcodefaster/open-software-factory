@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { z } from "zod";
-import type { createDatabase } from "../../packages/db/src/client";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+import type { createDatabase } from "#db/client";
+import { developerIDEIdentity } from "#workspace-domain/developer-ide";
 import { eventually } from "./factory-process";
 
 export async function recordedEditorIdentity(
@@ -10,8 +10,9 @@ export async function recordedEditorIdentity(
   userID: string,
 ) {
   const [editor] = await database.client<Array<{ resourceID: string; epoch: string }>>`
-    SELECT resource_id AS "resourceID",service_epoch::text AS epoch
-    FROM factory.developer_ide WHERE user_id=${userID}`;
+    SELECT payload->>'resourceId' AS "resourceID",payload->>'serviceEpoch' AS epoch
+    FROM factory.operation
+    WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${userID}`;
   if (!editor) return undefined;
   return developerIDEIdentity(userID, Number(editor.epoch), editor.resourceID);
 }
@@ -25,18 +26,17 @@ export async function requireOwnedProjectSourceRetention(
   // proof. Workspace Stop must already have retained Source and confirmed Delete.
   const [unsettled] = await database.client`
     SELECT 'runtime' AS kind FROM factory.runtime_attempt attempt
-      LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
       WHERE attempt.project_id=${projectID}
-        AND (attempt.state<>'stopped' OR binding.deleted_at IS NULL)
+        AND (attempt.state<>'stopped' OR attempt.deleted_at IS NULL)
     UNION ALL
     SELECT 'source' AS kind FROM factory.substrate_source source
       JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
-      LEFT JOIN factory.substrate_binding binding ON binding.actor_uid=source.actor_uid
+      LEFT JOIN factory.runtime_attempt attempt ON attempt.actor_uid=source.actor_uid
       WHERE workspace.project_id=${projectID}
         AND (source.owner<>'service' OR NOT source.writable
           OR source.generation<1 OR source.checkpoint IS NULL OR source.service_base IS NULL
           OR source.checkpoint->>'actorUID' IS DISTINCT FROM source.actor_uid::text
-          OR binding.deleted_at IS NULL)
+          OR attempt.deleted_at IS NULL)
     LIMIT 1`;
   if (unsettled)
     throw new Error(
@@ -104,27 +104,6 @@ export async function editorFixtureNamespaces() {
         );
       })
       .map(({ metadata }) => ({ name: metadata.name, uid: metadata.uid }))
-  );
-}
-
-export function finishedPrebuildNamespace(
-  namespace: { name: string; uid: string },
-  producer: {
-    id: string;
-    namespace: string;
-    uid: string | null;
-    kind: string | null;
-    state: string;
-    jobState: string;
-  },
-) {
-  return (
-    producer.kind === "prebuild" &&
-    (producer.state === "stopped" || producer.state === "failed") &&
-    (producer.jobState === "succeeded" || producer.jobState === "failed") &&
-    producer.namespace === `factory-runtime-${producer.id.replaceAll("-", "").slice(0, 12)}` &&
-    producer.namespace === namespace.name &&
-    producer.uid === namespace.uid
   );
 }
 

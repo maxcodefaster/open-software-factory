@@ -3,9 +3,10 @@ import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import type { DeveloperIDEState } from "#workspace-domain/developer-ide";
+import type { WorkspaceSourceState } from "#workspace-domain/source";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
-import type { WorkspaceSourceState } from "../../packages/workspace-domain/src/source";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -97,11 +98,130 @@ test("the warm hidden editor selects no Workspace until it is deliberately opene
   await expect(selections).toHaveText("2");
 });
 
+async function retainedPausedFixture(page: Page) {
+  const workspaceID = "10000000-0000-4000-8000-000000000003";
+  const source = {
+    workspaceID,
+    label: "Owned paused Workspace",
+    serviceID: "owned-source",
+    epoch: 1,
+    state: "paused" as const,
+    failure: null,
+  };
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => source,
+      getSource: async () => source,
+      ensureSource: async () => {
+        throw new Error("Selecting a paused Workspace must not prepare or replace Source");
+      },
+      ensureEditor: async () => ({
+        serviceID: "owned-editor",
+        epoch: 1,
+        state: "ready" as const,
+        failure: null,
+      }),
+    },
+  });
+  const editorURL = `${developerIDEOrigin(origin, "10000000-0000-4000-8000-000000000001", 1)}/owned-editor/`;
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><script>location.replace(${JSON.stringify(editorURL)})</script>`,
+    }),
+  );
+  await page.route(editorURL, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body>
+        <p>Cached file tree</p><pre>README.md\nsrc/\npackage.json</pre>
+        <script>
+          const factoryOrigin=${JSON.stringify(origin)};
+          window.addEventListener("message",event=>{
+            if(event.source!==parent||event.origin!==factoryOrigin||
+               event.data?.type!=="factory:select-workspace")return;
+            parent.postMessage({type:"factory:workspace-selected",workspaceID:event.data.workspaceID},factoryOrigin);
+          });
+          parent.postMessage({type:"factory:ide-ready"},factoryOrigin);
+        </script></body></html>`,
+    }),
+  );
+  await page.goto(`${origin}/workspace-transport.html`);
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  await expect(frame).toHaveAttribute("data-workspace-id", workspaceID);
+  await expect(
+    page.frameLocator('iframe[title="Factory IDE"]').getByText("Cached file tree", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator(".editor-paused-status")).toContainText(
+    "Files and unsaved edits are kept.",
+  );
+  await expect(page.getByText("Opening Workspace…", { exact: true })).toHaveCount(0);
+  return frame;
+}
+
+test("paused Source selects the retained editor without waiting for Work or App readiness", async ({
+  page,
+}) => {
+  const frame = await retainedPausedFixture(page);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(frame).toBeVisible();
+    const editorBox = await frame.boundingBox();
+    const noticeBox = await page.locator(".editor-paused-status").boundingBox();
+    if (!editorBox || !noticeBox) throw new Error("Paused editor or notice is missing");
+    expect(noticeBox.y).toBeGreaterThanOrEqual(editorBox.y + editorBox.height);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({ path: `${directory}/paused-source-${width}.png`, fullPage: true });
+  }
+  const toggle = page.getByRole("button", { name: "Hide editor", exact: true });
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Show editor", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(frame).toBeVisible();
+});
+
+test("touch can open the retained paused editor without a destructive recovery action", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  try {
+    const page = await context.newPage();
+    const frame = await retainedPausedFixture(page);
+    await page.getByRole("button", { name: "Hide editor", exact: true }).tap();
+    await page.getByRole("button", { name: "Show editor", exact: true }).tap();
+    await expect(frame).toBeVisible();
+    await expect(
+      page
+        .frameLocator('iframe[title="Factory IDE"]')
+        .getByText("Cached file tree", { exact: true }),
+    ).toBeVisible();
+    // Let the retained cross-origin iframe paint after display:none, not only
+    // pass a DOM visibility check before capturing the touch result.
+    await page.evaluate(
+      () =>
+        new Promise<void>((complete) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => complete())),
+        ),
+    );
+    await expect(page.getByRole("button", { name: /Restart (file access|Source)/ })).toHaveCount(0);
+    await page.screenshot({ path: `${directory}/paused-source-touch.png`, fullPage: true });
+  } finally {
+    await context.close();
+  }
+});
+
 async function fixture(page: Page, unconfirmedEditor = false) {
   const calls: string[] = [];
   let sourceState: WorkspaceSourceState = "failed";
   const sourceEpoch = 1;
-  let editorState: WorkspaceSourceState = "failed",
+  let editorState: DeveloperIDEState = "failed",
     editorEpoch = 1,
     editorReads = 0;
   const source = () => ({
@@ -177,13 +297,13 @@ test("a rejected editor keeps its recovery action right under its message", asyn
     label: "Owned source",
     serviceID: "owned-source",
     epoch: 1,
-    state: "ready" as WorkspaceSourceState,
+    state: "ready" as const,
     failure: null,
   });
   const editor = () => ({
     serviceID: "owned-editor",
     epoch: 1,
-    state: "ready" as WorkspaceSourceState,
+    state: "ready" as DeveloperIDEState,
     failure: null,
   });
   await mockFactoryFunctions(page, {

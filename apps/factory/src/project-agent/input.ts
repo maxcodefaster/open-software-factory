@@ -1,16 +1,16 @@
 import { z } from "zod";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
-import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
+import type { SkillRevision } from "#conversation-domain/skills";
+import type { createDatabase } from "#db/client";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
-import { type createKnowledgeController } from "../knowledge/api";
+import type { createKnowledgeController } from "../knowledge/api";
 import { type createMCPConnections, createMCPLibrary } from "../mcp/library-api";
 import { mcpSourceAlias } from "../mcp/sources-api";
-import { type ResolvedModelConnection } from "../models/inference-contracts";
+import type { ResolvedModelConnection } from "../models/inference-contracts";
 import { monitoringDigest } from "../monitoring/api";
 import { monitoringDiagnosis } from "../monitoring/diagnosis-contract";
-import { type MastraUsageSink } from "../usage/model-api";
+import type { MastraUsageSink } from "../usage/model-api";
 import { generateProjectResponse } from "./adapter";
 import { readResearch, searchResearch } from "./research";
 

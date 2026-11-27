@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import type { DatabaseTransaction } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
 import { lockChangeWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
@@ -9,8 +11,6 @@ import type { diagnoseMonitoringIncident } from "../../apps/factory/src/monitori
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
 import type { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
@@ -201,7 +201,12 @@ test.each([
       );
       const delivery = createDeliveryController(
         f.database,
-        { startVerification: forbidden, startStagingReplacement: forbidden, stop: forbidden },
+        {
+          startVerification: forbidden,
+          startStagingReplacement: forbidden,
+          pause: forbidden,
+          stop: forbidden,
+        },
         { prompt: forbidden },
         forbidden,
         {
@@ -768,7 +773,9 @@ test.each(["credential-epoch", "source-policy", "hook-delegation", "owner-token"
         ticketId: null,
       });
       const evidence = await f.database.client<{ kind: string; path: string; digest: string }[]>`
-        SELECT kind,path,digest FROM factory.monitoring_evidence WHERE incident_id=${incidentId}`;
+        SELECT payload->>'kind' AS kind,payload->>'path' AS path,payload->>'digest' AS digest
+        FROM factory.audit_event
+        WHERE kind='monitoring.evidence' AND scope_type='incident' AND scope_id=${incidentId}`;
       expect([...evidence]).toEqual([
         { kind: "code", path: "src/invoice.ts", digest: "c".repeat(64) },
       ]);

@@ -80,7 +80,7 @@ function closedSourceEvents(readyState = 2) {
 }
 
 test.each([200, 503])(
-  "a browser-closed Source stream reconnects the same Workspace after root status %s",
+  "a browser-closed Source stream checks passive access without waking files after status %s",
   async (status) => {
     const owned = closedSourceEvents();
     const changed: SourceChange[] = [];
@@ -90,9 +90,13 @@ test.each([200, 503])(
     try {
       const client = new FactorySourceClient(
         new URL("http://owned.invalid/editor/"),
-        async (url) => {
+        async (url, init) => {
           requests.push(new URL(String(url)).pathname);
-          return Response.json({ kind: "directory" }, { status });
+          expect(init?.method ?? "GET").toBe("GET");
+          return Response.json(
+            { workspaceID: "workspace-a", label: "Owned paused Workspace" },
+            { status },
+          );
         },
       );
       close = client.watch(
@@ -109,7 +113,7 @@ test.each([200, 503])(
       expect(owned.events[1]?.url.pathname).toBe(
         "/editor/__factory/workspaces/workspace-a/source/events",
       );
-      expect(requests.every((path) => path.endsWith("/workspace-a/source/stat"))).toBe(true);
+      expect(requests).toEqual(["/editor/__factory/workspaces/workspace-a/source/context"]);
       owned.events[0]?.onmessage?.({ data: JSON.stringify({ kind: "updated", path: "old.ts" }) });
       owned.events[1]?.onmessage?.({ data: JSON.stringify({ kind: "resync", path: "" }) });
       expect(changed).toEqual([{ kind: "resync", path: "" }]);

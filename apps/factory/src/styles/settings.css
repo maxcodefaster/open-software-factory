@@ -1,0 +1,618 @@
+/* Settings workspace, model configuration, skills and trash. */
+
+.settings-scope-description {
+  margin: var(--space-2) var(--space-6) 0;
+  color: var(--muted-ink);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.settings-tab-panel {
+  grid-column: 1 / -1;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.trash-workspace {
+  grid-column: 1 / -1;
+  min-height: 0;
+  overflow: auto;
+  background: transparent;
+}
+
+.trash-ticket-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.trash-ticket-title {
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+
+.trash-show-more {
+  margin-block-start: var(--space-3);
+}
+
+.settings-workspace {
+  min-height: 100%;
+  background: transparent;
+}
+
+.model-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.model-settings-body {
+  padding: var(--space-4) var(--space-6) var(--space-5);
+}
+
+.model-connection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-5);
+}
+
+.model-settings-note {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.model-role {
+  display: grid;
+  gap: var(--space-2);
+  padding-block: var(--space-3);
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-provider-setup {
+  display: grid;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.model-defaults {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.model-default-row {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.4fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.model-choice-row {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.model-role-footer {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.model-role-connection {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.model-role-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: var(--space-2);
+}
+
+.model-credentials {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-credentials-body {
+  display: grid;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+}
+
+.model-credential-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.model-credential-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: var(--space-4);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.model-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-top: 1px solid var(--line-subtle);
+  padding-top: var(--space-4);
+}
+
+.model-scope {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-6) 0;
+}
+
+.model-effective {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.model-selection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.model-policy {
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 720px) {
+  .model-default-row,
+  .model-credential-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .model-default-row {
+    gap: var(--space-3);
+  }
+}
+
+.model-settings-error {
+  margin-top: var(--space-4);
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.skill-intro,
+.skill-card-heading,
+.skill-assignment,
+.skill-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.skill-intro {
+  align-items: flex-start;
+  margin-bottom: var(--space-4);
+}
+
+.skill-card {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.skill-card-heading {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.skill-card-actions {
+  flex-wrap: wrap;
+}
+
+.skill-details {
+  min-width: 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.skill-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.skill-roles,
+.skill-reference {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.skill-reference {
+  margin-top: var(--space-3);
+}
+
+@media (max-width: 480px) {
+  .model-settings-heading {
+    padding: var(--space-4);
+  }
+  .model-settings-body {
+    padding: var(--space-4);
+  }
+  .model-connection {
+    flex-wrap: wrap;
+  }
+  .model-scope {
+    padding-inline: var(--space-4);
+    flex-wrap: wrap;
+  }
+  .skill-intro,
+  .skill-assignment {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .skill-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.model-settings-heading small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.model-settings-heading h2 {
+  margin: var(--space-1) 0 0;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xl);
+}
+
+.model-settings-body form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.model-connection div {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-connection strong {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.model-connection span {
+  display: block;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  margin-top: var(--space-1);
+}
+
+.model-connection button {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+}
+
+.model-role label {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.model-role strong {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}
+
+.model-role select {
+  width: 100%;
+}
+
+.model-provider-setup h3 {
+  font: inherit;
+  font-weight: 600;
+  margin: 0;
+}
+
+.model-default-row > header {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.model-default-row form {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.model-role-connection summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.model-credentials > summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.model-credential-row > div {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-credential-row small {
+  color: var(--color-ink-muted);
+}
+
+.model-credential-row button {
+  flex-shrink: 0;
+}
+
+.model-credential-form > details,
+.model-credential-form > footer {
+  grid-column: 1 / -1;
+}
+
+.model-scope button {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  color: var(--color-ink-muted);
+  border: 1px solid transparent;
+  font-size: var(--text-sm);
+}
+
+.model-effective span,
+.model-effective small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.model-policy summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+}
+
+.model-policy fieldset {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.model-settings-actions span {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.skill-intro > p,
+.skill-assignment > label {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-intro > button {
+  flex-shrink: 0;
+}
+
+.skill-card-heading h3,
+.skill-editor h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}
+
+.skill-card-heading small {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+.skill-details summary,
+.skill-editor summary {
+  cursor: pointer;
+  color: var(--color-ink-muted);
+}
+
+.skill-details a {
+  color: var(--color-ink);
+  text-underline-offset: var(--space-1);
+}
+
+.skill-details > p {
+  margin-top: var(--space-3);
+}
+
+.skill-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+}
+
+.skill-details dt {
+  color: var(--color-ink-muted);
+}
+
+.skill-details dd {
+  margin: 0;
+}
+
+.skill-details h4 {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.skill-details pre {
+  padding: var(--space-3);
+  background: var(--material-input);
+  border-radius: var(--radius-sm);
+  font: var(--text-xs) / var(--leading-body) var(--font-technical);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.skill-editor label {
+  display: grid;
+  gap: var(--space-2);
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: var(--font-interface);
+  font-size: var(--text-sm);
+}
+
+.skill-editor textarea {
+  resize: vertical;
+  line-height: var(--leading-body);
+}
+
+.skill-reference button {
+  justify-self: start;
+}
+
+@media (max-width: 480px) {
+  .model-connection div {
+    flex-basis: 100%;
+  }
+  .skill-details dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.model-credential-form > details > summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+}
+
+@media (pointer: coarse) {
+  .model-role-connection summary,
+  .model-credentials > summary,
+  .model-policy summary,
+  .model-credential-form > details > summary {
+    padding-block: calc((var(--touch-target) - 1lh) / 2);
+  }
+}
+
+.model-role label span {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.model-default-row header small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.model-credentials > summary span {
+  margin-left: var(--space-2);
+  color: var(--color-ink-muted);
+  font-weight: var(--weight-regular);
+}
+
+.skill-editor details > label,
+.skill-editor details > p,
+.skill-editor details > button {
+  margin-top: var(--space-3);
+}
+
+.model-connection + .model-settings-note {
+  margin-bottom: var(--space-4);
+}
+
+.model-default-row .model-role,
+.model-credential-form .model-role {
+  padding-block: 0;
+  border-top: 0;
+}
+
+.model-choice-row.with-reasoning {
+  grid-template-columns: minmax(0, 1fr) minmax(6.5rem, 0.4fr);
+}
+
+.model-settings-body > .model-scope {
+  padding: 0 0 var(--space-4);
+}
+
+.model-role .model-checkbox,
+.model-policy .model-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+  font-family: var(--font-interface);
+  font-size: var(--text-sm);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.skill-editor .model-checkbox {
+  display: flex;
+  align-items: center;
+}
+
+@media (pointer: coarse) {
+  .model-role .model-checkbox,
+  .model-policy .model-checkbox,
+  .skill-editor .model-checkbox {
+    min-height: var(--touch-target);
+  }
+}
+
+@media (max-width: 480px) {
+  .skill-settings-body .model-settings-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.model-provider-setup input:not([type="checkbox"]) {
+  width: 100%;
+}
+
+.model-role-connection[open] > div {
+  margin-top: var(--space-2);
+}
+
+.model-scope button[aria-pressed="true"] {
+  color: var(--color-ink);
+  background: var(--material-input);
+  border-color: var(--line-default);
+}
+
+.skill-settings-body .model-role > h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}

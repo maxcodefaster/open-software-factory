@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { identityConfiguration } from "#identity-domain/configuration";
 import { createIdentityConfiguration } from "../../apps/factory/src/access/identity-configuration";
-import { identityConfiguration } from "../../packages/identity-domain/src/configuration";
 import { factoryProcess } from "../fixtures/factory-process";
 import { oidcProviderFixture } from "../fixtures/oidc-provider";
 
@@ -85,7 +85,8 @@ test("protected sign-in intent recovers response loss, replays exactly, rejects 
         configuration: { ...oidc.configuration, issuer: "http://127.0.0.1" },
       }),
     ).rejects.toThrow("HTTPS");
-    const rows = await database.client`SELECT metadata::text FROM factory.identity_setup`;
+    const rows =
+      await database.client`SELECT (payload->'metadata')::text AS metadata FROM factory.operation WHERE kind='access.identity_setup'`;
     expect(JSON.stringify(rows)).not.toContain("protected-provider-secret");
     expect(JSON.stringify(await control.view(admin))).not.toContain("protected-provider-secret");
     expect(await database.client`SELECT * FROM auth."ssoProvider"`).toHaveLength(0);
@@ -142,11 +143,11 @@ test("activation rolls back publication and session cleanup together, and concur
       cause: expect.objectContaining({ message: "Owned identity cleanup failed" }),
     });
     expect(
-      await database.client`SELECT singleton FROM factory.identity_configuration`,
+      await database.client`SELECT id FROM factory.operation WHERE kind='access.identity_configuration'`,
     ).toHaveLength(0);
     const saved = await database.client<
       { id: string; state: string }[]
-    >`SELECT id,state FROM factory.identity_setup`;
+    >`SELECT id,state FROM factory.operation WHERE kind='access.identity_setup'`;
     expect(saved).toHaveLength(2);
     expect(saved.every((row) => row.state === "saved")).toBe(true);
     expect(await database.client`SELECT id FROM auth.session WHERE id=${sessionID}`).toHaveLength(
@@ -160,7 +161,8 @@ test("activation rolls back publication and session cleanup together, and concur
     expect(result.filter((row) => row.status === "fulfilled")).toHaveLength(1);
     expect(result.filter((row) => row.status === "rejected")).toHaveLength(1);
     const [current] = await database.client<{ version: number; setupID: string }[]>`
-      SELECT version::int AS version,setup_id AS "setupID" FROM factory.identity_configuration`;
+      SELECT (payload->>'version')::int AS version,payload->>'setupId' AS "setupID"
+      FROM factory.operation WHERE kind='access.identity_configuration'`;
     expect(current?.version).toBe(1);
     if (!current) throw new Error("Owned active identity missing");
     expect((await control.activate(admin, current.setupID)).version).toBe(1);
@@ -173,7 +175,9 @@ test("activation rolls back publication and session cleanup together, and concur
     await expect(control.save(admin, { ...first, commandID: crypto.randomUUID() })).rejects.toThrow(
       "settings changed",
     );
-    expect(await database.client`SELECT id FROM factory.identity_setup`).toHaveLength(2);
+    expect(
+      await database.client`SELECT id FROM factory.operation WHERE kind='access.identity_setup'`,
+    ).toHaveLength(2);
   } finally {
     await database.client.end();
     await fixture.dispose();

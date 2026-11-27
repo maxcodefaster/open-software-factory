@@ -42,8 +42,11 @@ export async function releaseDelivery(fixture: Fixture) {
     200,
   );
   const initial = await database.client<Array<{ id: string; revision: string; state: string }>>`
-    SELECT attempt.id, preview.revision, attempt.state FROM factory.staging_preview preview
-    JOIN factory.runtime_attempt attempt ON attempt.id = preview.runtime_attempt_id WHERE preview.project_id = ${projectID}`;
+    SELECT attempt.id, preview.payload->>'revision' AS revision, attempt.state
+    FROM factory.operation preview
+    JOIN factory.runtime_attempt attempt ON attempt.id::text = preview.payload->>'runtimeAttemptId'
+    WHERE preview.kind = 'delivery.staging_preview' AND preview.scope_type = 'project'
+      AND preview.scope_id = ${projectID}`;
   expect(initial[0]?.state).toBe("ready");
   if (!alreadyDelivered) expect(initial[0]?.revision).not.toBe(verifiedSHA);
   await page.getByRole("tab", { name: /Create centered welcome/ }).click();
@@ -88,7 +91,8 @@ export async function releaseDelivery(fixture: Fixture) {
     );
     expect(blocked).toEqual({ id: commandID });
     const [waiting] = await database.client`
-      SELECT state FROM factory.implementation_order WHERE command_id=${commandID}`;
+      SELECT state FROM factory.operation
+      WHERE kind='tickets.implementation_order' AND id=${commandID}`;
     expect(waiting?.["state"]).toBe("waiting");
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id = ${state.dependentTicketID}`,
@@ -117,10 +121,12 @@ export async function releaseDelivery(fixture: Fixture) {
         const [current] = await database.client<
           Array<{ id: string; revision: string; state: string; changeState: string }>
         >`
-      SELECT attempt.id, preview.revision, attempt.state, change.state AS "changeState" FROM factory.staging_preview preview
-      JOIN factory.runtime_attempt attempt ON attempt.id = preview.runtime_attempt_id
-      JOIN factory.change change ON change.project_id = preview.project_id
-      WHERE preview.project_id = ${projectID} AND change.id = ${changeID}`;
+      SELECT attempt.id, preview.payload->>'revision' AS revision, attempt.state, change.state AS "changeState"
+      FROM factory.operation preview
+      JOIN factory.runtime_attempt attempt ON attempt.id::text = preview.payload->>'runtimeAttemptId'
+      JOIN factory.change change ON change.project_id::text = preview.scope_id
+      WHERE preview.kind = 'delivery.staging_preview' AND preview.scope_type = 'project'
+        AND preview.scope_id = ${projectID} AND change.id = ${changeID}`;
         promoted = current;
         return (
           current && {

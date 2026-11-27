@@ -1,11 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { ticketDocumentInput } from "../../../../packages/requirement-domain/src/document";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
+import { ticketDocumentInput } from "#requirement-domain/document";
 import { ticketRequirementsInput } from "../../../../test/fixtures/ticket-requirements";
 import { conversationDatabase } from "../../../../test/support/conversation-persistence";
 import { createAccessController } from "../access/controller";
-import { type TicketDetail } from "./contracts";
+import type { TicketDetail } from "./contracts";
 import { createChangeController } from "./controller";
 import { createTicketService } from "./service";
 import type { ChangeView } from "./types";

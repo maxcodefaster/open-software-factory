@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { createCodingContexts } from "../../apps/factory/src/agent/conversation-contexts";
+import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createCodingContexts } from "../../apps/factory/src/agent/conversation-contexts";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
-import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { fixtureValue } from "../fixtures/value";
 
 test("fresh Coding retains history on the same Workspace and rejects old or unresolved execution targets", async () => {
@@ -84,7 +84,8 @@ test("fresh Coding retains history on the same Workspace and rejects old or unre
     });
     const intent = await admission.intent(build.turn.id);
     const [attachmentContexts] = await owned.database.client<{ count: number }[]>`
-      SELECT count(*)::integer AS count FROM factory.attachment_turn_context WHERE turn_id=${build.turn.id}`;
+      SELECT count(*)::integer AS count FROM factory.operation
+      WHERE kind='attachment.turn_context' AND scope_type='agent_turn' AND scope_id=${build.turn.id}`;
     expect(attachmentContexts?.count).toBe(0);
     expect(intent.bootstrap).toBe(true);
     expect(intent.sessionID).not.toBe(owned.sessionID);

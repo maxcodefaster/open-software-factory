@@ -1,13 +1,11 @@
 import { expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import type { createDatabase } from "../../packages/db/src/client";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { createDatabase } from "#db/client";
 import { fixture } from "./change-agent-turns";
 import { eventually } from "./factory-process";
 import type { nativeProcessProtocol } from "./native-process-protocol";
-import { memoryPrivateObjects } from "./private-objects";
 
 // Controlled prior work, not a live model/runtime proof. The actual admission,
 // writer, native provisioning and OpenCode controller establish one completed
@@ -26,65 +24,15 @@ export async function nativeBuildProcessFixture(
       : { ...result, commitSHA: revision, remoteSHA: revision };
   };
   async function importSource() {
-    const evidence = resolve(".factory/test-results/native-build-process");
-    await mkdir(evidence, { recursive: true });
-    const directory = await mkdtemp(join(evidence, "source-"));
-    const binary = join(directory, "controlled-source");
+    const directory = native.sourceDirectory;
     const content = Buffer.from("Owned prior Session source\n");
-    const digest = createHash("sha256").update(content).digest("hex");
-    let source: ReturnType<typeof createSubstrateSources> | undefined;
-    try {
-      // Controlled Source-service bytes, like the controlled RPC/OpenCode peer;
-      // not native archive/materialization acceptance. Factory owns publication,
-      // freeze, export checksums and the authenticated v2 import receipt.
-      await writeFile(
-        binary,
-        `#!${process.execPath}
-const input = await Bun.stdin.json();
-const bytes = Buffer.from(${JSON.stringify(content.toString("base64"))}, "base64");
-const bundle = {version:1,bytes:bytes.length,sha256:${JSON.stringify(digest)},chunks:[${JSON.stringify(digest)}]};
-let checkpoint;
-const server = Bun.serve({unix:input.socket,fetch:async request => {
-  if(request.headers.get("authorization") !== "Bearer "+input.access.token ||
-     request.headers.get("X-Factory-Source-Service") !== input.access.serviceId ||
-     request.headers.get("X-Factory-Source-Epoch") !== String(input.access.epoch))
-    return new Response(null,{status:403});
-  const operation = new URL(request.url).pathname.split("/").at(-1);
-  if(operation === "stat") return Response.json({kind:"directory"});
-  const body = await request.json();
-  if(operation === "checkpoint" && typeof body.checkpointId === "string" &&
-     body.writerEpoch === input.access.ownerEpoch+1) {
-    checkpoint ??= {checkpointId:body.checkpointId,writerEpoch:body.writerEpoch};
-    if(JSON.stringify(checkpoint) === JSON.stringify(body)) return Response.json(bundle);
-  }
-  if(operation === "chunk" && checkpoint && body.checkpointId === checkpoint.checkpointId &&
-     body.writerEpoch === checkpoint.writerEpoch && body.chunk === 0) return new Response(bytes);
-  return new Response(null,{status:409});
-}});
-process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
-`,
-        { mode: 0o700 },
-      );
-      const previous = {
-        FACTORY_STATE_DIRECTORY: process.env["FACTORY_STATE_DIRECTORY"],
-        FACTORY_SOURCE_SERVICE_BINARY: process.env["FACTORY_SOURCE_SERVICE_BINARY"],
-      };
-      try {
-        process.env["FACTORY_STATE_DIRECTORY"] = directory;
-        process.env["FACTORY_SOURCE_SERVICE_BINARY"] = binary;
-        source = createSubstrateSources(database, owned.hub, memoryPrivateObjects());
-      } finally {
-        for (const [key, value] of Object.entries(previous))
-          if (value === undefined) delete process.env[key];
-          else process.env[key] = value;
-      }
+    const source = native.sources;
+    {
+      // Resume and import share one owned Source controller and object store.
+      // This is controlled Source transport, not native archive acceptance.
       const initial = await source.lease(owned.workspaceID);
       if (!initial?.seed) throw Error("Controlled native prior Source seed is missing");
-      expect(initial).toMatchObject({ owner: "service", actorUID: null, writable: true });
-      const base = join(directory, "workspace-source", owned.workspaceID, initial.seed.id);
-      await mkdir(join(base, "project"), { recursive: true });
-      await writeFile(join(base, "project", "README.md"), content);
-      await writeFile(join(base, "initial-source.json"), JSON.stringify(initial.seed));
+      expect(initial).toMatchObject({ owner: "service", actorUID: null, writable: false });
       const headers = {
         ...(await native.connectorHeaders(owned.attemptID, "parent")),
         "X-Factory-Source-Protocol": "2",
@@ -155,13 +103,18 @@ process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
         writable: true,
         checkpoint: frozen.checkpoint,
       });
-    } finally {
-      await source?.close();
-      await rm(directory, { recursive: true, force: true });
     }
   }
   try {
     const controller = owned.controller(async () => {
+      const initial = await native.prepareWorkspaceSource(
+        owned.projectID,
+        owned.userID,
+        owned.changeID,
+      );
+      // Preserve the pre-Start ownership assertion before real Resume freezes
+      // the admitted Source; import then verifies that exact retained freeze.
+      expect(initial).toMatchObject({ owner: "service", actorUID: null, writable: true });
       const id = await native.startWorkspace(
         owned.projectID,
         owned.userID,
@@ -228,22 +181,25 @@ process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
       {
         uid: string;
         parentHash: string;
-        childHash: string;
         sourceUID: string;
       }[]
-    >`SELECT binding.actor_uid AS uid,attempt.parent_connector_token_hash AS "parentHash",
-        attempt.child_connector_token_hash AS "childHash",source.actor_uid AS "sourceUID"
-      FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+    >`SELECT attempt.actor_uid AS uid,attempt.parent_connector_token_hash AS "parentHash",
+        source.actor_uid AS "sourceUID"
+      FROM factory.runtime_attempt attempt
       JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
       WHERE attempt.id=${owned.attemptID}`;
-    if (!bound || bound.uid !== bound.sourceUID || bound.parentHash === bound.childHash)
+    const parentHeaders = await native.connectorHeaders(owned.attemptID, "parent");
+    const childHeaders = await native.connectorHeaders(owned.attemptID, "child");
+    const parentHash = createHash("sha256")
+      .update(parentHeaders.authorization.slice(7))
+      .digest("hex");
+    const childHash = createHash("sha256")
+      .update(childHeaders.authorization.slice(7))
+      .digest("hex");
+    if (!bound || bound.uid !== bound.sourceUID || parentHash === childHash)
       throw Error("Controlled native prior Session has no original Source/role binding");
-    for (const role of ["parent", "child"] as const) {
-      const headers = await native.connectorHeaders(owned.attemptID, role);
-      const hash = createHash("sha256").update(headers.authorization.slice(7)).digest("hex");
-      if (hash !== (role === "parent" ? bound.parentHash : bound.childHash))
-        throw Error("Controlled native role capability differs from its admission");
-    }
+    if (parentHash !== bound.parentHash)
+      throw Error("Controlled native role capability differs from its admission");
     if (owned.requests() !== 1) throw Error("Controlled prior Session submitted another input");
     owned.hub.parentOperation = originalParent;
     await owned.nextInput();

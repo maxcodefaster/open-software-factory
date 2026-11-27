@@ -5,10 +5,7 @@ import { promisify } from "node:util";
 import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import {
-  type ReviewFeedback,
-  visualReviewSchema,
-} from "../../packages/conversation-domain/src/visual-review";
+import { type ReviewFeedback, visualReviewSchema } from "#conversation-domain/visual-review";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -122,25 +119,30 @@ for (const width of [1440, 390]) {
     await expect(page.getByLabel("Ticket progress", { exact: true })).toContainText(
       "Technical planning is unfinished",
     );
-    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    if (width <= 760) {
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await expect(page.getByRole("menuitem", { name: "Implement", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+    } else {
+      await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    }
     await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Ask AI to clarify", exact: true })).toHaveCount(
       0,
       { timeout: 1_500 },
     );
-    if (width <= 760) {
-      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-      await page
-        .getByRole("menuitem", { name: "Continue technical planning", exact: true })
-        .click();
-    } else {
-      await page.getByRole("button", { name: "Continue technical planning", exact: true }).click();
-    }
+    await page.getByRole("button", { name: "Continue technical planning", exact: true }).click();
     await expect(page.getByLabel("Fixture action")).toHaveText("Technical planning commissioned");
     await expect(page.getByLabel("Fixture commands")).toHaveText(
       JSON.stringify({ work: 1, saves: 0, approvals: 0 }),
     );
-    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    if (width <= 760) {
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await expect(page.getByRole("menuitem", { name: "Implement", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+    } else {
+      await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    }
     await page.screenshot({ path: `${directory}/continue-technical-${width}.png`, fullPage: true });
   });
 }

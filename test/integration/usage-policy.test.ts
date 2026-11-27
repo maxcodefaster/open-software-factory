@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { codingBudgetIn, createUsagePolicy } from "../../apps/factory/src/usage/policy";
 import { createUsageService } from "../../apps/factory/src/usage/service";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
@@ -107,8 +107,8 @@ test("policy commands serialize versions, replay exact intent and enforce Projec
       for (const user of [manager, member, outsider])
         await sql`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${user},'Owned usage',${`${user}@factory.local`},true)`;
       await sql`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${project},${`owned-usage-${project.slice(0, 8)}`},'Owned usage','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${project},${`owned-usage-${project.slice(0, 8)}`},'Owned usage','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
       await sql`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${project},${member},'product-contributor',false,${manager})`;
     });
     expect((await policy.get(member, project)).effective.codingUSD).toBeNull();
@@ -237,8 +237,8 @@ test("policy commands serialize versions, replay exact intent and enforce Projec
     >`SELECT rate FROM factory.usage_operation WHERE id='owned:coding'`;
     expect(historical?.rate.tiers[0]?.input).toBe(1);
     const otherProject = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${otherProject},${`owned-private-${otherProject.slice(0, 8)}`},'Other Project','https://example.invalid/private.git','main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${otherProject},${`owned-private-${otherProject.slice(0, 8)}`},'Other Project','https://example.invalid/private.git','main','.factory/actor-template.json',${manager})`;
     for (const [id, projectID, userID, model] of [
       ["owned:manager-detail", project, manager, "other-member-model"],
       ["owned:private-detail", otherProject, manager, "other-project-model"],

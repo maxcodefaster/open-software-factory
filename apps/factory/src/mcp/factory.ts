@@ -3,16 +3,16 @@ import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
 import { and, desc, eq, sql as expression, gt, inArray } from "drizzle-orm";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { agentTurn, conversationEntry, projectRelease } from "../../../../packages/db/src/schema";
-import { versionSuggestions } from "../../../../packages/project-domain/src/release";
-import { createPlanningTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
-import { type AgentTurnRecord } from "../agent/turn-record";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { agentTurn, conversationEntry, projectRelease } from "#db/schema";
+import { versionSuggestions } from "#project-domain/release";
+import { createPlanningTicketIn } from "#ticket-authoring/authoring";
+import type { AgentTurnRecord } from "../agent/turn-record";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 import { appendConversationEntry } from "../conversations/api";
 import { projectReadInput, projectSearchInput } from "../project-agent/research-api";
-import { type MCPSourceTool } from "./source-tool-contract";
+import type { MCPSourceTool } from "./source-tool-contract";
 
 export const factoryCreateTicketInput = z.strictObject({
   key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),

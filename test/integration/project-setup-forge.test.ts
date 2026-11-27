@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { createForgejoClient } from "#forge/forge";
 import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
+import { installControlledStarterCatalog } from "../fixtures/starter";
 
 test("real Forgejo creates one exact turnkey Starter and recovers the lost initialization response", async () => {
   const process = await factoryProcess();
@@ -46,7 +47,9 @@ test("real Forgejo creates one exact turnkey Starter and recovers the lost initi
     onCreated: async () => {},
   });
   let setupID: string | undefined;
+  let restoreStarterCatalog = () => {};
   try {
+    restoreStarterCatalog = await installControlledStarterCatalog(process.nativeConfiguration);
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${manager},'Owned manager',${`${manager}@starter.test`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
     const draft = await controller.begin(manager);
@@ -93,6 +96,7 @@ test("real Forgejo creates one exact turnkey Starter and recovers the lost initi
       )[0]?.["manage_project"],
     ).toBe(true);
   } finally {
+    restoreStarterCatalog();
     if (setupID) {
       const owned = await forge.setupRepository({ owner: "factory-mutation", name }, setupID);
       if (owned) {

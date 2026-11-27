@@ -10,7 +10,7 @@ import {
   readVersion,
   ticket,
   ticketDependency,
-} from "../../db/src/schema";
+} from "#db/schema";
 import { zeroSchema } from "./schema";
 
 test("Zero includes exactly the eight planning tables with Drizzle column identities and keys", () => {

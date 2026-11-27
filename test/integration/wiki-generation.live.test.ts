@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Agent } from "@mastra/core/agent";
+import { createForgejoClient } from "#forge/forge";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createWikiSourceUpdates } from "../../apps/factory/src/knowledge/source-updates";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -120,7 +120,7 @@ test
         }
       }
       await db.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${user},'Wiki product contributor',${`${name}@factory.local`},true)`;
-      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${project},${name},'Support desk',${`${new URL(api).origin}/${owner}/${name}.git`},'main','.devcontainer/devcontainer.json',${user})`;
+      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${project},${name},'Support desk',${`${new URL(api).origin}/${owner}/${name}.git`},'main','.factory/actor-template.json',${user})`;
       await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${user},'product-contributor',${user})`;
       await wiki.generate(project, user);
       const first = await complete();
@@ -171,9 +171,10 @@ test
       await eventually(
         async () =>
           (
-            await db.client<
-              Array<{ version: number }>
-            >`SELECT event_version::integer AS version FROM factory.wiki_source_update WHERE project_id=${project}`
+            await db.client<Array<{ version: number }>>`
+              SELECT (payload->>'eventVersion')::integer AS version
+              FROM factory.operation
+              WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${project}`
           )[0]?.version,
         (value) => (value ?? 0) > 0,
         "Actual source push was not received",
@@ -235,11 +236,14 @@ test
             }),
         ).toBe(true);
       }
-      await db.client`UPDATE factory.wiki_source_update SET next_attempt_at=now() WHERE project_id=${project}`;
+      await db.client`UPDATE factory.operation
+        SET payload=payload || jsonb_build_object('nextAttemptAt', now())
+        WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${project}`;
       await updates.drain();
-      const [handled] = await db.client<
-        Array<{ done: boolean }>
-      >`SELECT handled_version=event_version AS done FROM factory.wiki_source_update WHERE project_id=${project}`;
+      const [handled] = await db.client<Array<{ done: boolean }>>`
+        SELECT (payload->>'handledVersion')::bigint=(payload->>'eventVersion')::bigint AS done
+        FROM factory.operation
+        WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${project}`;
       expect(handled?.done).toBe(true);
       const revisions = await db.client<
         Array<{

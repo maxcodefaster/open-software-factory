@@ -1,4 +1,4 @@
-import { mentionText } from "../../../../packages/ticket-domain/src/attention";
+import { mentionText } from "#ticket-domain/attention";
 
 // Composers show "@Name" while the stored Markdown keeps the exact person link.
 // Mentions the person chose (or restored from saved content) are remembered by

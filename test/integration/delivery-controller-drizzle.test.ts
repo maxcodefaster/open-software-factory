@@ -1,15 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { eq, sql as query } from "drizzle-orm";
+import { createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { candidateReview } from "#db/schema";
+import { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
-import {
-  createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../packages/db/src/client";
-import { candidateReview } from "../../packages/db/src/schema";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 import { verificationReceipt } from "../fixtures/verification";
 
@@ -32,6 +28,8 @@ async function fixture() {
     projectID = crypto.randomUUID(),
     ticketID = crypto.randomUUID();
   const changeID = crypto.randomUUID(),
+    workspaceID = crypto.randomUUID(),
+    attemptID = crypto.randomUUID(),
     revisionID = crypto.randomUUID(),
     approvalID = crypto.randomUUID();
   const verificationID = crypto.randomUUID(),
@@ -59,6 +57,9 @@ async function fixture() {
   let beforeRevocation: (() => Promise<void>) | undefined;
   let rejectRevocation = false;
   const revoked: number[] = [];
+  const paused: string[] = [];
+  const stopped: string[] = [];
+  const retired: string[] = [];
   const pullRequest = () => ({
     number: 1,
     url: "https://forge.invalid/owned/delivery/pulls/1",
@@ -74,8 +75,8 @@ async function fixture() {
     getFile: async () => "owned protected workflow",
     ensureDefaultBranchProtection: async () => {},
     ensurePullRequest: async () => {
-      const [intent] = await database.client`SELECT id FROM factory.pull_request_operation
-        WHERE change_id=${changeID} AND state='executing'`;
+      const [intent] = await database.client`SELECT id FROM factory.operation
+        WHERE kind='delivery.pull_request' AND scope_type='change' AND scope_id=${changeID} AND state='executing'`;
       expect(intent).toBeDefined();
       return pullRequest();
     },
@@ -117,17 +118,25 @@ async function fixture() {
       return { headSha: base };
     },
   } as unknown as ReturnType<typeof createForgejoClient>;
+  const runtime = {
+    startVerification: async () => {
+      starts++;
+      return null;
+    },
+    startStagingReplacement: async () => null,
+    pause: async (id: string) => {
+      paused.push(id);
+      return null;
+    },
+    stop: async (id: string) => {
+      stopped.push(id);
+      return null;
+    },
+  };
   function controller(connection = database) {
     const delivery = createDeliveryController(
       connection,
-      {
-        startVerification: async () => {
-          starts++;
-          return null;
-        },
-        startStagingReplacement: async () => null,
-        stop: async () => null,
-      },
+      runtime,
       {
         prompt: async () => {
           throw new Error("This offline proof must not dispatch Coding");
@@ -136,7 +145,9 @@ async function fixture() {
           reviews++;
         },
       },
-      async () => {},
+      async (id) => {
+        retired.push(id);
+      },
       { client: forge, owner: "owned" },
     );
     controllers.push(delivery);
@@ -144,8 +155,8 @@ async function fixture() {
   }
   async function seedVerification(state: "running" | "succeeded" | "cancelled" = "running") {
     await database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,state,completed_at,created_by)
-      VALUES(${verificationID},${changeID},${commitSHA},1,'owned-delivery',1,${state}::factory.verification_state,
+      id,change_id,commit_sha,pull_request_number,action_run_id,state,completed_at,created_by)
+      VALUES(${verificationID},${changeID},${commitSHA},1,1,${state}::factory.verification_state,
         CASE WHEN ${state} IN ('succeeded','cancelled') THEN now() ELSE NULL END,${userID})`;
   }
   async function seedReview(
@@ -164,7 +175,7 @@ async function fixture() {
         ${JSON.stringify({ mode: "build", review: {}, requirementRevisionId: revisionID })}::jsonb,'completed')`;
     await database.client`INSERT INTO factory.candidate_review(
       id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,turn_id,state,result,completed_at,
-      finding_source_id,focus_review_id,ui_required,evidence,coverage_version)
+      finding_source_id,focus_review_id,ui_required,evidence)
       VALUES(${id},${verificationID},${ordinal},${changeID},${commitSHA},${baseSHA},${userID},${turnID},${state},
         ${JSON.stringify({
           verdict: state,
@@ -185,8 +196,7 @@ async function fixture() {
               : [],
           ui: "not-applicable",
         })}::jsonb,now(),${findingSourceID},${focusReviewID},${state === "changes-requested"},
-          ${JSON.stringify(state === "changes-requested" ? [{ kind: "owned" }] : [])}::jsonb,
-          ${state === "changes-requested" ? 2 : 1})`;
+          ${JSON.stringify(state === "changes-requested" ? [{ kind: "owned" }] : [])}::jsonb)`;
     return id;
   }
   async function dispose() {
@@ -201,9 +211,9 @@ async function fixture() {
     await database.client.begin(async (sql) => {
       await sql`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${userID},'Owned Delivery',${`${userID}@delivery.invalid`},true)`;
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectID},${`delivery-${projectID}`},'Owned Delivery','https://forge.invalid/owned/delivery.git',
-          'main','.devcontainer/devcontainer.json',${userID})`;
+          'main','.factory/actor-template.json',${userID})`;
       await sql`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by,manage_project)
         VALUES(${projectID},${userID},'developer',${userID},true)`;
       await sql`INSERT INTO factory.ticket(id,project_id,title,created_by)
@@ -214,17 +224,27 @@ async function fixture() {
         VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by)
         VALUES(${changeID},${projectID},${ticketID},${approvalID},${branchName},${baseSHA},'active',${userID})`;
+      await sql`INSERT INTO factory.development_workspace(
+        id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
+        VALUES(${workspaceID},${projectID},'ticket',${ticketID},${changeID},${branchName},${baseSHA},${userID})`;
+      await sql`INSERT INTO factory.runtime_attempt(
+        id,project_id,change_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent)
+        VALUES(${attemptID},${projectID},${changeID},${workspaceID},1,${baseSHA},
+          'create-intended',${"c".repeat(64)},now(),${userID},
+          ${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},'{}')`;
       await sql`INSERT INTO factory.change_commit_operation(
-        id,change_id,sequence,branch_name,expected_parent_sha,commit_sha,observed_remote_sha,commit_message,
-        idempotency_key,state,created_by,completed_at,source,repository_path,repository_blob_sha,repository_content,content_digest)
-        VALUES(${crypto.randomUUID()},${changeID},1,${branchName},${baseSHA},${commitSHA},${commitSHA},
-          'Owned candidate',${crypto.randomUUID()},'succeeded',${userID},now(),'repository-document',
-          'README.md',${baseSHA},${content},${digest(content)})`;
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,observed_remote_sha,commit_message,
+        idempotency_key,state,created_by,completed_at,source)
+        VALUES(${crypto.randomUUID()},${changeID},${attemptID},1,${branchName},${baseSHA},${commitSHA},${commitSHA},
+          'Owned candidate',${crypto.randomUUID()},'succeeded',${userID},now(),'agent')`;
     });
     return {
       database,
       controller,
       changeID,
+      workspaceID,
+      attemptID,
       projectID,
       ticketID,
       revisionID,
@@ -237,6 +257,9 @@ async function fixture() {
       seedReview,
       dispose,
       revoked,
+      paused,
+      stopped,
+      retired,
       merges: () => merges,
       starts: () => starts,
       reviews: () => reviews,
@@ -285,7 +308,7 @@ test("PR and Verification intents precede external work and retries retain their
     expect(f.registrations()).toBe(1);
     expect(
       await f.database
-        .client`SELECT id FROM factory.pull_request_operation WHERE change_id=${f.changeID}`,
+        .client`SELECT id FROM factory.operation WHERE kind='delivery.pull_request' AND scope_type='change' AND scope_id=${f.changeID}`,
     ).toHaveLength(1);
   } finally {
     await f.dispose();
@@ -323,8 +346,8 @@ test("superseded Verification cleanup retains the current candidate and its regi
     // Cancellation frees the active slot before runner revocation is confirmed.
     const previousID = crypto.randomUUID();
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,runner_id,action_run_id,state,completed_at,created_by)
-      VALUES(${previousID},${f.changeID},${"c".repeat(40)},1,'owned-superseded',42,2,'cancelled',now(),${f.userID})`;
+      id,change_id,commit_sha,pull_request_number,runner_id,action_run_id,state,completed_at,created_by)
+      VALUES(${previousID},${f.changeID},${"c".repeat(40)},1,42,2,'cancelled',now(),${f.userID})`;
     const delivery = f.controller();
     await delivery.reconcile(f.changeID);
     const [previous] = await f.database.client`SELECT state,runner_id::text AS runner
@@ -531,6 +554,10 @@ test.each([
     try {
       await f.seedVerification("succeeded");
       await f.seedReview(reviewDelivery);
+      if (reviewDelivery === "ordinary")
+        await f.database.client`INSERT INTO factory.change_writer(change_id,state,user_id,epoch)
+          VALUES(${f.changeID},'human',${f.userID},2)
+          ON CONFLICT (change_id) DO UPDATE SET state='human',user_id=${f.userID},epoch=2`;
       const delivery = f.controller();
       const settings = await delivery.configure(f.projectID, f.userID, {
         commandId: crypto.randomUUID(),
@@ -569,16 +596,20 @@ test("checks-resume command replay preserves its exact native input and refuses 
     const commandID = crypto.randomUUID(),
       stopID = crypto.randomUUID();
     const input = { changeID: f.changeID, verificationID: f.verificationID, stopID };
+    const scope = `checks-resume:${f.changeID}`;
     await f.database
-      .client`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-      VALUES(${commandID},${`checks-resume:${f.changeID}`},${f.userID},${JSON.stringify(input)}::jsonb,'{}'::jsonb)`;
+      .client`INSERT INTO factory.audit_event(id,kind,scope_type,scope_id,dedupe_key,actor_id,payload)
+      VALUES(${commandID},'usage.policy_command','execution_policy',${scope},${`usage.policy_command:${commandID}`},${f.userID},
+        ${JSON.stringify({ commandId: commandID, scope, actorId: f.userID, input, result: {} })}::jsonb)`;
     const delivery = f.controller();
     await delivery.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID);
     await expect(
       delivery.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, crypto.randomUUID()),
     ).rejects.toThrow("Checks resume changed target");
-    const [recorded] = await f.database.client<{ input: typeof input }[]>`SELECT input
-      FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+    const [recorded] = await f.database.client<
+      { input: typeof input }[]
+    >`SELECT payload->'input' AS input
+      FROM factory.audit_event WHERE kind='usage.policy_command' AND id=${commandID}`;
     expect(recorded?.input).toEqual(input);
     expect(f.starts()).toBe(0);
     expect(f.reviews()).toBe(0);
@@ -603,7 +634,10 @@ test("typed approval and atomic merge selection share one transaction and roll b
                 get(sql, key) {
                   if (key !== "unsafe") return Reflect.get(sql, key);
                   return (...args: Parameters<typeof sql.unsafe>) => {
-                    if (args[0].startsWith('insert into "factory"."merge_operation"')) {
+                    if (
+                      args[0].startsWith('insert into "factory"."operation"') &&
+                      args[0].includes("'delivery.merge'")
+                    ) {
                       return (async () => {
                         const [row] = await sql<{ count: number }[]>`SELECT count(*)::int AS count
                           FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
@@ -633,7 +667,8 @@ test("typed approval and atomic merge selection share one transaction and roll b
         .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
     ).toHaveLength(0);
     expect(
-      await f.database.client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+      await f.database
+        .client`SELECT id FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`,
     ).toHaveLength(0);
     expect(f.merges()).toBe(0);
   } finally {
@@ -669,8 +704,8 @@ test("approval rejects a newer incomplete review and later admits only the curre
     expect(f.merges()).toBe(1);
     const [promotion] = await f.database.client<
       { sha: string }[]
-    >`SELECT commit_sha AS sha FROM factory.promotion_operation
-      WHERE change_id=${f.changeID}`;
+    >`SELECT payload->>'commitSha' AS sha FROM factory.operation
+      WHERE kind='delivery.promotion' AND scope_type='change' AND scope_id=${f.changeID}`;
     expect(promotion?.sha).toBe(f.commitSHA);
   } finally {
     await f.dispose();
@@ -687,9 +722,9 @@ test("failed-correction aggregation counts acknowledged failed checks and review
       .client`UPDATE factory.candidate_review SET repair_prompted_at=now() WHERE id=${sourceID}`;
     for (const commit of ["c".repeat(40), "d".repeat(40), "e".repeat(40)])
       await f.database.client`INSERT INTO factory.verification(
-        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,state,
+        id,change_id,commit_sha,pull_request_number,action_run_id,state,
         repair_prompted_at,completed_at,created_by)
-        VALUES(${crypto.randomUUID()},${f.changeID},${commit},1,'owned-old-check',1,'failed',
+        VALUES(${crypto.randomUUID()},${f.changeID},${commit},1,1,'failed',
           CASE WHEN ${commit}<>${"e".repeat(40)} THEN now() END,now(),${f.userID})`;
     await f.controller().reconcile(f.changeID);
     const [saved] = await f.database.client<
@@ -722,13 +757,12 @@ test("atomic finding-check admission copies lineage but resets every fresh-revie
         result: unknown;
         evidence: unknown[];
         required: boolean;
-        coverage: number;
         turn: string | null;
         command: string;
         repaired: string | null;
       }[]
     >`SELECT id,ordinal,finding_source_id AS source,supersedes_id AS supersedes,state,result,evidence,
-      ui_required AS required,coverage_version AS coverage,turn_id AS turn,repair_command_id AS command,
+      ui_required AS required,turn_id AS turn,repair_command_id AS command,
       repair_prompted_at::text AS repaired FROM factory.candidate_review WHERE change_id=${f.changeID} ORDER BY ordinal`;
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({
@@ -739,7 +773,6 @@ test("atomic finding-check admission copies lineage but resets every fresh-revie
       result: null,
       evidence: [],
       required: false,
-      coverage: 1,
       turn: null,
       repaired: null,
     });
@@ -816,23 +849,27 @@ test("atomic merge admission reuses the exact approval and preserves an existing
       VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commitSHA},${f.userID},${reviewID},
         '2026-11-20 01:02:03.123456+00')`;
     await f.database
-      .client`INSERT INTO factory.staging_preview(project_id,revision,created_at,updated_at)
-      VALUES(${f.projectID},${retainedRevision},'2026-11-20 01:02:03.654321+00','2026-11-20 01:02:03.654321+00')`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at)
+      VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${f.projectID},
+        ${`delivery.staging_preview:${f.projectID}`},'pending',
+        ${JSON.stringify({ projectId: f.projectID, revision: retainedRevision, runtimeAttemptId: null })}::jsonb,
+        '2026-11-20 01:02:03.654321+00','2026-11-20 01:02:03.654321+00')`;
     const delivery = f.controller();
     await delivery.approve(f.changeID, f.userID);
     await delivery.close();
     const [merge] = await f.database.client<{ approval: string; key: string; state: string }[]>`
-      SELECT delivery_approval_id AS approval,idempotency_key AS key,state FROM factory.merge_operation
-      WHERE change_id=${f.changeID}`;
+      SELECT payload->>'approvalId' AS approval,idempotency_key AS key,state FROM factory.operation
+      WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`;
     expect(merge).toEqual({
       approval: approvalID,
-      key: `change:${f.changeID}:merge:${approvalID}`,
+      key: `delivery.merge:change:${f.changeID}:merge:${approvalID}`,
       state: "succeeded",
     });
     const [staging] = await f.database.client<
       { revision: string; created: string; updated: string }[]
     >`
-      SELECT revision,created_at::text AS created,updated_at::text AS updated FROM factory.staging_preview WHERE project_id=${f.projectID}`;
+      SELECT payload->>'revision' AS revision,created_at::text AS created,updated_at::text AS updated
+      FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${f.projectID}`;
     expect(staging).toEqual({
       revision: retainedRevision,
       created: "2026-11-20 01:02:03.654321+00",
@@ -841,8 +878,56 @@ test("atomic merge admission reuses the exact approval and preserves an existing
     expect((await delivery.get(f.changeID))?.["approvedAt"]).toBe("2026-11-20 01:02:03.123456+00");
     expect(
       await f.database
-        .client`SELECT id FROM factory.promotion_operation WHERE change_id=${f.changeID}`,
+        .client`SELECT id FROM factory.operation WHERE kind='delivery.promotion' AND scope_type='change' AND scope_id=${f.changeID}`,
     ).toHaveLength(1);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("completed Delivery cleanup pauses Coding and retains its Actor-owned canonical Source", async () => {
+  const f = await fixture();
+  try {
+    await f.seedVerification("succeeded");
+    await f.seedReview();
+    const delivery = f.controller();
+    await delivery.approve(f.changeID, f.userID);
+    await delivery.close();
+    expect(f.merges()).toBe(1);
+    const workspaceID = f.workspaceID,
+      attemptID = f.attemptID,
+      actorUID = crypto.randomUUID();
+    await f.database.client.begin(async (sql) => {
+      await sql`UPDATE factory.runtime_attempt SET actor_uid=${actorUID},create_attempted_at=now(),state='ready'
+        WHERE id=${attemptID}`;
+      await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
+        VALUES(${workspaceID},${actorUID})`;
+      // Controlled completed promotion: no native readiness or Pause is claimed by this fixture.
+      await sql`UPDATE factory.operation SET state='succeeded',active_key=NULL,completed_at=now(),
+        error='Delivery cleanup pending' WHERE kind='delivery.promotion' AND scope_type='change' AND scope_id=${f.changeID}`;
+      await sql`UPDATE factory.change SET state='delivered',runtime_attempt_id=${attemptID}
+        WHERE id=${f.changeID}`;
+    });
+    const retained = () => f.database.client`
+      SELECT workspace.*,attempt.*,source.*
+      FROM factory.development_workspace workspace
+      JOIN factory.runtime_attempt attempt ON attempt.workspace_id=workspace.id
+      JOIN factory.substrate_source source ON source.workspace_id=workspace.id
+      WHERE workspace.id=${workspaceID}`;
+    const before = [...(await retained())];
+    const cleanup = f.controller();
+    await cleanup.reconcile(f.changeID);
+    expect(f.paused).toEqual([attemptID]);
+    expect(f.stopped).toEqual([]);
+    expect(f.retired).toEqual([f.changeID]);
+    expect([...(await retained())]).toEqual(before);
+    const [promotion] = await f.database.client`SELECT state,error
+      FROM factory.operation WHERE kind='delivery.promotion' AND scope_type='change' AND scope_id=${f.changeID}`;
+    expect(promotion).toEqual({ state: "succeeded", error: null });
+    await cleanup.reconcile(f.changeID);
+    expect(f.paused).toEqual([attemptID]);
+    expect(f.retired).toEqual([f.changeID]);
+    expect(f.merges()).toBe(1);
   } finally {
     await f.dispose();
   }
@@ -875,8 +960,8 @@ test("latest focus-review selection uses PostgreSQL microseconds before ordinal 
     const historicalVerificationID = crypto.randomUUID(),
       previousCommit = "c".repeat(40);
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,state,completed_at,created_by)
-      VALUES(${historicalVerificationID},${f.changeID},${previousCommit},1,'owned-previous',1,'succeeded',now(),${f.userID})`;
+      id,change_id,commit_sha,pull_request_number,action_run_id,state,completed_at,created_by)
+      VALUES(${historicalVerificationID},${f.changeID},${previousCommit},1,1,'succeeded',now(),${f.userID})`;
     const newerID = crypto.randomUUID();
     for (const [ordinal, id, created] of [
       [1, newerID, "2026-11-20 01:02:03.123456+00"],

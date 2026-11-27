@@ -1,14 +1,14 @@
 import { expect } from "bun:test";
-import { callFactoryFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { type Browser, expect as visible } from "@playwright/test";
-import type { createDatabase } from "../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   recordedEditorIdentity,
   removeEditorFixtureNamespaceInChild,
 } from "./editor-source-resources";
 import { eventually } from "./factory-process";
 import { openProjectMenu } from "./project-menu";
+import { callFactoryFunction } from "./server-functions";
 
 export async function starterSetupDesktop(input: {
   browser: Browser;

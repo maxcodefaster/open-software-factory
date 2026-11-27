@@ -8,7 +8,13 @@ import {
   parseEnvoy,
   verifySubstrateLiveClusters,
 } from "./substrate-egress";
-import { flags, pins, renderSubstrateProfile, verifyNightly } from "./substrate-profile";
+import {
+  flags,
+  pins,
+  planSubstrateRouterAdmission,
+  renderSubstrateProfile,
+  verifyNightly,
+} from "./substrate-profile";
 import { applySubstrateEgress, upstreamEgress } from "./substrate-profile-command";
 
 const input = {
@@ -21,6 +27,211 @@ const input = {
   template: "profile-workload",
   command: ["sleep", "infinity"],
 };
+
+const nativeClientID = "spiffe://cluster.local/ns/ate-system/sa/atenet-client";
+const factoryID = "spiffe://cluster.local/ns/factory-proof/sa/portable";
+const allowlistFlag = "--ingress-allowed-spiffe-ids";
+
+// Native v1.0.0 Envoy Router args; unrelated fields deliberately survive.
+function routerFixture() {
+  return {
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: {
+      namespace: "ate-system",
+      name: "atenet-router",
+      uid: "original-router-uid",
+      resourceVersion: "42",
+      annotations: { "operator.example/retained": "unchanged" },
+    },
+    spec: {
+      replicas: 2,
+      template: {
+        spec: {
+          volumes: [{ name: "podidentity", projected: { sources: [] } }],
+          containers: [
+            { name: "envoy", args: ["--config-path=/etc/envoy/envoy.yaml"] },
+            {
+              name: "atenet-router",
+              args: [
+                "router",
+                "--mode=ingress",
+                "--envoy-cert-path=/run/servicedns.podcert.ate.dev/credential-bundle.pem",
+                "--ingress-client-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem",
+                `${allowlistFlag}=${nativeClientID}`,
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+describe("Substrate exact Router admission plan", () => {
+  test("appends one native flag without revoking clients or changing any other field", () => {
+    const deployment = routerFixture();
+    const before = structuredClone(deployment);
+    const originalArgs = before.spec.template.spec.containers[1]?.args;
+    if (!originalArgs) throw new Error("Router fixture has no arguments");
+    const plan = planSubstrateRouterAdmission(deployment, "factory-proof", "portable");
+    const path = "/spec/template/spec/containers/1";
+    expect(plan).toEqual({
+      spiffeID: factoryID,
+      allowedSPIFFEIDs: [nativeClientID],
+      patch: [
+        { op: "test", path: "/metadata/uid", value: "original-router-uid" },
+        { op: "test", path: "/metadata/resourceVersion", value: "42" },
+        { op: "test", path: `${path}/name`, value: "atenet-router" },
+        { op: "test", path: `${path}/args`, value: originalArgs },
+        { op: "add", path: `${path}/args/-`, value: `${allowlistFlag}=${factoryID}` },
+      ],
+    });
+    expect(deployment).toEqual(before);
+  });
+
+  test("native local JSON patch preserves the object and refuses stale identity/version/argv", () => {
+    const deployment = routerFixture();
+    const { patch } = planSubstrateRouterAdmission(deployment, "factory-proof", "portable");
+    // --local and stdin: no kubeconfig, discovery, network or Kubernetes mutation.
+    const apply = (value: unknown) =>
+      Bun.spawnSync(
+        [
+          "kubectl",
+          "patch",
+          "--local",
+          "--type=json",
+          "-f",
+          "-",
+          "-p",
+          JSON.stringify(patch),
+          "-o",
+          "json",
+        ],
+        { stdin: Buffer.from(JSON.stringify(value)), stdout: "pipe", stderr: "pipe" },
+      );
+    const result = apply(deployment);
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const expected = structuredClone(deployment);
+    expected.spec.template.spec.containers[1]?.args.push(`${allowlistFlag}=${factoryID}`);
+    const admitted = JSON.parse(result.stdout.toString());
+    expect(admitted).toEqual(expected);
+    expect(planSubstrateRouterAdmission(admitted, "factory-proof", "portable").patch).toEqual([]);
+    for (const metadata of [
+      { ...deployment.metadata, uid: "replacement-router" },
+      { ...deployment.metadata, resourceVersion: "43" },
+    ])
+      expect(apply({ ...deployment, metadata }).exitCode).not.toBe(0);
+    const changed = structuredClone(deployment);
+    changed.spec.template.spec.containers.reverse();
+    expect(apply(changed).exitCode).not.toBe(0);
+    changed.spec.template.spec.containers.reverse();
+    changed.spec.template.spec.containers[1]?.args.push("--log-level=debug");
+    expect(apply(changed).exitCode).not.toBe(0);
+  });
+
+  test("retains comma-separated, repeated and split native flags and checks exact membership", () => {
+    const deployment = routerFixture();
+    const args = deployment.spec.template.spec.containers[1]?.args;
+    if (!args) throw new Error("fixture");
+    const other = "spiffe://cluster.local/ns/operations/sa/other.client";
+    args.push(allowlistFlag, `${other},${factoryID}-other`);
+    const before = structuredClone(deployment);
+    const plan = planSubstrateRouterAdmission(deployment, "factory-proof", "portable");
+    expect(plan.allowedSPIFFEIDs).toEqual([nativeClientID, other, `${factoryID}-other`]);
+    expect(plan.patch.at(-1)?.value).toBe(`${allowlistFlag}=${factoryID}`);
+    expect(deployment).toEqual(before);
+    args.push(`${allowlistFlag}=${factoryID}`);
+    expect(planSubstrateRouterAdmission(deployment, "factory-proof", "portable").patch).toEqual([]);
+  });
+
+  test("handles default deny and installer regeneration without inventing a default identity", () => {
+    const deployment = routerFixture();
+    deployment.spec.template.spec.containers[1]?.args.pop();
+    for (const existing of [[], [`${allowlistFlag}=`]]) {
+      const current = structuredClone(deployment);
+      current.spec.template.spec.containers[1]?.args.push(...existing);
+      const plan = planSubstrateRouterAdmission(current, "x", "factory.client");
+      expect(plan.allowedSPIFFEIDs).toEqual([]);
+      expect(plan.patch.at(-1)?.value).toBe(
+        `${allowlistFlag}=spiffe://cluster.local/ns/x/sa/factory.client`,
+      );
+    }
+    expect(
+      planSubstrateRouterAdmission(routerFixture(), "factory-proof", "portable").patch,
+    ).toHaveLength(5);
+  });
+
+  test.each([
+    ["", "factory"],
+    ["factory", ""],
+    ["*", "factory"],
+    ["factory", "*"],
+    ["factory/ns/other", "factory"],
+    ["factory", "factory?query"],
+    ["Factory", "factory"],
+    ["factory", "../atenet-client"],
+    ["factory", "a".repeat(64)],
+    ["a".repeat(64), "factory"],
+  ])("rejects nonliteral installation identity %s/%s", (namespace, serviceAccount) => {
+    expect(() =>
+      planSubstrateRouterAdmission(routerFixture(), namespace, serviceAccount),
+    ).toThrow();
+  });
+
+  test.each([
+    { uid: undefined },
+    { resourceVersion: undefined },
+    { uid: "" },
+    { name: "other-router" },
+    { namespace: "other-installation" },
+  ])("refuses an unbound or wrong Router %j", (change) => {
+    const deployment = routerFixture();
+    expect(() =>
+      planSubstrateRouterAdmission(
+        { ...deployment, metadata: { ...deployment.metadata, ...change } },
+        "factory-proof",
+        "portable",
+      ),
+    ).toThrow();
+  });
+
+  test.each([
+    (args: string[]) => args.slice(1),
+    (args: string[]) => [...args, "--"],
+    (args: string[]) => [...args, "--mode=egress"],
+    (args: string[]) => [...args, "--atenet-dataplane=agentgateway"],
+    (args: string[]) => args.filter((arg) => !arg.startsWith("--ingress-client-ca-file=")),
+    (args: string[]) => [...args, "--ingress-client-ca-file=/untrusted.pem"],
+    (args: string[]) => [...args, "--envoy-cert-path="],
+    (args: string[]) => [...args, `${allowlistFlag}=*`],
+    (args: string[]) => [...args, `${allowlistFlag}=spiffe://cluster.local/ns/*/sa/*`],
+    (args: string[]) => [...args, `${allowlistFlag}=${factoryID}/`],
+    (args: string[]) => [...args, `${allowlistFlag}=${nativeClientID},`],
+    (args: string[]) => [...args, allowlistFlag],
+  ])("refuses unsupported argv, weakened trust and ambiguous allowlists %#", (change) => {
+    const deployment = routerFixture();
+    const router = deployment.spec.template.spec.containers[1];
+    if (!router) throw new Error("fixture");
+    router.args = change(router.args);
+    expect(() => planSubstrateRouterAdmission(deployment, "factory-proof", "portable")).toThrow();
+  });
+
+  test("requires one named Router container, regardless of its index", () => {
+    const deployment = routerFixture();
+    deployment.spec.template.spec.containers.pop();
+    expect(() => planSubstrateRouterAdmission(deployment, "factory-proof", "portable")).toThrow(
+      "exactly one",
+    );
+    const duplicate = routerFixture();
+    const router = duplicate.spec.template.spec.containers[1];
+    if (!router) throw new Error("fixture");
+    duplicate.spec.template.spec.containers.push({ ...router });
+    expect(() => planSubstrateRouterAdmission(duplicate, "factory-proof", "portable")).toThrow(
+      "exactly one",
+    );
+  });
+});
 
 // Focused fixture follows the two actual v1.0.0 origin TLS contexts, not the
 // obsolete four-cluster workaround. check-upstream additionally uses the entire
@@ -366,16 +577,41 @@ describe("Substrate concrete profile", () => {
     expect(profile.actorTemplate.workerSelector.matchLabels).toEqual(
       profile.workerPool.metadata.labels,
     );
-    expect(profile.actorTemplate.snapshotConfig.preferredFidelity).toBe("SNAPSHOT_FIDELITY_ROOTFS");
+    expect(profile.actorTemplate.snapshotConfig.preferredFidelity).toBe("SNAPSHOT_FIDELITY_MEMORY");
     const container = profile.actorTemplate.containers[0];
-    expect(container?.securityContext).toEqual({ capabilities: { add: ["SETUID", "SETGID"] } });
-    expect(container?.command).toEqual(["/opt/factory-rootless/start.sh", "sleep", "infinity"]);
-    expect(container?.wakeupProbe.httpGet).toEqual({ path: "/readyz", port: 18081 });
-    expect(profile.actorTemplate.volumes[1]?.systemInfo?.dataSources[0]?.trustBundle.names).toEqual(
+    expect(container?.image).toBe(input.workloadImage);
+    expect(container?.securityContext).toEqual({ capabilities: { drop: ["ALL"] } });
+    expect(container?.command).toEqual(input.command);
+    expect(container).not.toHaveProperty("wakeupProbe");
+    expect(container?.volumeMounts).toEqual([
+      { name: "trust", mountPath: "/run/ate/egress-trust-bundle" },
+    ]);
+    expect(container?.env).toEqual(
+      [
+        "SSL_CERT_FILE",
+        "GIT_SSL_CAINFO",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+      ].map((name) => ({ name, value: "/run/ate/egress-trust-bundle/trust-bundle.pem" })),
+    );
+    expect(profile.actorTemplate.volumes).toHaveLength(1);
+    expect(profile.actorTemplate.volumes[0]?.systemInfo?.dataSources[0]?.trustBundle.names).toEqual(
       ["egress-mitm.ate.dev", "system-roots.ate.dev"],
     );
     expect(JSON.stringify(profile)).not.toContain("/var/run/docker.sock");
     expect(JSON.stringify(profile)).not.toContain("hostPath");
+    expect(JSON.stringify(profile)).not.toMatch(/rootless|factory-rootless|HTTP_PROXY|HTTPS_PROXY/);
+    expect(JSON.stringify(profile.actorTemplate)).not.toMatch(
+      /podidentity|substrate-control|substrate-provisioner|credential-bundle|atenet-client/,
+    );
+  });
+
+  test("passes the exact native workload argv without inserting a bootstrap or shell", () => {
+    const command = ["/usr/local/bin/project", "--message", "two words", "$NOT_EXPANDED"];
+    expect(
+      renderSubstrateProfile({ ...input, command }).actorTemplate.containers[0]?.command,
+    ).toEqual(command);
   });
 
   test.each([
@@ -418,13 +654,11 @@ describe("Substrate concrete profile", () => {
     expect(worker).toContain(`FROM ${pins.substrate.workerImage}\n`);
     expect(worker.match(/^COPY /gm)).toHaveLength(1);
     expect(worker).not.toContain("RUN ");
-    const rootless = await readFile(
-      new URL("../../deploy/substrate/rootless/Dockerfile", import.meta.url),
-      "utf8",
-    );
-    expect(rootless).toContain("setcap -r /usr/bin/newuidmap -r /usr/bin/newgidmap");
-    expect(rootless).toContain("chmod 4755 /usr/bin/newuidmap /usr/bin/newgidmap");
-    expect(rootless).not.toContain("--privileged");
+    expect(
+      await Bun.file(
+        new URL("../../deploy/substrate/rootless/Dockerfile", import.meta.url),
+      ).exists(),
+    ).toBe(false);
     expect(flags.globalFlags).toEqual([
       "-log-format",
       "json",

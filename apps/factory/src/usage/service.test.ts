@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import { createUsageService } from "./service";
 
 function fixture(count: number, revokeAfterRead = false) {
@@ -66,9 +66,9 @@ test.each([0, 16, 17])(
     }
     const read = f.queries.find(({ query }) => query.includes('from "factory"."runtime_attempt"'));
     expect(read?.transaction).toBe(0);
-    expect(read?.query).toContain('inner join "factory"."substrate_binding"');
-    expect(read?.query).toContain('"substrate_binding"."deleted_at" is null');
-    expect(read?.query).toContain('not "factory"."substrate_binding"."create_rejected"');
+    expect(read?.query).toContain('"runtime_attempt"."atespace" is not null');
+    expect(read?.query).toContain('"runtime_attempt"."deleted_at" is null');
+    expect(read?.query).toContain('not "factory"."runtime_attempt"."create_rejected"');
     expect(read?.query).toContain('"runtime_attempt"."project_id" = $1');
     expect(read?.query).toContain('order by "factory"."runtime_attempt"."created_at" asc limit $2');
     expect(read?.parameters).toEqual([f.projectID, 64]);

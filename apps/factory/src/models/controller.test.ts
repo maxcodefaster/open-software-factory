@@ -3,9 +3,9 @@ import type postgres from "postgres";
 import type {
   PersonalModelSettings,
   ProjectModelSettings,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
-import type { ModelSettingsView } from "../../../../packages/conversation-domain/src/model-settings";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+} from "#conversation-domain/model-inheritance";
+import type { ModelSettingsView } from "#conversation-domain/model-settings";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   codingReasoningIn,
   createModelSettingsController,
@@ -63,45 +63,57 @@ function fixture(
           else if (query.includes('from "factory"."project_membership"'))
             rows = [["developer", true]];
           else if (query.includes('from "factory"."project"')) rows = [[projectID]];
-          else if (query.includes('from "factory"."model_role_connection"'))
+          else if (query.includes("'reasoningEffort'")) rows = [[options.reasoning ?? null]];
+          else if (
+            query.includes('from "factory"."model_settings"') &&
+            query.includes('inner join "factory"."model_connection_version"')
+          )
             rows = options.connection
               ? [["build", "openai", "alternative-model", "https://models.factory.test/v1"]]
               : [];
-          else if (query.includes("'reasoningEffort'")) rows = [[options.reasoning ?? null]];
-          else if (query.includes('from "factory"."model_defaults"'))
+          else if (query.includes('from "factory"."model_settings"') && parameters[0] === "default")
             rows =
               options.version === undefined
                 ? []
                 : [
                     [
                       options.version,
-                      environment.planningModelId,
-                      environment.buildModelId,
-                      JSON.stringify(options.roleRules ?? rules),
+                      JSON.stringify({
+                        planningModelId: environment.planningModelId,
+                        buildModelId: environment.buildModelId,
+                        roleRules: options.roleRules ?? rules,
+                      }),
                     ],
                   ];
-          else if (query.includes('from "factory"."project_model_settings"'))
+          else if (query.includes('from "factory"."model_settings"') && parameters[0] === "project")
             rows =
               options.projectVersion === undefined
                 ? []
                 : [
                     [
                       options.projectVersion,
-                      JSON.stringify(options.projectRules?.planning ?? projectRule),
-                      JSON.stringify(options.projectRules?.build ?? projectRule),
+                      JSON.stringify({
+                        planning: options.projectRules?.planning ?? projectRule,
+                        build: options.projectRules?.build ?? projectRule,
+                      }),
                     ],
                   ];
-          else if (query.includes('from "factory"."personal_model_settings"'))
+          else if (
+            query.includes('from "factory"."model_settings"') &&
+            parameters[0] === "personal"
+          )
             rows =
-              options.personalVersion === undefined || parameters[1] !== userID
+              options.personalVersion === undefined || parameters[1] !== `${projectID}:${userID}`
                 ? []
                 : [
                     [
                       options.personalVersion,
-                      options.personalModels?.planningModelId ?? null,
-                      options.personalModels
-                        ? options.personalModels.buildModelId
-                        : "alternative-model",
+                      JSON.stringify({
+                        planningModelId: options.personalModels?.planningModelId ?? null,
+                        buildModelId: options.personalModels
+                          ? options.personalModels.buildModelId
+                          : "alternative-model",
+                      }),
                     ],
                   ];
           else throw new Error(`Unexpected query: ${query}`);
@@ -166,10 +178,11 @@ test("inherited settings decode bigint and JSON values within the caller's share
   expect(view.projectEffective.build.modelId).toBe(environment.buildModelId);
   expect(f.queries[0]?.query).toContain("pg_advisory_xact_lock_shared");
   expect(f.queries.every(({ transaction }) => transaction === 1)).toBe(true);
-  const personalRead = f.queries.find(({ query }) =>
-    query.includes('from "factory"."personal_model_settings"'),
+  const personalRead = f.queries.find(
+    ({ query, parameters }) =>
+      query.includes('from "factory"."model_settings"') && parameters[0] === "personal",
   );
-  expect(personalRead?.parameters).toEqual([projectID, userID]);
+  expect(personalRead?.parameters).toEqual(["personal", `${projectID}:${userID}`]);
 });
 
 test("missing inherited rows keep reset defaults instead of inventing saved versions", async () => {
@@ -232,7 +245,10 @@ test.each(["planning", "build"] as const)(
             : environment.buildModelId,
       );
       expect(
-        f.queries.some(({ query }) => query.includes('from "factory"."personal_model_settings"')),
+        f.queries.some(
+          ({ query, parameters }) =>
+            query.includes('from "factory"."model_settings"') && parameters[0] === "personal",
+        ),
       ).toBe(false);
       expect(f.queries.every(({ transaction }) => transaction === 1)).toBe(true);
     }
@@ -273,9 +289,11 @@ test("personal settings stay scoped to the requesting user and never enter anoth
   });
   expect(view.effective.build).toMatchObject({ modelId: "alternative-model", source: "project" });
   expect(
-    f.queries.find(({ query }) => query.includes('from "factory"."personal_model_settings"'))
-      ?.parameters,
-  ).toEqual([projectID, otherUserID]);
+    f.queries.find(
+      ({ query, parameters }) =>
+        query.includes('from "factory"."model_settings"') && parameters[0] === "personal",
+    )?.parameters,
+  ).toEqual(["personal", `${projectID}:${otherUserID}`]);
 });
 
 test.each(["system", "project"] as const)(
@@ -370,10 +388,10 @@ test("model bindings join the exact immutable connection version and keep public
   });
   expect(f.queries[0]?.query).toContain('inner join "factory"."model_connection_version"');
   expect(f.queries[0]?.query).toContain(
-    '"factory"."model_connection_version"."connection_id" = "factory"."model_role_connection"."connection_id"',
+    '"factory"."model_connection_version"."connection_id" = "factory"."model_settings"."connection_id"',
   );
   expect(f.queries[0]?.query).toContain(
-    '"factory"."model_connection_version"."version" = "factory"."model_role_connection"."connection_version"',
+    '"factory"."model_connection_version"."version" = "factory"."model_settings"."connection_version"',
   );
   expect(f.queries[0]?.query).not.toContain("secret_key");
 });
@@ -385,7 +403,7 @@ test.each([
   const f = fixture(input);
   expect(await codingReasoningIn(f.transaction)).toBe(input.expected);
   expect(f.queries[0]?.query).toContain("pg_advisory_xact_lock_shared");
-  expect(f.queries[1]?.query).toContain("\"role_rules\"->'build'->>'reasoningEffort'");
+  expect(f.queries[1]?.query).toContain("\"settings\"->'roleRules'->'build'->>'reasoningEffort'");
   expect(f.queries.every(({ transaction }) => transaction === 1)).toBe(true);
 });
 
@@ -442,18 +460,29 @@ test.each(
     expect(write.query).toContain('"version" + 1');
     expect(write.query).toContain('"updated_at" = now()');
     expect(write.parameters.at(-1)).toBe(version);
-    if (scope === "system") expect(write.query).toContain('"model_defaults"."singleton" =');
-    else {
-      expect(write.query).toContain('"project_id" =');
+    expect(write.query).toContain('"model_settings"."scope_type" =');
+    expect(write.query).toContain('"model_settings"."scope_key" =');
+    if (scope === "system") expect(write.parameters).toContain("default");
+    else if (scope === "project") {
+      expect(write.parameters).toContain("project");
       expect(write.parameters).toContain(projectID);
-      if (scope === "personal") expect(write.query).toContain('"user_id" =');
+    } else {
+      expect(write.parameters).toContain("personal");
+      expect(write.parameters).toContain(`${projectID}:${userID}`);
     }
   }
   if (scope === "project")
-    expect(write.parameters.filter((value) => value === JSON.stringify(projectRule))).toHaveLength(
-      2,
+    expect(write.parameters).toContain(
+      JSON.stringify({ planning: projectRule, build: projectRule }),
     );
-  if (scope === "system") expect(write.parameters).toContain(JSON.stringify(rules));
+  if (scope === "system")
+    expect(write.parameters).toContain(
+      JSON.stringify({
+        planningModelId: environment.planningModelId,
+        buildModelId: environment.buildModelId,
+        roleRules: rules,
+      }),
+    );
   expect(f.queries.at(-1)).toBe(write);
 });
 

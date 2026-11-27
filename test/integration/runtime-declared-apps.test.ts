@@ -28,9 +28,8 @@ test.each(["personal", "ticket", "staging"] as const)(
         { id: string; state: string; revision: string; apps: string[]; attempted: boolean }[]
       >`
         SELECT attempt.id,attempt.state,attempt.revision,attempt.declared_apps AS apps,
-          binding.create_attempted_at IS NOT NULL AS attempted
-        FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-          ON binding.runtime_attempt_id=attempt.id WHERE attempt.project_id=${f.projectID}`;
+          attempt.create_attempted_at IS NOT NULL AS attempted
+        FROM factory.runtime_attempt attempt WHERE attempt.project_id=${f.projectID} AND attempt.atespace IS NOT NULL`;
       expect(saved).toMatchObject({
         state: "create-intended",
         revision: f.revision,
@@ -59,7 +58,7 @@ test("native Staging refuses missing App declaration before retaining a Preview 
     );
     expect(
       await f.database
-        .client`SELECT project_id FROM factory.staging_preview WHERE project_id=${f.projectID}`,
+        .client`SELECT scope_id AS project_id FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${f.projectID}`,
     ).toHaveLength(0);
     expect(f.calls.filter((call) => call.method.startsWith("Create"))).toHaveLength(0);
   } finally {

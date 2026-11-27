@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
-import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { runCommand } from "#runtime-kubernetes/command";
+import { kubernetesCommand } from "#runtime-kubernetes/config";
 import {
   disposeRuntimeStorageCheck,
   requireWritableRuntimeStorage,

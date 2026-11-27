@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import {
   claimAgentWriterIn,
   lockChangeWriterIn,
@@ -10,7 +11,6 @@ import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import type { RuntimeAttemptView } from "../../apps/factory/src/runtime/types";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
@@ -113,9 +113,8 @@ test("editing approval rechecks its exact request epoch after real Change lock c
       message: expect.stringContaining("writer is active or changed"),
     });
     expect(grants).toBe(1);
-    const [stale] = await owned.database
-      .client`SELECT command_id FROM factory.change_editing_decision
-      WHERE command_id=${commandID}`;
+    const [stale] = await owned.database.client`SELECT id AS command_id FROM factory.audit_event
+      WHERE kind='access.change_editing_decision' AND id=${commandID}`;
     expect(stale).toBeUndefined();
     expect(await writers.status(owned.changeID, owned.userID)).toMatchObject({
       state: "human",
@@ -137,8 +136,9 @@ test("editing approval rechecks its exact request epoch after real Change lock c
       canWrite: false,
       actor: { user: { id: requesterID } },
     });
-    const requests = await owned.database.client`SELECT id,state FROM factory.change_editing_request
-      WHERE change_id=${owned.changeID} ORDER BY writer_epoch`;
+    const requests = await owned.database.client`SELECT id,state FROM factory.operation
+      WHERE kind='access.change_editing_request' AND scope_type='change' AND scope_id=${owned.changeID}
+      ORDER BY (payload->>'writerEpoch')::bigint`;
     expect([...requests]).toEqual([
       { id: requestID, state: "superseded" },
       { id: currentRequestID, state: "accepted" },
@@ -329,10 +329,15 @@ test.each(["active", "failed"] as const)(
       active_turn_id=${first.turn.id},last_error='Owned Sandbox startup failed'
       WHERE change_id=${owned.changeID}`;
       if (changeState === "failed") {
-        await owned.database.client`INSERT INTO factory.branch_create_operation(id,change_id,
-        repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-        SELECT ${crypto.randomUUID()},id,'owned','retry',branch_name,base_sha,${crypto.randomUUID()},
-          'succeeded',base_sha,now() FROM factory.change WHERE id=${owned.changeID}`;
+        await owned.database.client`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+          SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+            'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+            jsonb_build_object(
+              'changeId',id::text,'repositoryOwner','owned','repositoryName','retry',
+              'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+            jsonb_build_object('observedHeadSha',base_sha),now()
+          FROM factory.change WHERE id=${owned.changeID}`;
         await owned.database
           .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
         await owned.database
@@ -445,9 +450,8 @@ test("observing settled work never takes editing; explicit takeover retains its 
     expect(observed).toMatchObject({ state: "agent", canWrite: false });
     expect(String(observed.epoch)).toBe(initialEpoch);
     expect(stopping).toBe(0);
-    const decisions = await owned.database
-      .client`SELECT command_id FROM factory.change_editing_decision
-      WHERE change_id=${owned.changeID}`;
+    const decisions = await owned.database.client`SELECT id AS command_id FROM factory.audit_event
+      WHERE kind='access.change_editing_decision' AND scope_type='change' AND scope_id=${owned.changeID}`;
     expect(decisions).toHaveLength(0);
     await expect(
       controller.takeOver(
@@ -904,8 +908,9 @@ test.each(["source", "branch", "compute"] as const)(
       expect(stopCalls).toBe(stopped);
       expect(fences.at(-1)).toBe(String(human.epoch + 1));
       const [decisions] = await owned.database.client<{ count: number }[]>`
-        SELECT count(*)::integer AS count FROM factory.change_editing_decision
-        WHERE command_id=${commandID} AND kind='release' AND writer_epoch=${human.epoch}`;
+        SELECT count(*)::integer AS count FROM factory.audit_event
+        WHERE kind='access.change_editing_decision' AND id=${commandID}
+          AND payload->>'kind'='release' AND (payload->>'fromEpoch')::bigint=${human.epoch}`;
       expect(decisions?.count).toBe(1);
     } finally {
       await owned.dispose();

@@ -1,1 +1,1 @@
-export { type createRuntimeController } from "./controller";
+export type { createRuntimeController } from "./controller";

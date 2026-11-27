@@ -4,10 +4,7 @@ import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parseAllDocuments } from "yaml";
 import { z } from "zod";
-import {
-  type NativeArchitecture,
-  nativeArchitecture,
-} from "../../packages/runtime-kubernetes/src/substrate-profile";
+import { type NativeArchitecture, nativeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import {
   overlaySubstrateEgress,
   parseEnvoy,

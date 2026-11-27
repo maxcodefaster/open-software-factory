@@ -6,20 +6,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
-import { substrateResourceReservation } from "../../apps/factory/src/runtime/substrate-resources";
-import { runCommand, runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
-import {
-  kubernetesCommand,
-  kubernetesConnectionEnvironment,
-} from "../../packages/runtime-kubernetes/src/config";
-import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
+import { runCommand, runEnvironmentCommand } from "#runtime-kubernetes/command";
+import { kubernetesCommand, kubernetesConnectionEnvironment } from "#runtime-kubernetes/config";
+import { serviceAccountConfiguration } from "#runtime-kubernetes/service-account";
 import {
   nativeCapacityNodeReady,
   requireNativeCapacityBase,
   requireNativeCapacitySandbox,
-} from "../../packages/runtime-kubernetes/src/substrate-capacity";
-import { nativeRuntimeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
-import { kubernetesResourceQuantity } from "../../packages/runtime-kubernetes/src/worker-resource-admission";
+} from "#runtime-kubernetes/substrate-capacity";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
+import { kubernetesResourceQuantity } from "#runtime-kubernetes/worker-resource-admission";
+import { substrateResourceReservation } from "../../apps/factory/src/runtime/substrate-resources";
 import {
   requireNativeForgeOrigin,
   requireNativeInstallation,

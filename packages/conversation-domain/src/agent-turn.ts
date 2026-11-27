@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { interviewAnswerInput, planningIntentInput } from "./conversation";
 import { modelConnectionReference } from "./model-connection";
-import { skillRevisionIDsInput } from "./skills";
 import { codingReasoningInput } from "./model-settings";
+import { skillRevisionIDsInput } from "./skills";
 
 const changeAgentCommandInput = z
   .object({ commandId: z.uuid(), contextId: z.uuid().optional() })

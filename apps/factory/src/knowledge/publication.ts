@@ -1,17 +1,8 @@
 import { and, asc, eq, sql as expression } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  knowledgeGeneration,
-  knowledgePage,
-  knowledgePageAlias,
-  knowledgeRevision,
-  project,
-} from "../../../../packages/db/src/schema";
-import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
-import type {
-  WikiGenerationOutput,
-  WikiPageSnapshot,
-} from "../../../../packages/knowledge-domain/src/generation";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { knowledgePage, knowledgeRevision, operation, project } from "#db/schema";
+import { mergeGeneratedDocument } from "#knowledge-domain/document-merge";
+import type { WikiGenerationOutput, WikiPageSnapshot } from "#knowledge-domain/generation";
 import { projectAuthorityIn } from "../access/authority";
 import { WikiHumanEditConflict } from "./generation-failure";
 
@@ -89,13 +80,14 @@ export async function publishWikiPackage(
       .where(eq(project.id, input.projectID))
       .for("update");
     const [intent] = await db
-      .select({ id: knowledgeGeneration.id })
-      .from(knowledgeGeneration)
+      .select({ id: operation.id })
+      .from(operation)
       .where(
         and(
-          eq(knowledgeGeneration.id, input.generationID),
-          eq(knowledgeGeneration.attemptId, input.attemptID),
-          eq(knowledgeGeneration.state, "running"),
+          eq(operation.id, input.generationID),
+          eq(operation.kind, "knowledge.generation"),
+          eq(expression<string>`${operation.payload}->>'attemptId'`, input.attemptID),
+          eq(operation.state, "running"),
         ),
       )
       .for("update");
@@ -197,34 +189,54 @@ export async function publishWikiPackage(
           .update(knowledgePage)
           .set({ parentId: generated.parentSlug ? identity(generated.parentSlug) : null })
           .where(eq(knowledgePage.id, pageID));
-        await db.insert(knowledgePageAlias).values({
-          projectId: input.projectID,
-          slug: generated.slug,
-          pageId: pageID,
+        await db.insert(operation).values({
+          id: crypto.randomUUID(),
+          kind: "knowledge.page_alias",
+          scopeType: "project",
+          scopeId: input.projectID,
+          idempotencyKey: `knowledge.page_alias:${input.projectID}:${generated.slug}`,
+          state: "active",
+          payload: {
+            projectId: input.projectID,
+            slug: generated.slug,
+            pageId: pageID,
+            createdAt: new Date().toISOString(),
+          },
+          createdBy: input.userID,
         });
       }
       count++;
     }
     await db
-      .update(knowledgeGeneration)
+      .update(operation)
       .set({
-        pageCount: expression`coalesce(${knowledgeGeneration.pageCount},0)+${count}`,
-        conflictCount: 0,
+        payload: input.complete
+          ? expression`${operation.payload} || jsonb_build_object(
+              'pageCount', coalesce((${operation.payload}->>'pageCount')::int, 0) + ${count}::int,
+              'conflictCount', 0,
+              'progress', CASE WHEN NULLIF(${operation.payload}->'progress', 'null'::jsonb) IS NOT NULL
+                THEN (${operation.payload}->'progress') || jsonb_build_object(
+                  'phase', 'done',
+                  'topicsDone', ${operation.payload}->'progress'->'topicsTotal',
+                  'currentTopic', NULL
+                )
+                ELSE ${operation.payload}->'progress' END
+            )`
+          : expression`${operation.payload} || jsonb_build_object(
+              'pageCount', coalesce((${operation.payload}->>'pageCount')::int, 0) + ${count}::int,
+              'conflictCount', 0
+            )`,
         updatedAt: expression`now()`,
-        progress: input.complete
-          ? expression`CASE WHEN ${knowledgeGeneration.progress} IS NOT NULL
-              THEN ${knowledgeGeneration.progress}||jsonb_build_object(
-                'phase','done','topicsDone',${knowledgeGeneration.progress}->'topicsTotal','currentTopic',NULL)
-              ELSE ${knowledgeGeneration.progress} END`
-          : knowledgeGeneration.progress,
-        state: input.complete ? "succeeded" : knowledgeGeneration.state,
-        completedAt: input.complete ? expression`now()` : knowledgeGeneration.completedAt,
+        state: input.complete ? "succeeded" : operation.state,
+        activeKey: input.complete ? null : operation.activeKey,
+        completedAt: input.complete ? expression`now()` : operation.completedAt,
       })
       .where(
         and(
-          eq(knowledgeGeneration.id, input.generationID),
-          eq(knowledgeGeneration.attemptId, input.attemptID),
-          eq(knowledgeGeneration.state, "running"),
+          eq(operation.id, input.generationID),
+          eq(operation.kind, "knowledge.generation"),
+          eq(expression<string>`${operation.payload}->>'attemptId'`, input.attemptID),
+          eq(operation.state, "running"),
         ),
       );
     return wikiPublicationSnapshotsIn(db, input.projectID);

@@ -1,13 +1,12 @@
-import { and, eq, sql as expression, inArray, isNull, lte, or } from "drizzle-orm";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import { agentTurn, installationMaintenance } from "../../../../packages/db/src/schema";
+import { and, asc, eq, sql as expression, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { agentTurn, changeAgentSession, operation, runtimeAttempt } from "#db/schema";
 import { confirmUndispatchedReviewStopsIn } from "../agent/runtime-api";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { createUsageJournal } from "../usage/journal-api";
+
+const INSTALLATION_MAINTENANCE_KIND = "installation.maintenance";
+const INSTALLATION_MAINTENANCE_KEY = "installation.maintenance:singleton";
 
 type Database = ReturnType<typeof createDatabase>;
 export type RetainedMaintenanceStop = {
@@ -20,16 +19,21 @@ export type RetainedMaintenanceStop = {
 
 export async function installationInMaintenance(database: Database) {
   const [state] = await database.db
-    .select({ enabled: installationMaintenance.enabled })
-    .from(installationMaintenance)
-    .where(eq(installationMaintenance.singleton, true));
+    .select({ state: operation.state })
+    .from(operation)
+    .where(
+      and(
+        eq(operation.kind, INSTALLATION_MAINTENANCE_KIND),
+        eq(operation.idempotencyKey, INSTALLATION_MAINTENANCE_KEY),
+      ),
+    );
   if (!state) throw new Error("Installation maintenance state is unavailable");
-  return state.enabled;
+  return state.state === "enabled";
 }
 
 export async function beginInstallationMaintenance(
   database: Database,
-  observePausedStop?: (
+  observeRetainedStop?: (
     sql: DatabaseTransaction,
     target: RetainedMaintenanceStop,
   ) => Promise<boolean>,
@@ -57,41 +61,61 @@ export async function beginInstallationMaintenance(
     if (await turns.quarantineExpiredProject(id)) await usage.abandon(`turn:${id}`);
   await database.client.begin(async (sql) => {
     const [state] = await drizzleTransaction(sql)
-      .update(installationMaintenance)
-      .set({ enabled: true, requestedAt: expression`now()` })
-      .where(eq(installationMaintenance.singleton, true))
-      .returning({ singleton: installationMaintenance.singleton });
+      .update(operation)
+      .set({
+        state: "enabled",
+        payload: expression`jsonb_build_object('singleton', true, 'enabled', true, 'requestedAt', now())`,
+        updatedAt: expression`now()`,
+      })
+      .where(
+        and(
+          eq(operation.kind, INSTALLATION_MAINTENANCE_KIND),
+          eq(operation.idempotencyKey, INSTALLATION_MAINTENANCE_KEY),
+        ),
+      )
+      .returning({ id: operation.id });
     if (!state) throw new Error("Installation maintenance state is unavailable");
     // Only the same pure, fenced no-input proof used by normal Stop. Never
     // interrupt native work or equate an unknown Session with an empty one.
     // A later rejection rolls this publication back with the admission fence.
     await confirmUndispatchedReviewStopsIn(sql);
     const retained: RetainedMaintenanceStop[] = [];
-    if (observePausedStop) {
-      const paused = await sql<RetainedMaintenanceStop[]>`
-        SELECT session.change_id AS "changeID",session.stop_id AS "stopID",
-          attempt.id AS "attemptID",attempt.workspace_id AS "workspaceID",
-          attempt.project_id AS "projectID"
-        FROM factory.change_agent_session session
-        JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
-        WHERE session.state='stopped' AND session.stop_pending AND session.stop_id IS NOT NULL
-          AND attempt.state='paused' AND attempt.workspace_id IS NOT NULL
-        ORDER BY attempt.workspace_id,session.change_id`;
-      for (const target of paused) {
+    if (observeRetainedStop) {
+      const candidates: RetainedMaintenanceStop[] = await drizzleTransaction(sql)
+        .select({
+          changeID: changeAgentSession.changeId,
+          stopID: expression<string>`${changeAgentSession.stopId}`,
+          attemptID: runtimeAttempt.id,
+          workspaceID: expression<string>`${runtimeAttempt.workspaceId}`,
+          projectID: runtimeAttempt.projectId,
+        })
+        .from(changeAgentSession)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeAgentSession.runtimeAttemptId))
+        .where(
+          and(
+            eq(changeAgentSession.state, "stopped"),
+            eq(changeAgentSession.stopPending, true),
+            isNotNull(changeAgentSession.stopId),
+            inArray(runtimeAttempt.state, ["paused", "ready"]),
+            isNotNull(runtimeAttempt.workspaceId),
+          ),
+        )
+        .orderBy(asc(runtimeAttempt.workspaceId), asc(changeAgentSession.changeId));
+      for (const target of candidates) {
         // Native lifecycle owns this same lock. Never wait for it while holding
-        // the installation admission fence, or use a cached pause as live proof.
+        // the installation admission fence, or use cached state as native proof.
         const [lock] = await sql<{ acquired: boolean }[]>`
           SELECT pg_try_advisory_xact_lock(hashtext(${`runtime:${target.workspaceID}`})) AS acquired`;
-        if (lock?.acquired && (await observePausedStop(sql, target))) retained.push(target);
+        if (lock?.acquired && (await observeRetainedStop(sql, target))) retained.push(target);
       }
     }
     const [work] = await sql<{ active: boolean }[]>`
       SELECT
         EXISTS(SELECT 1 FROM factory.agent_turn WHERE state IN ('pending','dispatching','running')
           OR (change_id IS NOT NULL AND state='uncertain'))
-        OR EXISTS(SELECT 1 FROM factory.knowledge_generation WHERE state IN ('pending','running'))
-        OR EXISTS(SELECT 1 FROM factory.model_role_probe WHERE state='probing')
-        OR EXISTS(SELECT 1 FROM factory.project_setup_inspection WHERE state IN ('inspecting','confirming'))
+        OR EXISTS(SELECT 1 FROM factory.operation WHERE kind='knowledge.generation' AND state IN ('pending','running'))
+        OR EXISTS(SELECT 1 FROM factory.operation WHERE kind='models.role_probe' AND state='probing')
+        OR EXISTS(SELECT 1 FROM factory.operation WHERE kind='project.setup_inspection' AND state IN ('inspecting','confirming'))
         OR EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE stop_pending
           AND NOT EXISTS(
             SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(retained)}::text::jsonb)
@@ -109,7 +133,16 @@ export async function beginInstallationMaintenance(
 
 export async function finishInstallationMaintenance(database: Database) {
   await database.db
-    .update(installationMaintenance)
-    .set({ enabled: false, requestedAt: null })
-    .where(eq(installationMaintenance.singleton, true));
+    .update(operation)
+    .set({
+      state: "disabled",
+      payload: { singleton: true, enabled: false, requestedAt: null },
+      updatedAt: expression`now()`,
+    })
+    .where(
+      and(
+        eq(operation.kind, INSTALLATION_MAINTENANCE_KIND),
+        eq(operation.idempotencyKey, INSTALLATION_MAINTENANCE_KEY),
+      ),
+    );
 }

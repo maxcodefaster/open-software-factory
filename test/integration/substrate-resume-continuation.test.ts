@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import {
+  type NativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import {
   createSubstrateExecution,
   type SubstrateConfiguration,
 } from "../../apps/factory/src/runtime/substrate";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  type NativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 type ResumeFact = {
@@ -47,10 +47,16 @@ test.each([
     };
     const facts = async () => {
       const [row] = await f.database.client<ResumeFact[]>`
-        SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,
-          attempted_at::text,outcome FROM factory.substrate_actor_rpc
-        WHERE runtime_attempt_id=${f.attemptID} AND action='resume'
-        ORDER BY intended_at DESC LIMIT 1`;
+        SELECT payload->>'actorUid' AS actor_uid,
+          payload->>'nativeVersion' AS native_version,
+          payload->>'originKey' AS origin_key,
+          NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+          payload->>'attemptedAt' AS attempted_at,
+          result AS outcome
+        FROM factory.operation
+        WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID} AND payload->>'action'='resume'
+        ORDER BY created_at DESC LIMIT 1`;
       if (!row) throw Error("Original Resume dispatch missing");
       return row;
     };
@@ -160,7 +166,7 @@ test.each([
       const snapshots = structuredClone(actor?.status.snapshots);
       if (fault && !fault.startsWith("completed")) {
         const [before] = await f.database
-          .client`SELECT checkpoint,observation FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+          .client`SELECT checkpoint,observation FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         if (!actor) throw Error("Original Actor missing");
         const latest = actor.status.snapshots?.at(-1) as {
           uuid: string;
@@ -192,7 +198,7 @@ test.each([
         expect(resumes).toBe(priorCalls);
         expect(await facts()).toEqual(originalFact());
         const [after] = await f.database
-          .client`SELECT checkpoint,observation FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+          .client`SELECT checkpoint,observation FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         expect(after).toEqual(before);
         return;
       }
@@ -203,7 +209,7 @@ test.each([
         }
         const [saved] = await f.database.client<
           { intent: SubstrateConfiguration & { actorSelector: Record<string, string> } }[]
-        >`SELECT intent FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+        >`SELECT binding_intent AS intent FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         if (!saved) throw Error("Original binding missing");
         const { actorSelector: _, ...configuration } = saved.intent;
         await createSubstrateExecution(
@@ -220,7 +226,7 @@ test.each([
         expect(resumes).toBe(priorCalls + 1);
         expect(await facts()).toEqual(originalFact());
         const [after] = await f.database.client<{ observation: NativeActor }[]>`
-          SELECT observation FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+          SELECT observation FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
         expect(after?.observation.status.state).toBe("ACTOR_STATE_RESUMING");
         expect(after?.observation.status.snapshots).toEqual(snapshots);
         return;
@@ -288,13 +294,11 @@ test.each([
         // generations keep valid, immutable provisioning identities.
         await f.database.client.begin(async (sql) => {
           await sql`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${f.attemptID}`;
-          await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,created_by,create_intended_at)
-            SELECT ${newer},project_id,workspace_id,2,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,created_by,now()
+          await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,created_by,create_intended_at,atespace,actor_name,binding_intent)
+            SELECT ${newer},project_id,workspace_id,2,revision,'create-intended',parent_connector_token_hash,created_by,now(),
+              ${`fa-${newer.replaceAll("-", "")}`},${`runtime-${newer.replaceAll("-", "")}`},
+              jsonb_set(binding_intent,'{generation}','2'::jsonb)
             FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
-          await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-            SELECT ${newer},${`fa-${newer.replaceAll("-", "")}`},${`runtime-${newer.replaceAll("-", "")}`},
-              jsonb_set(intent,'{generation}','2'::jsonb)
-            FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
           await sql`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${newer}`;
           await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
         });

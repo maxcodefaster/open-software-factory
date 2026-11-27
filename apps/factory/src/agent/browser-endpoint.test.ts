@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { buildBrowserResultInput } from "../../../../packages/conversation-domain/src/browser-tools";
-import { verificationToolCatalogue } from "../../../../packages/conversation-domain/src/verification";
+import { buildBrowserResultInput } from "#conversation-domain/browser-tools";
+import { verificationToolCatalogue } from "#conversation-domain/verification";
 import {
   browserMcpResult,
   createBuildBrowserEndpoint,

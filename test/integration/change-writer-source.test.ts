@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
@@ -110,11 +110,9 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     // Controlled original-Actor observation for this Source-service proof.
     // No Kubernetes Source client, native Actor or model is created here.
     await owned.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${owned.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${owned.attemptID},${owned.projectID},${owned.workspaceID},${owned.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
-        VALUES(${owned.attemptID},${owned.atespace},${`runtime-${owned.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${owned.workspaceID},'workspace','{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at)
+        VALUES(${owned.attemptID},${owned.projectID},${owned.workspaceID},${owned.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${owned.userID},${owned.atespace},${`runtime-${owned.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${owned.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${owned.attemptID} WHERE id=${owned.changeID}`;
     });

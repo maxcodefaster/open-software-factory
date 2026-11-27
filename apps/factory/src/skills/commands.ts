@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
+import { skillContentInput } from "#conversation-domain/skills";
 
 export const skillImportInput = z
   .object({

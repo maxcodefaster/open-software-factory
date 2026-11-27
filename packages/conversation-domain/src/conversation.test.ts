@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fixtureValue } from "../../../test/fixtures/value";
 import {
   assertModeAuthority,
   conversationMessageInput,
@@ -6,7 +7,6 @@ import {
   interviewQuestionInput,
   normalizeInterviewAnswer,
 } from "./conversation";
-import { fixtureValue } from "../../../test/fixtures/value";
 
 test("agent execution commands require caller-owned identity", () => {
   expect(conversationMessageInput.safeParse({ text: "Investigate" }).success).toBe(false);

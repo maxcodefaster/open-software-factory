@@ -1,17 +1,17 @@
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { type Page, type Response, expect as visible } from "@playwright/test";
+import { interviewQuestionInput } from "#conversation-domain/conversation";
+import { requirementContentInput } from "#requirement-domain/content";
 import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
-import { markdownHTML } from "../../apps/factory/src/markdown";
+import { markdownHTML } from "../../apps/factory/src/editor/client";
 import {
   type ConversationStreamEvent,
   type ConversationView,
   conversationViewSchema,
 } from "../../apps/factory/src/project-agent/contracts";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import { interviewQuestionInput } from "../../packages/conversation-domain/src/conversation";
-import { requirementContentInput } from "../../packages/requirement-domain/src/content";
 import type { releaseInstallation } from "./release-installation";
 import {
   callFactoryFunction,

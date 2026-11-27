@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import type { DatabaseTransaction } from "#db/client";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import { type SubstrateCall, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import {
@@ -13,14 +16,9 @@ import {
   intendActorRPCIn,
 } from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
+import { createWorkspaceLifecycle } from "../../apps/factory/src/workspace/lifecycle";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
-import {
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 test.each([
@@ -299,13 +297,25 @@ test.each([
         .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=2 WHERE change_id=${f.changeID}`;
       const runtime = await f.controller(rpc, sources);
       const [provision] = await f.database
-        .client`SELECT template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`;
+        .client`SELECT resources->'template'->'value' AS template FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`;
       expect(provision?.["template"]).toEqual({ metadata: f.template.metadata });
       const execution = f.execution(rpc, sources);
       await execution.start(f.userID);
       await f.database
         .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
       await f.database.client`UPDATE factory.change SET state='active' WHERE id=${f.changeID}`;
+      await execution.suspend();
+      expect(await restore.lease(f.workspaceID)).toMatchObject({
+        owner: "actor",
+        writable: true,
+        checkpointID: null,
+      });
+      expect(sourceExports).toBe(0);
+      // This separate Stop-only recovery protocol requires an already
+      // independent Source. Seed that exceptional state explicitly; ordinary
+      // Pause retains canonical Actor files and never exports them.
+      await sources.freezeActor(f.workspaceID, f.attemptID, f.database.client);
+      await sources.makeIndependent(f.workspaceID, f.database.client);
       await f.database
         .client`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,
         state,native_session_confirmed_at,created_by)
@@ -325,7 +335,6 @@ test.each([
       await f.database
         .client`UPDATE factory.change_agent_session SET state='working',active_turn_id=${admitted.turn.id}
         WHERE change_id=${f.changeID}`;
-      await execution.suspend();
       f.hub.connected = () => false;
       f.hub.sourceConnected = () => true;
       f.hub.parentOperation = async (_attempt, operation) => {
@@ -386,11 +395,11 @@ test.each([
           expect(await stop.confirm(f.changeID)).toBe(false);
           expect(
             await f.database
-              .client`SELECT stop_id FROM factory.substrate_input_stop WHERE completed_at IS NULL`,
+              .client`SELECT id FROM factory.operation WHERE kind='runtime.input_stop' AND completed_at IS NULL`,
           ).toHaveLength(1);
         } else if (scenario === "maintenance-unresolved-rpc") {
           const [binding] = await f.database
-            .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+            .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
           const operation = await intendActorRPCIn(
             f.database.client,
             f.attemptID,
@@ -400,9 +409,11 @@ test.each([
           );
           await dispatchActorRPCIn(f.database.client, f.attemptID, operation);
         } else if (scenario === "maintenance-active-knowledge") {
+          const generationID = crypto.randomUUID();
           await f.database.client`
-            INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-            VALUES(${crypto.randomUUID()},${f.projectID},${"a".repeat(40)},${f.userID})`;
+            INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+            VALUES(${generationID},'knowledge.generation','project',${f.projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${f.projectID}`},'pending',${f.userID},
+              ${JSON.stringify({ id: generationID, projectId: f.projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: f.userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
         }
         const resumesBefore = resumes;
         const lock = scenario === "maintenance-busy-lock" ? f.database.coordination() : null;
@@ -412,7 +423,7 @@ test.each([
             scenario === "maintenance-no-observer"
               ? undefined
               : async (sql: DatabaseTransaction, target: { stopID: string }) => {
-                  const retained = await execution.pausedStopRetainedIn(sql, target.stopID);
+                  const retained = await execution.stoppedWorkRetainedIn(sql, target.stopID);
                   if (scenario === "maintenance-new-stop")
                     await sql`UPDATE factory.change_agent_session SET stop_id=${crypto.randomUUID()}
                       WHERE change_id=${f.changeID}`;
@@ -435,7 +446,7 @@ test.each([
       }
       if (["maintenance-retained", "maintenance-stop-after-fence"].includes(scenario)) {
         await beginInstallationMaintenance(f.database, (sql, target) =>
-          execution.pausedStopRetainedIn(sql, target.stopID),
+          execution.stoppedWorkRetainedIn(sql, target.stopID),
         );
         expect(await installationInMaintenance(f.database)).toBe(true);
         const [retained] = await f.database
@@ -446,12 +457,14 @@ test.each([
         expect(creates).toBe(1);
         expect(suspends).toBe(1);
         expect(
-          await f.database.client`SELECT stop_id FROM factory.substrate_input_stop`,
+          await f.database.client`SELECT id FROM factory.operation WHERE kind='runtime.input_stop'`,
         ).toHaveLength(0);
         const newWork = async () => {
+          const generationID = crypto.randomUUID();
           await f.database.client`
-            INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-            VALUES(${crypto.randomUUID()},${f.projectID},${"a".repeat(40)},${f.userID})`;
+            INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+            VALUES(${generationID},'knowledge.generation','project',${f.projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${f.projectID}`},'pending',${f.userID},
+              ${JSON.stringify({ id: generationID, projectId: f.projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: f.userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
         };
         await expect(newWork()).rejects.toThrow("maintenance");
         if (scenario === "maintenance-stop-after-fence") {
@@ -474,13 +487,29 @@ test.each([
       expect(await stop.confirm(f.changeID, undefined, "observe")).toBe(false);
       expect(resumes).toBe(1);
       expect(
-        await f.database.client`SELECT stop_id FROM factory.substrate_input_stop`,
+        await f.database.client`SELECT id FROM factory.operation WHERE kind='runtime.input_stop'`,
       ).toHaveLength(0);
       if (scenario === "lost-resume") {
         await expect(stop.confirm(f.changeID)).rejects.toThrow("Owned lost");
         expect(resumes).toBe(2);
         const operation = await nativeInputStopIn(f.database.client, f.attemptID);
         if (!operation) throw Error("Lost Resume did not retain its exact intent");
+        expect(operation.result).toBeNull();
+        const source = await restore.lease(f.workspaceID);
+        const state = await f.database
+          .client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+        await expect(
+          createWorkspaceLifecycle(f.database, runtime).pause(f.userID, {
+            workspaceID: f.workspaceID,
+            requestID: crypto.randomUUID(),
+          }),
+        ).rejects.toThrow("Coding Stop");
+        expect(suspends).toBe(1);
+        expect(await restore.lease(f.workspaceID)).toEqual(source);
+        expect(
+          await f.database
+            .client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`,
+        ).toEqual(state);
         const target = {
           changeID: f.changeID,
           stopID: operation.stopID,
@@ -507,8 +536,10 @@ test.each([
       if (scenario === "unknown-suspend") {
         await expect(stop.confirm(f.changeID)).rejects.toThrow("snapshot RPC was not repeated");
         expect(suspends).toBe(2);
-        const [row] = await f.database
-          .client`SELECT completed_at,snapshot_attempted_at FROM factory.substrate_input_stop WHERE runtime_attempt_id=${f.attemptID}`;
+        const [row] = await f.database.client`
+          SELECT completed_at,payload->>'snapshotAttemptedAt' AS snapshot_attempted_at
+          FROM factory.operation
+          WHERE kind='runtime.input_stop' AND scope_type='runtime_attempt' AND scope_id=${f.attemptID}`;
         expect(row?.["completed_at"]).toBeNull();
         expect(row?.["snapshot_attempted_at"]).not.toBeNull();
         return;
@@ -523,9 +554,13 @@ test.each([
       const [session] = await f.database
         .client`SELECT stop_pending FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
       expect(session?.["stop_pending"]).toBe(!expected);
-      const [saved] = await f.database
-        .client`SELECT completed_at,completed_checkpoint,completed_source_checkpoint_id,result,
-        assignment,resume_attempted_at FROM factory.substrate_input_stop WHERE runtime_attempt_id=${f.attemptID}`;
+      const [saved] = await f.database.client`
+        SELECT completed_at,payload->'completedCheckpoint' AS completed_checkpoint,
+          payload->>'completedSourceCheckpointId' AS completed_source_checkpoint_id,result,
+          payload->'assignment' AS assignment,
+          payload->>'resumeAttemptedAt' AS resume_attempted_at
+        FROM factory.operation
+        WHERE kind='runtime.input_stop' AND scope_type='runtime_attempt' AND scope_id=${f.attemptID}`;
       if (scenario === "unsupported-bootstrap") {
         expect(saved).toBeUndefined();
         expect(suspends).toBe(1);
@@ -534,13 +569,14 @@ test.each([
       expect(saved?.["resume_attempted_at"]).not.toBeNull();
       if (expected) {
         const [completion] = await f.database.client`
-          SELECT binding.checkpoint,source.checkpoint->>'id' AS source_id,
-            operation.completed_at>=operation.resume_attempted_at
+          SELECT attempt.checkpoint,source.checkpoint->>'id' AS source_id,
+            operation.completed_at>=(operation.payload->>'resumeAttemptedAt')::timestamptz
               AND operation.completed_at<=clock_timestamp() AS database_clock
-          FROM factory.substrate_input_stop operation
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=operation.runtime_attempt_id
-          JOIN factory.substrate_source source ON source.workspace_id=operation.workspace_id
-          WHERE operation.runtime_attempt_id=${f.attemptID}`;
+          FROM factory.operation operation
+          JOIN factory.runtime_attempt attempt ON attempt.id::text=operation.scope_id
+          JOIN factory.substrate_source source ON source.workspace_id=(operation.payload->>'workspaceId')::uuid
+          WHERE operation.kind='runtime.input_stop' AND operation.scope_type='runtime_attempt'
+            AND operation.scope_id=${f.attemptID}`;
         expect(saved?.["completed_at"]).not.toBeNull();
         expect(saved?.["completed_checkpoint"].generation).toBe(2);
         expect(saved?.["completed_checkpoint"]).toEqual(completion?.["checkpoint"]);
@@ -554,11 +590,6 @@ test.each([
         expect(suspends).toBe(2);
         expect(saved?.["result"].confirmed).toBe(false);
       }
-      await expect(
-        Promise.resolve(f.database
-          .client`UPDATE factory.substrate_input_stop SET assignment='{}'::jsonb
-        WHERE runtime_attempt_id=${f.attemptID}`),
-      ).rejects.toThrow("immutable");
     } finally {
       await restore.close();
       await f.dispose();

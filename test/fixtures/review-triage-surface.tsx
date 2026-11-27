@@ -1,7 +1,7 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
 import { type ReviewActions, ReviewPanel } from "../../apps/factory/src/review/panel";
-import { TicketActionBar } from "../../apps/factory/src/ticket-action-bar";
+import { TicketActionBar } from "../../apps/factory/src/tickets/ticket-action-bar";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";

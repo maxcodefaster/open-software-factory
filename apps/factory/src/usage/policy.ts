@@ -7,18 +7,14 @@ import {
   executionPolicy,
   executionPolicyCommand,
   tighterExecutionPolicy,
-} from "../../../../packages/conversation-domain/src/execution-policy";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+} from "#conversation-domain/execution-policy";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   administrator,
-  executionPolicyCommand as policyCommandTable,
+  auditEvent,
   executionPolicy as policyTable,
   usageOperation,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { computeAllocationIn } from "./allocation";
@@ -189,15 +185,16 @@ export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
         await lockUsageIn(sql);
         const db = drizzleTransaction(sql);
         const scope = projectID ?? "factory";
+        const dedupeKey = `usage.policy_command:${input.commandID}`;
         const [old] = await db
           .select({
-            actorId: policyCommandTable.actorId,
-            input: policyCommandTable.input,
-            result: policyCommandTable.result,
-            scope: policyCommandTable.scope,
+            actorId: auditEvent.actorId,
+            input: query`${auditEvent.payload}->'input'`,
+            result: query`${auditEvent.payload}->'result'`,
+            scope: auditEvent.scopeId,
           })
-          .from(policyCommandTable)
-          .where(eq(policyCommandTable.commandId, input.commandID));
+          .from(auditEvent)
+          .where(eq(auditEvent.dedupeKey, dedupeKey));
         if (old) {
           if (
             old.actorId !== actorID ||
@@ -248,12 +245,20 @@ export function createUsagePolicy(database: ReturnType<typeof createDatabase>) {
             },
           });
         const result = await policyIn(sql, projectID);
-        await db.insert(policyCommandTable).values({
-          commandId: input.commandID,
-          scope,
+        await db.insert(auditEvent).values({
+          id: input.commandID,
+          kind: "usage.policy_command",
+          scopeType: "execution_policy",
+          scopeId: scope,
           actorId: actorID,
-          input,
-          result,
+          dedupeKey,
+          payload: {
+            commandId: input.commandID,
+            scope,
+            actorId: actorID,
+            input,
+            result,
+          },
         });
         return result;
       });

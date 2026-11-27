@@ -77,7 +77,7 @@ func executeRecordedInputStop(ctx context.Context, b bootstrap, restored sourceR
 		if saved.Result != nil {
 			expected := input
 			expected.Mode = saved.Result.Mode
-			if expected.validate() != nil || saved.Result.nativeInputStop != expected || !saved.Result.EngineExited || !saved.Result.ProcessTreeExited {
+			if expected.Validate() != nil || saved.Result.Assignment != expected || !saved.Result.EngineExited || !saved.Result.ProcessTreeExited {
 				return nil, errors.New("recorded native Stop result is invalid")
 			}
 			return saved.Result, nil
@@ -105,7 +105,7 @@ func executeRecordedInputStop(ctx context.Context, b bootstrap, restored sourceR
 		// The fixed executor has returned after joining its private init, or
 		// refused before creating it. No Project/engine process can remain.
 		// Settlement is still unknown; this only permits preserving Source.
-		result = nativeInputStopResult{nativeInputStopWorkerResult: nativeInputStopWorkerResult{nativeInputStop: input, Confirmed: false, EngineExited: true}, ProcessTreeExited: true}
+		result = nativeInputStopResult{WorkerResult: nativeInputStopWorkerResult{Assignment: input, Confirmed: false, EngineExited: true}, ProcessTreeExited: true}
 	} else if err != nil {
 		return nil, err
 	}
@@ -130,9 +130,9 @@ func inputStopSourceHandler(handler http.Handler, workspaceID string) http.Handl
 }
 
 func serveInputStopParent(ctx context.Context, assignment Assignment, token string, result *nativeInputStopResult, stopID string) error {
-	streams := &parentSourceStreams{handler: assignment.nativeSource}
+	streams := newParentSourceStreams(assignment.NativeSource())
 	fence := &parentSourceFence{}
-	drain := fence.wrap(func(_ context.Context, message Message) Message {
+	drain := fence.Wrap(func(_ context.Context, message Message) Message {
 		reply := Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action}
 		switch message.Action {
 		case "source-drain":
@@ -165,30 +165,30 @@ func serveInputStopParent(ctx context.Context, assignment Assignment, token stri
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-time.After(backoff.next()):
+			case <-time.After(backoff.Next()):
 				continue
 			}
 		}
-		if err := control.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}); err != nil {
-			control.close()
+		if err := control.Write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation, Channels: parentChannels(assignment)}); err != nil {
+			control.Close()
 			continue
 		}
-		backoff.reset()
+		backoff.Reset()
 		connectionContext, disconnect := context.WithCancel(ctx)
-		closeOnCancel := context.AfterFunc(ctx, func() { control.close() })
+		closeOnCancel := context.AfterFunc(ctx, func() { control.Close() })
 		for {
 			var message Message
-			if control.read(&message) != nil {
+			if control.Read(&message) != nil {
 				break
 			}
 			switch message.Type {
 			case "http-request":
-				streams.start(connectionContext, control, message)
+				streams.Start(connectionContext, control, message)
 			case "stream-close":
-				streams.close(message.StreamID)
+				streams.Close(message.StreamID)
 			case "operation-request":
 				if !operations.submit(control, message) {
-					_ = control.write(Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action, Error: "input Stop observation queue is full"})
+					_ = control.Write(Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action, Error: "input Stop observation queue is full"})
 				}
 				// A transport Stop is not native Suspend or authority to discard
 				// unsnapshotted files. Continue serving the original Source owner.
@@ -196,7 +196,7 @@ func serveInputStopParent(ctx context.Context, assignment Assignment, token stri
 		}
 		closeOnCancel()
 		disconnect()
-		control.close()
+		control.Close()
 	}
 	return nil
 }
@@ -217,8 +217,7 @@ func runNativeInputStopParent(ctx context.Context, b bootstrap, restored sourceR
 		return err
 	}
 	defer closeSource()
-	b.Assignment.nativeSource = inputStopSourceHandler(handler, b.Source.WorkspaceID)
-	b.Assignment.nativeActorUID = restored.ActorUID
-	b.Assignment.nativeRetainedSource = true
+	b.Assignment.SetNativeSource(inputStopSourceHandler(handler, b.Source.WorkspaceID))
+	b.Assignment.SetNativeActorUID(restored.ActorUID)
 	return serveInputStopParent(ctx, b.Assignment, b.ParentToken, result, restored.InputStop.StopID)
 }

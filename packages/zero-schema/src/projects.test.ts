@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { desktopBackgroundKeys } from "../../interface-domain/src/background";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 import { projectBackgroundValidator } from "./projects";
 
 test("Project backgrounds accept only a Project identity and curated artwork", () => {

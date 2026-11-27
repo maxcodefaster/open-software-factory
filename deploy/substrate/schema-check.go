@@ -45,9 +45,9 @@ func main() {
 	var template ateapi.ActorTemplate
 	must(protojson.Unmarshal(read(directory, "actorTemplate"), &template))
 	if sandbox.Spec.DefaultVersion != pool.Spec.SandboxClasses[0].ConfigRef.Name ||
-		template.SnapshotConfig.PreferredFidelity != ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS ||
+		template.SnapshotConfig.PreferredFidelity != ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY ||
 		pool.Spec.Replicas != 1 {
-		panic("incorrect runtime binding, ROOTFS fidelity or fixed pool capacity")
+		panic("incorrect runtime binding, MEMORY preference or fixed pool capacity")
 	}
-	fmt.Println("PASS: rendered SandboxConfig/WorkerPool strict upstream Go decode; ActorTemplate strict upstream protobuf decode; runtime/ROOTFS binding")
+	fmt.Println("PASS: rendered SandboxConfig/WorkerPool strict upstream Go decode; ActorTemplate strict upstream protobuf decode; runtime/MEMORY preference binding; no restore qualification")
 }

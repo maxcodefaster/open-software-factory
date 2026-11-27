@@ -3,7 +3,7 @@ import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
 import { createAgentService } from "../../apps/factory/src/agent/service";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
-import { type ConversationView } from "../../apps/factory/src/project-agent/contracts";
+import type { ConversationView } from "../../apps/factory/src/project-agent/contracts";
 import { createConversationService } from "../../apps/factory/src/project-agent/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { serverCall } from "../../apps/factory/src/server-functions/result";

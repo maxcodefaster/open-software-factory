@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createDatabase } from "#db/client";
+import { ticketBoardStatus } from "#interface-domain/ticket-board";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import type { ChangeView } from "../../apps/factory/src/change/types";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { createWorkspaceSubmission } from "../../apps/factory/src/workspace/submission";
-import { createDatabase } from "../../packages/db/src/client";
-import { ticketBoardStatus } from "../../packages/interface-domain/src/ticket-board";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
@@ -62,11 +62,14 @@ async function withSubmission(
     const stopID = crypto.randomUUID();
     const submissionAttemptID = runtimeIdentity(f.workspaceID, sourceGeneration).attemptID;
     await database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.branch_create_operation(
-        id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,
-        state,observed_head_sha,completed_at)
-        SELECT ${crypto.randomUUID()},id,'owned','fixture',branch_name,base_sha,
-          ${crypto.randomUUID()},'succeeded',base_sha,now()
+      await sql`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+        SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+          'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+          jsonb_build_object(
+            'changeId',id::text,'repositoryOwner','owned','repositoryName','fixture',
+            'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+          jsonb_build_object('observedHeadSha',base_sha),now()
         FROM factory.change WHERE id=${f.changeID}`;
       await sql`INSERT INTO factory.agent_turn(
         id,command_id,project_id,ticket_id,change_id,created_by,input,input_digest,authority,
@@ -90,14 +93,11 @@ async function withSubmission(
         await sql`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${f.attemptID}`;
         await sql`INSERT INTO factory.runtime_attempt(
           id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,
-          child_connector_token_hash,create_intended_at,created_by)
+          create_intended_at,created_by,atespace,actor_name,binding_intent)
           SELECT ${submissionAttemptID},project_id,change_id,workspace_id,2,revision,'create-intended',
-            parent_connector_token_hash,child_connector_token_hash,now(),created_by
+            parent_connector_token_hash,now(),created_by,
+            ${`fa-${submissionAttemptID.replaceAll("-", "")}`},${`runtime-${submissionAttemptID.replaceAll("-", "")}`},binding_intent
           FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-          SELECT ${submissionAttemptID},${`fa-${submissionAttemptID.replaceAll("-", "")}`},
-            ${`runtime-${submissionAttemptID.replaceAll("-", "")}`},intent
-          FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
         await freezeRuntimeEnvironment(sql, submissionAttemptID);
         await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${submissionAttemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${submissionAttemptID} WHERE id=${f.changeID}`;
@@ -138,8 +138,8 @@ async function withSubmission(
     await database.client`UPDATE factory.change_agent_session SET state='committed',
       updated_at=now() WHERE change_id=${owned.changeID}`;
     await database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,created_by)
-      VALUES(${crypto.randomUUID()},${owned.changeID},${commitSHA},1,1,'owned-projection','running',${owned.userID})`;
+      id,change_id,commit_sha,pull_request_number,action_run_id,state,created_by)
+      VALUES(${crypto.randomUUID()},${owned.changeID},${commitSHA},1,1,'running',${owned.userID})`;
     const changes = createChangeController(database, {
       stop: async () => {
         throw Error("Read projection must not stop compute");
@@ -186,10 +186,9 @@ test.each(["stopped", "failed", "completed"] as const)(
       (SELECT jsonb_agg(turn ORDER BY id) FROM factory.agent_turn turn WHERE change_id=${owned.changeID}) AS turns,
       (SELECT jsonb_agg(intent ORDER BY turn_id) FROM factory.change_agent_turn_intent intent WHERE change_id=${owned.changeID}) AS intents,
       (SELECT to_jsonb(session) FROM factory.change_agent_session session WHERE change_id=${owned.changeID}) AS session,
-      (SELECT to_jsonb(binding) FROM factory.substrate_binding binding WHERE runtime_attempt_id=${owned.attemptID}) AS native,
       (SELECT to_jsonb(attempt) FROM factory.runtime_attempt attempt WHERE id=${owned.attemptID}) AS runtime,
       (SELECT to_jsonb(writer) FROM factory.change_writer writer WHERE change_id=${owned.changeID}) AS writer,
-      (SELECT to_jsonb(submission) FROM factory.workspace_submission submission WHERE id=${submissionID}) AS source,
+      (SELECT to_jsonb(submission) FROM factory.operation submission WHERE id=${submissionID} AND kind='workspace.submission') AS source,
       (SELECT to_jsonb(operation) FROM factory.change_commit_operation operation WHERE id=${submissionID}) AS submission`;
         const before = await history();
         for (const view of await readBoth(changes, owned)) {
@@ -240,8 +239,6 @@ test("get/list show G2 Workspace Verification while retaining the stopped G1 Cod
       (SELECT jsonb_agg(intent ORDER BY turn_id) FROM factory.change_agent_turn_intent intent WHERE change_id=${changeID}) AS intents,
       (SELECT to_jsonb(session) FROM factory.change_agent_session session WHERE change_id=${changeID}) AS session,
       (SELECT jsonb_agg(attempt ORDER BY generation) FROM factory.runtime_attempt attempt WHERE change_id=${changeID}) AS runtimes,
-      (SELECT jsonb_agg(binding ORDER BY runtime_attempt_id) FROM factory.substrate_binding binding
-        JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id WHERE attempt.change_id=${changeID}) AS native,
       (SELECT to_jsonb(operation) FROM factory.change_commit_operation operation WHERE id=${submissionID}) AS submission`;
       const before = await retained();
       expect(before[0]?.["session"]).toMatchObject({

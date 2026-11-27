@@ -2,9 +2,15 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  installRuntimeArtifacts,
+  type RuntimeArtifacts,
+  runtimeArtifactNames,
+} from "../../scripts/factory/artifacts";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeInstallationFixture } from "../fixtures/native-installation";
 import {
+  nativeLiveArtifacts,
   nativeLiveConfiguration,
   saveNativeLiveConfiguration,
 } from "../fixtures/native-live-configuration";
@@ -99,6 +105,52 @@ test("missing live commissioning cannot allocate an owned database or pull an in
     expect(spawn).not.toHaveBeenCalled();
   } finally {
     spawn.mockRestore();
+  }
+});
+
+test("live fixtures consume one explicitly selected complete artifact generation without rewriting it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-native-artifacts-"));
+  const file = join(directory, "runtime-artifacts.json");
+  const artifacts = Object.fromEntries(
+    runtimeArtifactNames.map((role) => [role, `registry.example/${role}@sha256:${"a".repeat(64)}`]),
+  ) as RuntimeArtifacts;
+  const configuration = nativeLiveConfiguration(
+    { ...nativeInstallationFixture(), workloadImage: artifacts["substrate-runtime"] },
+    database,
+    forge,
+    { platform: "linux", uid: 1000 },
+  );
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => {
+    throw Error("Artifact selection must not allocate resources");
+  });
+  try {
+    await expect(
+      nativeLiveArtifacts(configuration, artifacts["runtime-host"], directory),
+    ).rejects.toThrow("complete runtime-artifacts.json");
+    await installRuntimeArtifacts(directory, artifacts);
+    const before = await readFile(file, "utf8");
+    expect(await nativeLiveArtifacts(configuration, artifacts["runtime-host"], directory)).toEqual(
+      artifacts,
+    );
+    await expect(
+      nativeLiveArtifacts(
+        { ...configuration, workloadImage: `registry.example/other@sha256:${"b".repeat(64)}` },
+        artifacts["runtime-host"],
+        directory,
+      ),
+    ).rejects.toThrow("workloadImage differs");
+    await expect(
+      nativeLiveArtifacts(
+        configuration,
+        `registry.example/other@sha256:${"b".repeat(64)}`,
+        directory,
+      ),
+    ).rejects.toThrow("tools differ");
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(spawn).not.toHaveBeenCalled();
+  } finally {
+    spawn.mockRestore();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

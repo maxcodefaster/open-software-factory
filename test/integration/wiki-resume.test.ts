@@ -62,12 +62,13 @@ test.each([false, true])(
     try {
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${userID},'Wiki owner',${`${userID}@factory.invalid`})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${`resume-wiki-${projectID}`},'Resume Wiki fixture','http://127.0.0.1:9/owned/wiki.git','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`resume-wiki-${projectID}`},'Resume Wiki fixture','http://127.0.0.1:9/owned/wiki.git','main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${userID},'developer',${userID})`;
-      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,page_count,created_by,completed_at)
-        VALUES(${initialGenerationID},${projectID},${commit},'succeeded',1,${userID},now())`;
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+        VALUES(${initialGenerationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${initialGenerationID}`},NULL,'succeeded',${userID},now(),
+          ${JSON.stringify({ id: initialGenerationID, projectId: projectID, sourceCommitSha: commit, pageCount: 1, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
       await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
         VALUES(${pageID},${projectID},'guide','Guide','Previous accepted guide.','Previous accepted guide.',${commit},${userID})`;
       await database.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,generation_id,created_by)
@@ -141,9 +142,9 @@ test("Wiki shutdown aborts admitted analysis without publishing or changing a ma
   try {
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Wiki author',${`${userID}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`shutdown-${projectID}`},'Shutdown Wiki','http://127.0.0.1:9/owned/wiki.git',
-        'main','.devcontainer/devcontainer.json',${userID})`;
+        'main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${userID},'product-contributor',${userID})`;
     await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)

@@ -171,12 +171,12 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     });
     await expect(connections.callback(other, params)).rejects.toThrow("another session");
     expect(exchanges).toBe(0);
-    await database.client`UPDATE factory.mcp_oauth_flow SET expires_at=now()-interval '1 second'
-      WHERE id=${command.commandId}`;
+    await database.client`UPDATE factory.operation SET lease_expires_at=now()-interval '1 second'
+      WHERE kind='mcp.oauth_flow' AND scope_type='connection' AND scope_id=${id} AND payload->>'credentialEpoch'=${command.commandId}`;
     await expect(connections.callback(manager, params)).rejects.toThrow("expired");
     expect(exchanges).toBe(0);
-    await database.client`UPDATE factory.mcp_oauth_flow SET expires_at=now()+interval '10 minutes'
-      WHERE id=${command.commandId}`;
+    await database.client`UPDATE factory.operation SET lease_expires_at=now()+interval '10 minutes'
+      WHERE kind='mcp.oauth_flow' AND scope_type='connection' AND scope_id=${id} AND payload->>'credentialEpoch'=${command.commandId}`;
     expect(await connections.callback(manager, params)).toEqual({ connected: true });
     expect(exchanges).toBe(1);
     await expect(connections.callback(manager, params)).rejects.toThrow();
@@ -188,11 +188,11 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     expect(secret.size).toBeGreaterThan(3);
     const [row] = await database.client<
       Array<{ count: number }>
-    >`SELECT count(*)::float8 AS count FROM factory.mcp_secret_write WHERE state='committed'`;
+    >`SELECT count(*)::float8 AS count FROM factory.operation WHERE kind='mcp.secret_write' AND state='committed'`;
     expect(row?.count).toBe(secret.size);
     expect(refreshes).toBe(0);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`oauth-${project}`},'Owned OAuth Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`oauth-${project}`},'Owned OAuth Project','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
     const connection = await database.client.begin((sql) =>
       connections.library.connectionIn(sql, id),
     );
@@ -241,7 +241,7 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     });
     expect(refreshes).toBe(1);
     const [renewal] =
-      await database.client`SELECT state FROM factory.mcp_token_refresh WHERE connection_id=${id}`;
+      await database.client`SELECT state FROM factory.operation WHERE kind='mcp.token_refresh' AND scope_type='connection' AND scope_id=${id}`;
     expect(renewal?.["state"]).toBe("committed");
     expired = true;
     loseRenewalWrite = true;
@@ -252,7 +252,7 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     ).toBe("reconnect");
     const [pending] = await database.client<
       Array<{ id: string; key: string }>
-    >`SELECT id,secret_key AS key FROM factory.mcp_secret_write WHERE connection_id=${id} AND state='intended'`;
+    >`SELECT id,payload->>'secretKey' AS key FROM factory.operation WHERE kind='mcp.secret_write' AND scope_type='connection' AND scope_id=${id} AND state='intended'`;
     if (!pending) throw new Error("Owned renewal intent missing");
     const retained = fixtureValue(secret.get(pending.key), "owned pending renewal material");
     secret.set(pending.key, {
@@ -262,7 +262,7 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     await expect(connections.recover()).rejects.toThrow("durable write intent");
     expect(refreshes).toBe(2);
     const [unsettled] =
-      await database.client`SELECT state FROM factory.mcp_secret_write WHERE id=${pending.id}`;
+      await database.client`SELECT state FROM factory.operation WHERE id=${pending.id} AND kind='mcp.secret_write'`;
     expect(unsettled?.["state"]).toBe("intended");
     secret.set(pending.key, retained);
     await connections.recover();

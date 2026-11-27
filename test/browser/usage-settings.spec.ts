@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryFunctionContext } from "../../apps/factory/src/server-functions/context";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions, mockUsageFunctions } from "../fixtures/server-functions";
@@ -24,9 +24,9 @@ test.beforeEach(async () => {
   if (!actor) throw new Error("Owned Usage fixture administrator is unavailable");
   projectID = crypto.randomUUID();
   projectSlug = `usage-proof-${projectID.slice(0, 8)}`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
     VALUES(${projectID},${projectSlug},'Usage transport proof','https://example.invalid/owned-usage.git',
-      'main','.devcontainer/devcontainer.json',${actor.id})`;
+      'main','.factory/actor-template.json',${actor.id})`;
 });
 test.afterEach(async ({ page }) => {
   await page.close();

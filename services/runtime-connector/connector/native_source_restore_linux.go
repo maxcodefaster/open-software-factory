@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/workspacefiles"
+	"golang.org/x/sys/unix"
 )
 
 type sourceRestored struct {
@@ -45,6 +46,7 @@ type sourceRestoreCheckpoint struct {
 }
 type sourceRestoreResponse struct {
 	Version            int                      `json:"version"`
+	Retained           bool                     `json:"retained,omitempty"`
 	ActorUID           string                   `json:"actorUID"`
 	CheckpointActorUID string                   `json:"checkpointActorUID"`
 	CheckpointSeedID   *string                  `json:"checkpointSeedID"`
@@ -55,15 +57,31 @@ type sourceRestoreResponse struct {
 	InputStop          *nativeInputStop         `json:"inputStop,omitempty"`
 }
 
+// Written only after verified first publication, before its commit POST. This
+// private identity survives a lost ACK/final role marker; it is not admission on
+// its own. Only a current authenticated retained lease confirms Actor ownership.
+type sourceImported struct {
+	Version      int    `json:"version"`
+	WorkspaceID  string `json:"workspaceID"`
+	ProjectID    string `json:"projectID"`
+	AttemptID    string `json:"attemptID"`
+	Generation   uint64 `json:"generation"`
+	ActorUID     string `json:"actorUID"`
+	WriterEpoch  uint64 `json:"writerEpoch"`
+	CheckpointID string `json:"checkpointID"`
+}
+
 var sourceRestoreUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorUID string, generation uint64) error {
-	if reply.Version != 2 || reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) || generation == 0 ||
+	// Checkpoint consumers (including input Stop) must not
+	// mistake a retained reply for another import/commit assignment.
+	if reply.Retained || reply.Version != 2 || reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) || generation == 0 ||
 		reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 || reply.Checkpoint == nil {
 		return errors.New("Source restore lease invalid")
 	}
 	saved := reply.Checkpoint
-	if reply.InputStop != nil && (reply.InputStop.validate() != nil || !reply.ReadOnly ||
+	if reply.InputStop != nil && (reply.InputStop.Validate() != nil || !reply.ReadOnly ||
 		reply.InputStop.Mode != "interrupt" || reply.CheckpointActorUID != actorUID) {
 		return errors.New("input Stop requires the original read-only Source checkpoint")
 	}
@@ -91,6 +109,120 @@ func validateSourceRestoreLease(reply sourceRestoreResponse, workspaceID, actorU
 	return nil
 }
 
+func confirmRetainedSource(data []byte, reply sourceRestoreResponse, b bootstrap, actorUID string) error {
+	denied := errors.New("retained Source identity/private import confirmation unavailable; checkout retained")
+	var fields struct {
+		ReadOnly   *bool           `json:"readOnly"`
+		Checkpoint json.RawMessage `json:"checkpoint"`
+	}
+	if json.Unmarshal(data, &fields) != nil || fields.ReadOnly == nil || !bytes.Equal(bytes.TrimSpace(fields.Checkpoint), []byte("null")) ||
+		!reply.Retained || reply.Version != 2 || reply.ActorUID != actorUID || !sourceRestoreUUID.MatchString(actorUID) ||
+		!sourceRestoreUUID.MatchString(b.Source.WorkspaceID) || b.Source.ProjectID == "" ||
+		b.Assignment.RuntimeAttemptID == "" || b.Assignment.Generation == 0 ||
+		reply.WriterEpoch == 0 || reply.ChangeWriterEpoch == 0 || reply.Checkpoint != nil ||
+		reply.CheckpointActorUID != "" || reply.CheckpointSeedID != nil || reply.InputStop != nil {
+		return denied
+	}
+	directory, err := openSourceImportDirectory(b.Assignment.ConnectorStateDir)
+	if err != nil {
+		return denied
+	}
+	defer directory.Close()
+	fd, err := unix.Openat(int(directory.Fd()), "source-imported.json", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return denied
+	}
+	file := os.NewFile(uintptr(fd), "source-imported.json")
+	defer file.Close()
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&07777 != 0600 ||
+		stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) || stat.Nlink != 1 {
+		return denied
+	}
+	marker, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(marker) > 4096 {
+		return denied
+	}
+	var imported sourceImported
+	d := json.NewDecoder(bytes.NewReader(marker))
+	d.DisallowUnknownFields()
+	if d.Decode(&imported) != nil || d.Decode(new(any)) != io.EOF ||
+		!sourceRestoreUUID.MatchString(imported.CheckpointID) ||
+		imported != sourceImportIdentity(b, reply, imported.CheckpointID) {
+		return denied
+	}
+	// Do not inspect/reset Git or revalidate the initially admitted template.
+	// Source may now contain staged, dirty, untracked or user-edited config.
+	if root, err := os.Lstat(b.Assignment.WorkspaceFolder); err != nil || !root.IsDir() {
+		return denied
+	}
+	return nil
+}
+
+func sourceImportIdentity(b bootstrap, reply sourceRestoreResponse, checkpointID string) sourceImported {
+	return sourceImported{Version: 1, WorkspaceID: b.Source.WorkspaceID, ProjectID: b.Source.ProjectID,
+		AttemptID: b.Assignment.RuntimeAttemptID, Generation: b.Assignment.Generation,
+		ActorUID: reply.ActorUID, WriterEpoch: reply.WriterEpoch, CheckpointID: checkpointID}
+}
+
+func openSourceImportDirectory(path string) (*os.File, error) {
+	denied := errors.New("Source import identity requires its private native directory")
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, denied
+	}
+	directory := os.NewFile(uintptr(fd), path)
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&07777 != 0700 ||
+		stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+		directory.Close()
+		return nil, denied
+	}
+	return directory, nil
+}
+
+func persistSourceImport(b bootstrap, reply sourceRestoreResponse) error {
+	if err := os.MkdirAll(b.Assignment.ConnectorStateDir, 0700); err != nil {
+		return err
+	}
+	directory, err := openSourceImportDirectory(b.Assignment.ConnectorStateDir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	// Exclusive creation never replaces an existing private identity. Partial
+	// publication without proof fails closed, without deleting or reimporting.
+	fd, err := unix.Openat(int(directory.Fd()), "source-imported.json", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return errors.New("Source import identity already exists or cannot be persisted; checkout retained")
+	}
+	file := os.NewFile(uintptr(fd), "source-imported.json")
+	defer file.Close()
+	marker, err := json.Marshal(sourceImportIdentity(b, reply, reply.Checkpoint.ID))
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(marker); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return directory.Sync()
+}
+
+func syncSourceRestoreDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
 func sameSourceRestoreLease(current, original sourceRestoreResponse) bool {
 	// Policy may advance while the same immutable Source is imported. The
 	// final commit ACK, not either GET, supplies the role for native admission.
@@ -98,10 +230,9 @@ func sameSourceRestoreLease(current, original sourceRestoreResponse) bool {
 	return reflect.DeepEqual(current, original)
 }
 
-// Every request is an authenticated read of the same immutable checkpoint.
-// Transient control-plane outages may delay cold startup, but must not replay
-// lifecycle work or start Docker against the old Source. Native wakeup supervision
-// and caller cancellation bound the wait.
+// Retry only the same authenticated lease/checkpoint read. Transient outages
+// must not replay lifecycle work or admit Work against unconfirmed Source.
+// Native wakeup supervision and caller cancellation bound the wait.
 func readSubstrateSourceRestore(ctx context.Context, client *http.Client, request *http.Request) ([]byte, error) {
 	if request.Method != http.MethodGet || request.URL.Scheme != "https" {
 		return nil, errors.New("Source restore requires an authenticated HTTPS read")
@@ -149,7 +280,7 @@ func readSubstrateSourceRestore(ctx context.Context, client *http.Client, reques
 // only these fixed bytes and identity, never lease acquisition or materialization.
 // Only an exact ACK may replace the lease's role with its current committed role.
 func commitSubstrateSourceRestore(ctx context.Context, client *http.Client, lease *http.Request, reply *sourceRestoreResponse) error {
-	if lease.Method != http.MethodGet || lease.URL.Scheme != "https" || reply == nil || reply.Checkpoint == nil || reply.Version != 2 {
+	if lease.Method != http.MethodGet || lease.URL.Scheme != "https" || reply == nil || reply.Retained || reply.Checkpoint == nil || reply.Version != 2 {
 		return errors.New("Source restore commit requires its authenticated HTTPS v2 lease")
 	}
 	payload, err := json.Marshal(struct {
@@ -196,7 +327,8 @@ func commitSubstrateSourceRestore(ctx context.Context, client *http.Client, leas
 					d := json.NewDecoder(bytes.NewReader(body))
 					d.DisallowUnknownFields()
 					if d.Decode(&ack) != nil || d.Decode(new(any)) != io.EOF || ack.acknowledgement != expected ||
-						ack.ChangeWriterEpoch == 0 || ack.ReadOnly == nil || (reply.InputStop != nil && !*ack.ReadOnly) {
+						ack.ChangeWriterEpoch == 0 || ack.ReadOnly == nil ||
+						(reply.InputStop != nil && !*ack.ReadOnly) {
 						return errors.New("Source restore commit ACK differs")
 					}
 					if err := ctx.Err(); err != nil {
@@ -249,8 +381,8 @@ func commitSubstrateSourceRestore(ctx context.Context, client *http.Client, leas
 	return errors.New("Source restore commit unconfirmed")
 }
 
-// Invoked inside the verified RootlessKit namespace BEFORE dockerd. Neither a
-// retained container restart policy nor a watcher/Agent can race this import.
+// Invoked by the trusted native controller BEFORE admitting cold Work entry.
+// A retained Actor only refreshes authority; its canonical checkout is not imported.
 func RunSubstrateSourceRestore(ctx context.Context) error {
 	var b bootstrap
 	d := json.NewDecoder(strings.NewReader(os.Getenv("FACTORY_SUBSTRATE_BOOTSTRAP")))
@@ -258,13 +390,17 @@ func RunSubstrateSourceRestore(ctx context.Context) error {
 	if d.Decode(&b) != nil || b.Assignment.Validate() != nil {
 		return errors.New("invalid Source cold bootstrap")
 	}
+	return restoreSubstrateBootstrap(ctx, b)
+}
+
+func restoreSubstrateBootstrap(ctx context.Context, b bootstrap) error {
 	if !b.SourceHandoff {
 		return nil
 	}
-	if os.Geteuid() != 0 || b.Assignment.WorkspaceFolder != "/home/rootless/persist/project" || b.Assignment.ConnectorStateDir != "/home/rootless/persist/connector" {
+	if os.Geteuid() != 0 || b.Assignment.WorkspaceFolder != "/var/lib/factory/source/project" || b.Assignment.ConnectorStateDir != nativeBootstrapStateDirectory {
 		return errors.New("Source restore requires its private native root")
 	}
-	if err := workspacefiles.ValidateActorSourceIdentity("/home/rootless/persist"); err != nil {
+	if err := workspacefiles.ValidateActorSourceIdentity("/var/lib/factory/source"); err != nil {
 		return err
 	}
 	uidBytes, err := os.ReadFile("/run/ate/identity/uid")
@@ -325,8 +461,19 @@ func restoreSubstrateSource(ctx context.Context, b bootstrap, actorUID string, c
 	if json.Unmarshal(data, &reply) != nil {
 		return errors.New("Source restore lease invalid")
 	}
-	if err := validateSourceRestoreLease(reply, b.Source.WorkspaceID, actorUID, b.Assignment.Generation); err != nil {
-		return err
+	if reply.Retained {
+		if err := confirmRetainedSource(data, reply, b, actorUID); err != nil {
+			return err
+		}
+	} else {
+		if err := validateSourceRestoreLease(reply, b.Source.WorkspaceID, actorUID, b.Assignment.Generation); err != nil {
+			return err
+		}
+		if reply.InputStop == nil {
+			if _, err := os.Lstat(filepath.Join(b.Assignment.ConnectorStateDir, "source-imported.json")); !os.IsNotExist(err) {
+				return errors.New("Source was already published for this Actor; reimport refused and checkout retained")
+			}
+		}
 	}
 	// b.InputStop advertises the bootstrap's capability, not a dispatched Stop.
 	// Only the authenticated reply's actual InputStop excludes a seed above.
@@ -381,6 +528,11 @@ func restoreSubstrateSource(ctx context.Context, b bootstrap, actorUID string, c
 		if err != nil || strings.TrimSpace(string(identity)) != b.Source.ProjectID {
 			return errors.New("restored Source Project identity differs")
 		}
+		if reply.CheckpointActorUID != actorUID {
+			if err := verifyNativeProjectTemplate(project, b.Assignment.ActorTemplatePath, b.ProjectTemplate); err != nil {
+				return err
+			}
+		}
 		// Recheck the live epoch after downloading; a stale bootstrap cannot publish.
 		latest, err := request("", 0)
 		if err != nil {
@@ -407,9 +559,19 @@ func restoreSubstrateSource(ctx context.Context, b bootstrap, actorUID string, c
 		if err := os.Rename(project, canonical); err != nil {
 			return errors.New("Source publication failed; retained tree remains in private staging")
 		}
+		if reply.InputStop == nil {
+			if err := syncSourceRestoreDirectory(filepath.Dir(canonical)); err != nil {
+				return err
+			}
+			if err := persistSourceImport(b, reply); err != nil {
+				return err
+			}
+		}
 	}
-	if err := commitSubstrateSourceRestore(ctx, client, lease, &reply); err != nil {
-		return err
+	if !reply.Retained {
+		if err := commitSubstrateSourceRestore(ctx, client, lease, &reply); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(b.Assignment.ConnectorStateDir, 0700); err != nil {
 		return err

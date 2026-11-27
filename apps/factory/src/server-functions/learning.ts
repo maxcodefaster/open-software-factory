@@ -6,7 +6,7 @@ import {
   learningReviewNowCommand,
   learningRollbackCommand,
   learningView,
-} from "../../../../packages/conversation-domain/src/learning";
+} from "#conversation-domain/learning";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

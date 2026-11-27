@@ -1,29 +1,25 @@
-import { and, eq, inArray, isNull, like, sql as query } from "drizzle-orm";
-import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
-import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
+import { and, eq, inArray, isNull, sql as query } from "drizzle-orm";
+import { agentTurnAuthorityInput } from "#conversation-domain/agent-turn";
+import { buildBrowserInstructions } from "#conversation-domain/browser-tools";
 import {
   candidateReviewInstructions,
   candidateReviewResultInput,
   correctionReviewInstructions,
   findingCheckInstructions,
-} from "../../../../packages/conversation-domain/src/candidate-review";
-import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+} from "#conversation-domain/candidate-review";
+import type { ModelConnectionReference } from "#conversation-domain/model-connection";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
+  auditEvent,
   candidateReview,
   changeAgentSession,
   changeAgentTurnIntent,
   changeCommitOperation,
   change as changes,
-  codingPause,
+  operation,
   reviewFeedback,
-  reviewFeedbackMessage,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { claimAgentWriterIn, lockChangeWriterIn } from "../access/change-writer";
 import { freezeFeedbackAttachmentsIn } from "../attachments/api";
@@ -104,9 +100,8 @@ export function createReviewAdmission(
           AND verification.runner_id IS NULL
           AND (verification.runtime_attempt_id IS NULL OR EXISTS(
             SELECT 1 FROM factory.runtime_attempt execution
-            JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=execution.id
             WHERE execution.id=verification.runtime_attempt_id AND execution.state='stopped'
-              AND binding.deleted_at IS NOT NULL
+              AND execution.deleted_at IS NOT NULL
           ))
           AND (review.finding_source_id IS NULL OR (source.result IS NOT NULL AND source.finding_source_id IS NULL
             AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=source.turn_id AND state='completed')))
@@ -209,27 +204,31 @@ export function createReviewAdmission(
             .select({
               id: reviewFeedback.id,
               commitSha: reviewFeedback.commitSha,
-              authorId: reviewFeedbackMessage.authorId,
-              body: reviewFeedbackMessage.body,
+              authorId: auditEvent.actorId,
+              body: query<string>`${auditEvent.payload}->>'body'`,
             })
             .from(reviewFeedback)
             .innerJoin(
-              reviewFeedbackMessage,
-              eq(reviewFeedbackMessage.feedbackId, reviewFeedback.id),
+              auditEvent,
+              and(
+                eq(auditEvent.kind, "review.feedback_message"),
+                eq(auditEvent.scopeType, "review_feedback"),
+                eq(auditEvent.scopeId, query<string>`${reviewFeedback.id}::text`),
+              ),
             )
             .where(
               and(
                 eq(reviewFeedback.changeId, changeID),
                 eq(reviewFeedback.commitSha, change.commitSHA),
                 eq(reviewFeedback.kind, "comment"),
-                like(reviewFeedbackMessage.body, "%/api/attachments/%"),
+                query`(${auditEvent.payload}->>'body') LIKE '%/api/attachments/%'`,
               ),
             )
             .orderBy(
               reviewFeedback.createdAt,
               reviewFeedback.id,
-              reviewFeedbackMessage.createdAt,
-              reviewFeedbackMessage.id,
+              auditEvent.createdAt,
+              auditEvent.id,
             );
           await freezeFeedbackAttachmentsIn(transaction, record.id, change.projectID, userID, {
             label:
@@ -238,8 +237,13 @@ export function createReviewAdmission(
             comments: evidence,
           });
           await db
-            .update(codingPause)
-            .set({ resumedByTurnId: record.id })
+            .update(operation)
+            .set({
+              state: "resumed",
+              payload: query`${operation.payload} || ${JSON.stringify({ resumedByTurnId: record.id })}::jsonb`,
+              updatedAt: query`now()`,
+              completedAt: query`now()`,
+            })
             .from(candidateReview)
             .innerJoin(agentTurn, eq(agentTurn.id, candidateReview.turnId))
             .where(
@@ -248,8 +252,11 @@ export function createReviewAdmission(
                 eq(candidateReview.changeId, changeID),
                 eq(candidateReview.turnId, agentTurn.id),
                 inArray(agentTurn.state, ["failed", "stopped"]),
-                eq(codingPause.turnId, candidateReview.turnId),
-                isNull(codingPause.resumedByTurnId),
+                eq(operation.kind, "usage.coding_pause"),
+                eq(operation.scopeType, "agent_turn"),
+                eq(operation.scopeId, query`${candidateReview.turnId}::text`),
+                eq(operation.state, "paused"),
+                query`(${operation.payload}->>'resumedByTurnId') IS NULL`,
               ),
             );
           const policy =
@@ -276,7 +283,6 @@ export function createReviewAdmission(
             promptText: `${policy}\n\n${buildBrowserInstructions(record.id)}`,
             bootstrap: true,
             sessionTitle: `Review: ${change.title}`.slice(0, 200),
-            skillLoading: "eager",
           });
           await db
             .update(candidateReview)

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
-import { drizzleTransaction } from "../../../../../packages/db/src/client";
+import { drizzleTransaction } from "#db/client";
 import { CommandError } from "../../command-error";
 import { runtimeSourceCapability } from "../../runtime/git-http";
 import { createInternalProtocol } from "./internal";
@@ -56,14 +56,13 @@ test("native Source restore remains available but retired fixture-rescue paths a
 });
 
 test.each([
-  { kind: null, verificationID: null, owner: "substrate_workspace" },
-  { kind: "prebuild", verificationID: null, owner: "substrate_prebuild" },
-  { kind: "verification", verificationID: crypto.randomUUID(), owner: "substrate_verification" },
-  { kind: "staging", verificationID: null, owner: "substrate_isolated" },
-  { kind: "publication", verificationID: null, owner: "substrate_isolated" },
+  { kind: null, verificationID: null, provisionKind: "workspace" },
+  { kind: "verification", verificationID: crypto.randomUUID(), provisionKind: "verification" },
+  { kind: "staging", verificationID: null, provisionKind: "staging" },
+  { kind: "publication", verificationID: null, provisionKind: "publication" },
 ])(
   "runtime Source grant routing preserves lifecycle predicates and transaction binding: %j",
-  async ({ kind, verificationID, owner }) => {
+  async ({ kind, verificationID, provisionKind }) => {
     const attemptID = crypto.randomUUID();
     const queries: Array<{ text: string; parameters: unknown[] }> = [];
     const grants: Array<{ text: string; parameters: unknown[] }> = [];
@@ -110,7 +109,12 @@ test.each([
     expect(queries[0]?.parameters).toEqual([attemptID, "create-intended", "starting", 1]);
     expect(transactions).toBe(1);
     expect(grants).toHaveLength(1);
-    expect(grants[0]?.text).toContain(`factory.${owner}`);
+    expect(grants[0]?.text).toContain("factory.substrate_provision");
+    expect(grants[0]?.text).toContain(
+      provisionKind === "staging" || provisionKind === "publication"
+        ? "isolated_kind IN ('staging','publication')"
+        : `provision.kind='${provisionKind}'`,
+    );
     expect(grants[0]?.parameters).toContain(attemptID);
     found = false;
     expect((await protocol(request())).status).toBe(404);
@@ -119,3 +123,24 @@ test.each([
     expect(grants).toHaveLength(1);
   },
 );
+
+test("the retired Project image endpoint cannot read or publish image results", async () => {
+  const attemptID = crypto.randomUUID();
+  let called = false;
+  const protocol = createInternalProtocol({
+    factoryOrigin: "https://factory.test",
+    projectPreparation: {
+      async endpoint() {
+        called = true;
+        return new Response(null, { status: 204 });
+      },
+    },
+  } as unknown as Parameters<typeof createInternalProtocol>[0]);
+  for (const method of ["GET", "POST"]) {
+    const response = await protocol(
+      new Request(`https://factory.test/internal/project-image/${attemptID}`, { method }),
+    );
+    expect(response.status).toBe(404);
+  }
+  expect(called).toBe(false);
+});

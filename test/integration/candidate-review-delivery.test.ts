@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import {
+  type CandidateReviewResult,
+  candidateReviewResultInput,
+} from "#conversation-domain/candidate-review";
+import type { createForgejoClient } from "#forge/forge";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -11,11 +16,6 @@ import { createMonitoringController } from "../../apps/factory/src/monitoring/co
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import {
-  type CandidateReviewResult,
-  candidateReviewResultInput,
-} from "../../packages/conversation-domain/src/candidate-review";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
@@ -28,11 +28,17 @@ import { fixtureValue } from "../fixtures/value";
 
 async function setup(autofix = false) {
   const f = await candidateReviewFixture(undefined, undefined, autofix);
-  await f.database.client`INSERT INTO factory.pull_request_operation(
-    id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
-    title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
-    SELECT ${crypto.randomUUID()},id,'owned','review','main',branch_name,${f.commit},
-      'Owned review','','owned-'||id,'succeeded',1,'https://forge.invalid/owned/review/pulls/1',now()
+  await f.database.client`INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+    SELECT ${crypto.randomUUID()},'delivery.pull_request','change',id::text,
+      'delivery.pull_request:owned-'||id,NULL,'succeeded',
+      jsonb_build_object(
+        'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+        'baseBranch','main','headBranch',branch_name,'commitSha',${f.commit}::text,
+        'firstHeadSha',${f.commit}::text,'title','Owned review','body',''
+      ),
+      jsonb_build_object('number',1,'url','https://forge.invalid/owned/review/pulls/1'),
+      created_by,now()
     FROM factory.change WHERE id=${f.changeID}`;
   let head = f.commit;
   let base = "a".repeat(40);
@@ -70,6 +76,10 @@ async function setup(autofix = false) {
         throw new Error("Exact completed CI needs no new compute");
       },
       startStagingReplacement: async () => null,
+      pause: async (id) => {
+        expect(id).toBe(f.attemptID);
+        return null;
+      },
       stop: async () => null,
     },
     {
@@ -233,7 +243,7 @@ test("Autofix records delegated Delivery provenance and merges only the exact in
     });
     expect(
       await f.database
-        .client`SELECT turn_id FROM factory.agent_turn_mcp WHERE turn_id=${review?.id ?? null}`,
+        .client`SELECT scope_id FROM factory.operation WHERE kind='coding.turn_mcp' AND scope_type='agent_turn' AND scope_id=${review?.id ?? null}`,
     ).toHaveLength(0);
     await f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID);
     await observe(
@@ -254,8 +264,9 @@ test("Autofix records delegated Delivery provenance and merges only the exact in
       review: f.reviewID,
     });
     expect(
-      await f.database.client`SELECT id FROM factory.monitoring_evidence
-      WHERE incident_id=${f.monitoring.incidentID} AND kind='delivery-candidate' AND commit_sha=${f.commit}`,
+      await f.database.client`SELECT id FROM factory.audit_event
+      WHERE kind='monitoring.evidence' AND scope_type='incident' AND scope_id=${f.monitoring.incidentID}
+        AND payload->>'kind'='delivery-candidate' AND payload->>'commitSha'=${f.commit}`,
     ).toHaveLength(1);
   } finally {
     await f.dispose();
@@ -439,7 +450,8 @@ test("Delivery rechecks Threads after waiting on the shared Change lock", async 
       async () => {
         const [row] = await f.database.client<{ waiting: boolean }[]>`
         SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-          AND wait_event_type='Lock' AND position('FOR UPDATE OF change,ticket' IN query)>0) AS waiting`;
+          AND wait_event_type='Lock' AND LOWER(query) LIKE '%for update of%'
+          AND LOWER(query) LIKE '%change%' AND LOWER(query) LIKE '%ticket%') AS waiting`;
         return row?.waiting;
       },
       Boolean,
@@ -608,7 +620,7 @@ test.each([
       ).toHaveLength(0);
       expect(
         await f.database
-          .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+          .client`SELECT id FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`,
       ).toHaveLength(0);
       expect(f.merges()).toBe(0);
       expect(f.reviews).toHaveLength(0);
@@ -634,7 +646,7 @@ test("human approval records the exact completed review and newer source cannot 
         (
           await f.database.client<
             { state: string }[]
-          >`SELECT state FROM factory.merge_operation WHERE change_id=${f.changeID}`
+          >`SELECT state FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`
         )[0]?.state,
       (state) => state === "succeeded",
     );
@@ -655,8 +667,8 @@ test("a changed candidate needs new Verification and review, not the previous pa
         'Owned correction',${crypto.randomUUID()},'succeeded',created_by,now()
       FROM factory.change WHERE id=${f.changeID}`;
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,state,completed_at)
-      VALUES(${crypto.randomUUID()},${f.changeID},${newer},1,'owned-new-review',2,${f.userID},'succeeded',now())`;
+      id,change_id,commit_sha,pull_request_number,action_run_id,created_by,state,completed_at)
+      VALUES(${crypto.randomUUID()},${f.changeID},${newer},1,2,${f.userID},'succeeded',now())`;
     await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("not eligible");
     const replay = await createReviewAdmission(f.database)(f.changeID, f.reviewID, f.userID);
     expect(replay.replayed).toBe(true);
@@ -957,7 +969,9 @@ test.each(["failed", "stopped"] as const)(
     try {
       const turn = await f.activeReview();
       await f.database
-        .client`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${turn.id},'finish-reserve-used')`;
+        .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+        VALUES(${crypto.randomUUID()},'usage.coding_pause','agent_turn',${turn.id},${`usage.coding_pause:${turn.id}`},'paused',
+          ${JSON.stringify({ turnId: turn.id, reason: "finish-reserve-used", resumedByTurnId: null })}::jsonb)`;
       if (state === "failed") {
         await f.turns.settle(
           turn.id,
@@ -974,7 +988,7 @@ test.each(["failed", "stopped"] as const)(
       await f.controller.retryReview(f.changeID, f.userID, crypto.randomUUID(), f.reviewID);
       const [pause] = await f.database.client<
         { resumed: string }[]
-      >`SELECT resumed_by_turn_id AS resumed FROM factory.coding_pause WHERE turn_id=${turn.id}`;
+      >`SELECT (payload->>'resumedByTurnId')::uuid AS resumed FROM factory.operation WHERE kind='usage.coding_pause' AND scope_type='agent_turn' AND scope_id=${turn.id}`;
       expect(pause?.resumed).toBe(f.reviews[0]);
       const fresh = await f.turns.get(fixtureValue(f.reviews[0], "f.reviews[0]"));
       expect(fresh?.command.kind).toBe("change-review");

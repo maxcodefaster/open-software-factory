@@ -1,4 +1,4 @@
-export type ComputeClass = "development" | "staging" | "verification" | "prebuild" | "publication";
+export type ComputeClass = "development" | "staging" | "verification" | "publication";
 
 export function computeReservation(kind: ComputeClass) {
   return kind === "staging"

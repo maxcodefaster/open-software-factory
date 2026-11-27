@@ -6,7 +6,7 @@ import {
   type SetupTask,
   setupInspectionCommand,
   setupTask,
-} from "../../../../packages/project-domain/src/setup";
+} from "#project-domain/setup";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

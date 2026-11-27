@@ -21,7 +21,7 @@ test("mirrors reject the shared malformed binding before native observation, wri
     },
     (text) => {
       if (text.includes('"factory"."project"')) return [[repositoryURL]];
-      if (text.includes('"factory"."repository_mirror_command"')) return [];
+      if (text.includes('"factory"."operation"')) return [];
       if (text.includes('"auth"."user"')) return [[actor]];
       if (text.includes('"factory"."account_access"')) return [[null, null]];
       if (text.includes('"factory"."administrator"')) return manager ? [[actor]] : [];

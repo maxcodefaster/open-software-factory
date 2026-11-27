@@ -1,5 +1,5 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import { scopedAsset } from "../src/base.ts";
 
 test("Preview asset and native function URLs retain queries without duplicate mounts", () => {

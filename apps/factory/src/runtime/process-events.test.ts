@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type RuntimeProcessSnapshot } from "./process-contract";
+import type { RuntimeProcessSnapshot } from "./process-contract";
 import { RuntimeProcessEvents } from "./process-events";
 
 function eventReader(response: Response) {

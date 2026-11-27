@@ -1,12 +1,12 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { z } from "zod";
-import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import { type AgentView } from "../agent/contracts";
+import type { ConversationMode } from "#conversation-domain/conversation";
+import type { AgentView } from "../agent/contracts";
 import type { createAgentCommandIds } from "../agent-command-ids";
 import { readAttachmentContent } from "../attachments/composer";
-import { type Change } from "../change/contracts";
-import { type DeliveryView } from "../delivery/contracts";
-import { type ConversationView } from "../project-agent/contracts";
+import type { Change } from "../change/contracts";
+import type { DeliveryView } from "../delivery/contracts";
+import type { ConversationView } from "../project-agent/contracts";
 import {
   checkCodingStop,
   getAgentView,

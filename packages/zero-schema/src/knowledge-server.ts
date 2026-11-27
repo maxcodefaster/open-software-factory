@@ -1,12 +1,12 @@
 import type { DrizzleTransaction } from "@rocicorp/zero/server/adapters/drizzle";
 import { eq, sql } from "drizzle-orm";
-import type { createDatabase } from "../../db/src/client";
-import { knowledgePage } from "../../db/src/schema";
+import type { createDatabase } from "#db/client";
+import { knowledgePage } from "#db/schema";
 import {
   type knowledgePageIconInput,
   type moveKnowledgePageInput,
   movePageOrder,
-} from "../../knowledge-domain/src/page-tree";
+} from "#knowledge-domain/page-tree";
 
 type Transaction = DrizzleTransaction<ReturnType<typeof createDatabase>["db"]>;
 async function authority(db: Transaction, userId: string, projectId: string) {

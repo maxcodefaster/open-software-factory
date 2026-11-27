@@ -1,36 +1,25 @@
 import { expect, test } from "bun:test";
-import { environmentBundle } from "../../../../packages/project-domain/src/environment";
+import { environmentBundle } from "#project-domain/environment";
 import { selectRuntimeEnvironment } from "./runtime";
 
-test("registry publication consent remains in Factory, outside the Connector credential protocol", () => {
+test("environment selection preserves Runtime and explicit Verification boundaries", () => {
   const bundle = environmentBundle.parse({
-    variables: [],
-    registries: [
-      {
-        host: "runtime.registry.test",
-        username: "owned-runtime",
-        password: "owned-runtime-password",
-        certificate: "",
-        verification: false,
-        publish: true,
-      },
-      {
-        host: "verification.registry.test",
-        username: "owned-verification",
-        password: "owned-verification-password",
-        certificate: "",
-        verification: true,
-        publish: false,
-      },
-    ],
+    variables: [
+      { name: "NPM_TOKEN", runtime: true, verification: false },
+      { name: "VERIFIED_RUNTIME", runtime: true, verification: true },
+      { name: "VERIFICATION_ONLY", runtime: false, verification: true },
+      { name: "DISABLED", runtime: false, verification: false },
+    ].map((variable) => ({ ...variable, value: `owned-${variable.name}` })),
   });
   const runtime = selectRuntimeEnvironment(bundle, false);
-  expect(runtime.registries).toHaveLength(2);
-  expect(runtime.registries[0]?.password).toBe("owned-runtime-password");
-  expect(JSON.stringify(runtime)).not.toContain('"publish"');
+  expect(runtime).toEqual({ variables: bundle.variables.slice(0, 2) });
   const verification = selectRuntimeEnvironment(bundle, true);
-  expect(verification.registries).toHaveLength(1);
-  expect(verification.registries[0]?.host).toBe("verification.registry.test");
-  expect(JSON.stringify(verification)).not.toContain('"publish"');
-  expect(bundle.registries[0]?.publish).toBe(true);
+  expect(verification).toEqual({ variables: bundle.variables.slice(1, 2) });
+  expect(verification.variables[0]?.value).toBe("owned-VERIFIED_RUNTIME");
+  expect(bundle.variables).toHaveLength(4);
+});
+
+test("empty Environment selection has no image-pull or build configuration", () => {
+  for (const verification of [false, true])
+    expect(selectRuntimeEnvironment({ variables: [] }, verification)).toEqual({ variables: [] });
 });

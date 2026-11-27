@@ -1,3 +1,5 @@
+import { createSignal } from "solid-js";
+
 // Controlled command responses for the real sharing UI, not runtime or authority proof.
 const owner = {
   workspaceID: "workspace-owner",
@@ -22,6 +24,8 @@ const sourceAccessTicket = {
 };
 const sourceAccessChangeID = "10000000-0000-4000-8000-000000000004";
 const sourceAccessParams = () => new URLSearchParams(location.search);
+let listingReads = 0;
+export const [sharingDecisionCount, setSharingDecisionCount] = createSignal(0);
 let complete = () => {};
 const available = new Promise<void>((resolve) => {
   complete = resolve;
@@ -41,6 +45,8 @@ export function releaseAvailableWorkspaces() {
 }
 export async function getAvailableWorkspaces() {
   await available;
+  if (sourceAccessParams().get("listing-failure") === "once" && ++listingReads === 1)
+    throw Error("Workspace listing temporarily unavailable.");
   return {
     ok: true as const,
     value: [
@@ -123,6 +129,13 @@ export async function shareWorkspace({
 }: {
   data: [{ userID: string; permission: string | null; expectedVersion: number }];
 }) {
+  setSharingDecisionCount((value) => value + 1);
+  if (sourceAccessParams().get("sharing-failure") === "unknown")
+    return {
+      ok: false as const,
+      status: 503,
+      message: "Sharing outcome is unconfirmed. Reopen sharing to see its recorded state.",
+    };
   const input = data[0];
   const current = members.find((row) => row.userID === input.userID);
   if (!current || current.version !== input.expectedVersion)

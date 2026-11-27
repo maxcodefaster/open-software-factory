@@ -151,6 +151,8 @@ async function verifyEditorIngress(protocol: string) {
       {
         start: noCompute,
         startPersisted: noCompute,
+        pause: noCompute,
+        get: noCompute,
         processOutput: noCompute,
         processAction: noCompute,
         closeTerminal: noCompute,
@@ -164,7 +166,9 @@ async function verifyEditorIngress(protocol: string) {
     const runtime = await startSubstrateFixtureWorkspace(fixture);
     const actorUID = (await runtime.get(fixture.attemptID))?.native?.actorUID;
     if (!actorUID) throw Error("Owned native Source Actor missing");
-    await nativeSource.attach(fixture.workspaceID, actorUID, database.client);
+    // The edge proof controls an already imported Actor Source. Allocation
+    // alone is not the authenticated initial-import protocol.
+    await fixture.admitActorSource(actorUID);
     await database.client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${fixture.attemptID}`;
     const originalAttempts =
       await database.client`SELECT * FROM factory.runtime_attempt WHERE project_id=${projectID}`;

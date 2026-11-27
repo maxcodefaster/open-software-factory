@@ -1,25 +1,22 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import {
-  confirmEpicProposalInput,
-  epicProposalInput,
-} from "../../../../packages/conversation-domain/src/epic-proposal";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { confirmEpicProposalInput, epicProposalInput } from "#conversation-domain/epic-proposal";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
+  auditEvent,
   change,
   conversationEntry,
   epic,
-  epicConfirmation,
   requirementRevision,
   ticket,
   ticketConversation,
   ticketDependency,
   ticketDocumentRevision,
-} from "../../../../packages/db/src/schema";
-import { canonicalRequirementContent } from "../../../../packages/requirement-domain/src/requirement";
-import { insertInitialTicketIn } from "../../../../packages/ticket-authoring/src/authoring";
+} from "#db/schema";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { insertInitialTicketIn } from "#ticket-authoring/authoring";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { lockConversation } from "../conversations/api";
@@ -46,32 +43,37 @@ export function createEpicConfirmation(database: ReturnType<typeof createDatabas
       await sql`SELECT pg_advisory_xact_lock(hashtextextended('ticket-dependencies:' || ${projectID},0))`;
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`epic-confirmation:${entryID}`}))`;
       const db = drizzleTransaction(sql);
+      const dedupeKey = `tickets.epic_confirmation:${entryID}`;
       const [replay] = await db
         .select({
-          id: epicConfirmation.id,
-          epicID: epicConfirmation.epicId,
-          inputDigest: epicConfirmation.inputDigest,
-          userID: epicConfirmation.createdBy,
-          members: epicConfirmation.members,
+          id: auditEvent.id,
+          kind: auditEvent.kind,
+          scopeType: auditEvent.scopeType,
+          scopeId: auditEvent.scopeId,
+          userID: auditEvent.actorId,
+          payload: auditEvent.payload,
         })
-        .from(epicConfirmation)
-        .where(
-          or(
-            eq(epicConfirmation.id, input.commandId),
-            eq(epicConfirmation.proposalEntryId, entryID),
-          ),
-        );
+        .from(auditEvent)
+        .where(or(eq(auditEvent.id, input.commandId), eq(auditEvent.dedupeKey, dedupeKey)));
       if (replay) {
+        const payload = replay.payload;
         if (
           replay.id !== input.commandId ||
-          replay.inputDigest !== digest ||
+          replay.kind !== "tickets.epic_confirmation" ||
+          replay.scopeType !== "project" ||
+          replay.scopeId !== projectID ||
+          payload["proposalEntryId"] !== entryID ||
+          payload["inputDigest"] !== digest ||
           replay.userID !== userID
         )
           throw new CommandError(
             "conflict",
             "This proposal was already confirmed with another decision",
           );
-        return { epicId: replay.epicID, ticketIds: replay.members as string[] };
+        return {
+          epicId: payload["epicId"] as string,
+          ticketIds: payload["members"] as string[],
+        };
       }
       const [entry] = await db
         .select({
@@ -321,16 +323,21 @@ export function createEpicConfirmation(database: ReturnType<typeof createDatabas
           })
           .where(eq(ticket.id, entry.ticketID));
       const members = [...identities.values()];
-      await db.insert(epicConfirmation).values({
+      await db.insert(auditEvent).values({
         id: input.commandId,
-        projectId: projectID,
-        proposalEntryId: entryID,
-        epicId: epicID,
-        originTicketId: entry.ticketID,
-        inputDigest: digest,
-        decision: input.proposal,
-        members,
-        createdBy: userID,
+        kind: "tickets.epic_confirmation",
+        scopeType: "project",
+        scopeId: projectID,
+        dedupeKey,
+        actorId: userID,
+        payload: {
+          proposalEntryId: entryID,
+          epicId: epicID,
+          originTicketId: entry.ticketID,
+          inputDigest: digest,
+          decision: input.proposal,
+          members,
+        },
       });
       return { epicId: epicID, ticketIds: members };
     });

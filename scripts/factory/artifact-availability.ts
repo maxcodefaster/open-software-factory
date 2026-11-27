@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { kubernetesCommand } from "#runtime-kubernetes/config";
 import { runtimeArtifactsSchema } from "./artifacts";
 import { requirePinnedImage } from "./preflight";
 import { waitForRegistry } from "./registry-readiness";

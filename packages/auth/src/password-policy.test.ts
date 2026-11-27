@@ -3,7 +3,7 @@ import {
   checkPasswordChange,
   passwordChangeMessage,
   passwordPolicy,
-} from "../../identity-domain/src/password-policy";
+} from "#identity-domain/password-policy";
 import * as policy from "./policy";
 
 const valid = {

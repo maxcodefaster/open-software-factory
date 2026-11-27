@@ -1,6 +1,6 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { DatabaseTransaction } from "#db/client";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { mcpDigest } from "../../apps/factory/src/mcp/controller";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
@@ -57,8 +57,9 @@ export async function seedMonitoringDelegation(
       ${JSON.stringify([{ name: tool.name, digest: tool.digest }])}::jsonb,${context.userID})`;
   await sql`INSERT INTO factory.monitoring_hook(id,project_id,name,version,enabled,secret_digest,policy_id)
     VALUES(${hookID},${context.projectID},'Owned delegated Autofix',1,true,${monitoringDigest("owned-key")},${policyID})`;
-  await sql`INSERT INTO factory.monitoring_policy(id,hook_id,connection_id,assignment,delegated_by,delegation)
-    VALUES(${policyID},${hookID},${connectionID},${JSON.stringify(assignment)}::jsonb,${context.userID},${context.delegation ?? "application-fix-and-delivery"})`;
+  await sql`INSERT INTO factory.monitoring_policy(id,hook_id,delegated_by,delegation,source_ids,source_assignments)
+    VALUES(${policyID},${hookID},${context.userID},${context.delegation ?? "application-fix-and-delivery"},
+      ARRAY[${connectionID}]::uuid[],${JSON.stringify([assignment])}::jsonb)`;
   await sql`INSERT INTO factory.monitoring_incident(id,hook_id,project_id,policy_id,hook_version,fingerprint,payload_digest,title,context,state,ticket_id)
     VALUES(${incidentID},${hookID},${context.projectID},${policyID},1,${monitoringDigest("owned-defect")},
       ${monitoringDigest("owned-payload")},'Owned delegated defect','Owned diagnostic context','implementing',${context.ticketID})`;
@@ -157,9 +158,9 @@ export async function monitoringFixture(options: { readIssue?: (id: string) => s
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userId},'Owned Autofix manager',${`${userId}@monitoring.test`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userId})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectId},${`monitoring-${projectId}`},'Owned Autofix Project',
-      'https://forge.example/owned/monitoring.git','main','.devcontainer/devcontainer.json',${userId})`;
+      'https://forge.example/owned/monitoring.git','main','.factory/actor-template.json',${userId})`;
     const source = await addSource("project");
     const saved = await controller.save(projectId, userId, {
       id: hookId,

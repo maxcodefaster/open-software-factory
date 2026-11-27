@@ -1,4 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
+import { createDatabase } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createImplementationOrders } from "../../apps/factory/src/change/implementation-orders";
@@ -10,8 +12,6 @@ import {
 } from "../../apps/factory/src/delivery/coordination";
 import { createChangeIntegration } from "../../apps/factory/src/delivery/integration";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
-import { createDatabase } from "../../packages/db/src/client";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture as sharedCandidateReviewFixture } from "../fixtures/candidate-review";
 import { eventually } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
@@ -131,6 +131,10 @@ function delivery(
     runtime ?? {
       startVerification: async () => null,
       startStagingReplacement: async () => null,
+      pause: async (id) => {
+        expect(id).toBe(f.attemptID);
+        return null;
+      },
       stop: async () => null,
     },
     { prompt: async () => null },
@@ -147,11 +151,17 @@ function delivery(
   return { controller, merges: () => merges };
 }
 async function retainedPR(f: Fixture) {
-  await f.database.client`INSERT INTO factory.pull_request_operation(
-    id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
-    title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
-    SELECT ${crypto.randomUUID()},id,'owned','review','main',branch_name,${f.commit},
-      'Owned candidate','','owned-'||id,'succeeded',1,'https://forge.invalid/owned/review/pulls/1',now()
+  await f.database.client`INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+    SELECT ${crypto.randomUUID()},'delivery.pull_request','change',id::text,
+      'delivery.pull_request:owned-'||id,NULL,'succeeded',
+      jsonb_build_object(
+        'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+        'baseBranch','main','headBranch',branch_name,'commitSha',${f.commit}::text,
+        'firstHeadSha',${f.commit}::text,'title','Owned candidate','body',''
+      ),
+      jsonb_build_object('number',1,'url','https://forge.invalid/owned/review/pulls/1'),
+      created_by,now()
     FROM factory.change WHERE id=${f.changeID}`;
 }
 
@@ -184,6 +194,9 @@ test.each(["released", "claimed-by-another-change"] as const)(
         {
           startVerification: async () => null,
           startStagingReplacement: async () => null,
+          pause: async () => {
+            throw new Error("A lost Delivery slot must not pause Coding compute");
+          },
           stop: async () => null,
         },
         { prompt: async () => null },
@@ -204,8 +217,8 @@ test.each(["released", "claimed-by-another-change"] as const)(
             .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
         ).toHaveLength(0);
         const [slot] = await f.database.client<{ changeID: string }[]>`
-          SELECT change_id AS "changeID" FROM factory.project_delivery_queue
-          WHERE project_id=${f.projectID}`;
+          SELECT payload->>'changeId' AS "changeID" FROM factory.operation
+          WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`;
         expect(slot?.changeID).toBe(other.changeID);
       } else {
         await controller.approve(f.changeID, f.userID);
@@ -216,7 +229,7 @@ test.each(["released", "claimed-by-another-change"] as const)(
         ).toHaveLength(1);
         expect(
           await f.database
-            .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+            .client`SELECT id FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`,
         ).toHaveLength(1);
       }
       expect(released).toBe(true);
@@ -237,14 +250,14 @@ test("Delivery slot release rechecks a merge intent after waiting for its row lo
     const queue = createDeliveryCoordination(f.database);
     expect(await queue.claim(f.projectID, f.changeID)).toBe(true);
     await f.database.client.begin(async (sql) => {
-      await sql`SELECT project_id FROM factory.project_delivery_queue
-        WHERE project_id=${f.projectID} FOR UPDATE`;
+      await sql`SELECT id FROM factory.operation
+        WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`} FOR UPDATE`;
       release = queue.release(f.changeID);
       await eventually(
         () => f.database.client<{ waiting: boolean }[]>`
           SELECT EXISTS(SELECT 1 FROM pg_stat_activity
             WHERE datname=current_database() AND pid<>pg_backend_pid()
-              AND wait_event_type='Lock' AND query LIKE '%project_delivery_queue%') AS waiting`,
+              AND wait_event_type='Lock' AND query LIKE '%"factory"."operation"%' AND query LIKE '%active_key%') AS waiting`,
         (rows) => rows[0]?.waiting === true,
         "The original release did not reach the locked Delivery slot",
       );
@@ -252,15 +265,19 @@ test("Delivery slot release rechecks a merge intent after waiting for its row lo
       await sql`INSERT INTO factory.delivery_approval(
         id,change_id,verification_id,commit_sha,approved_by,candidate_review_id)
         VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commit},${f.userID},${f.reviewID})`;
-      await sql`INSERT INTO factory.merge_operation(
-        id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key)
-        VALUES(${crypto.randomUUID()},${f.changeID},${approvalID},1,${"a".repeat(40)},${f.commit},
-          ${`owned-release-race:${f.changeID}`})`;
+      await sql`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+        VALUES(${crypto.randomUUID()},'delivery.merge','change',${f.changeID},
+          ${`delivery.merge:owned-release-race:${f.changeID}`},${`delivery.merge:${f.changeID}`},'pending',
+          jsonb_build_object(
+            'changeId',${f.changeID}::text,'commitSha',${f.commit}::text,'baseSha',${"a".repeat(40)}::text,
+            'pullRequestNumber',1,'approvalId',${approvalID}::text,'deliveryPolicyId',NULL::text
+          ),${f.userID})`;
     });
     await release;
     const [slot] = await f.database.client<{ changeID: string | null }[]>`
-      SELECT change_id AS "changeID" FROM factory.project_delivery_queue
-      WHERE project_id=${f.projectID}`;
+      SELECT payload->>'changeId' AS "changeID" FROM factory.operation
+      WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`;
     expect(slot?.changeID).toBe(f.changeID);
   } finally {
     await release?.catch(() => {});
@@ -299,6 +316,9 @@ test.each(["open", "implemented"] as const)(
           startStagingReplacement: async () => {
             throw new Error("Open human feedback cannot promote");
           },
+          pause: async () => {
+            throw new Error("Open human feedback cannot pause Coding compute");
+          },
           stop: async () => null,
         },
         {
@@ -333,7 +353,7 @@ test.each(["open", "implemented"] as const)(
       expect((await controller.get(f.changeID))?.["openReviewThreads"]).toBe(1);
       expect(
         await f.database
-          .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+          .client`SELECT id FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`,
       ).toHaveLength(0);
       expect(
         await f.database
@@ -382,9 +402,9 @@ async function additionalTicket(f: Fixture, change = false) {
     async dispose() {
       await f.database.client.begin(async (sql) => {
         await sql`SET LOCAL session_replication_role=replica`;
-        await sql`DELETE FROM factory.implementation_order WHERE ticket_id=${ticketID}`;
-        await sql`DELETE FROM factory.project_delivery_queue WHERE change_id IN (SELECT id FROM factory.change WHERE ticket_id=${ticketID})`;
-        await sql`DELETE FROM factory.branch_create_operation WHERE change_id IN (SELECT id FROM factory.change WHERE ticket_id=${ticketID})`;
+        await sql`DELETE FROM factory.operation WHERE kind='tickets.implementation_order' AND scope_type='ticket' AND scope_id=${ticketID}`;
+        await sql`DELETE FROM factory.operation WHERE kind='project.delivery_queue' AND payload->>'changeId' IN (SELECT id::text FROM factory.change WHERE ticket_id=${ticketID})`;
+        await sql`DELETE FROM factory.operation WHERE kind='delivery.branch_create' AND scope_type='change' AND scope_id IN (SELECT id::text FROM factory.change WHERE ticket_id=${ticketID})`;
         await sql`DELETE FROM factory.change_writer WHERE change_id IN (SELECT id FROM factory.change WHERE ticket_id=${ticketID})`;
         await sql`DELETE FROM factory.change WHERE ticket_id=${ticketID}`;
         await sql`DELETE FROM factory.requirement_approval WHERE ticket_id=${ticketID}`;
@@ -402,12 +422,23 @@ async function observedDelivery(f: Fixture, promotion: "succeeded" | "failed" = 
     .client`INSERT INTO factory.delivery_approval(id,change_id,verification_id,commit_sha,approved_by,candidate_review_id)
     VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commit},${f.userID},${f.reviewID})`;
   await f.database
-    .client`INSERT INTO factory.merge_operation(id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,
-    idempotency_key,state,observed_default_sha,completed_at) VALUES(${crypto.randomUUID()},${f.changeID},${approvalID},1,${"a".repeat(40)},${f.commit},
-      ${`owned-merge:${f.changeID}`},'succeeded',${f.commit},now())`;
+    .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+    VALUES(${crypto.randomUUID()},'delivery.merge','change',${f.changeID},
+      ${`delivery.merge:owned-merge:${f.changeID}`},NULL,'succeeded',
+      jsonb_build_object(
+        'changeId',${f.changeID}::text,'commitSha',${f.commit}::text,'baseSha',${"a".repeat(40)}::text,
+        'pullRequestNumber',1,'approvalId',${approvalID}::text,'deliveryPolicyId',NULL::text
+      ),
+      jsonb_build_object('mergeSha',${f.commit}::text),${f.userID},now())`;
   await f.database
-    .client`INSERT INTO factory.promotion_operation(id,change_id,project_id,commit_sha,state,completed_at)
-    VALUES(${crypto.randomUUID()},${f.changeID},${f.projectID},${f.commit},${promotion}::factory.promotion_operation_state,now())`;
+    .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by,completed_at)
+    VALUES(${crypto.randomUUID()},'delivery.promotion','change',${f.changeID},
+      ${`delivery.promotion:${f.changeID}:1`},NULL,${promotion},
+      jsonb_build_object(
+        'changeId',${f.changeID}::text,'projectId',${f.projectID}::text,'commitSha',${f.commit}::text,
+        'previousRuntimeAttemptId',NULL::text,'replacementRuntimeAttemptId',NULL::text,
+        'ordinal',1,'supersedesId',NULL::text,'retryCommandId',NULL::text
+      ),${f.userID},now())`;
   await f.database
     .client`UPDATE factory.change SET state=${promotion === "succeeded" ? "delivered" : "delivering"}::factory.change_state WHERE id=${f.changeID}`;
   if (promotion === "succeeded")
@@ -521,10 +552,10 @@ test("lost integration acknowledgement observes the exact operation instead of r
     expect(await integration.reconcile(f.changeID, main)).toBe(true);
     expect(actions).toEqual(["git-prepare-integration", "git-observe-commit", "git-push"]);
     const [commit] = await f.database.client<
-      { base: string; parent: string; state: string }[]
+      { base: string; isMerge: boolean; state: string }[]
     >`SELECT integration_base_sha AS base,
-      merge_parent_sha AS parent,state FROM factory.change_commit_operation WHERE change_id=${f.changeID} AND source='integration'`;
-    expect(commit).toEqual({ base: main, parent: main, state: "succeeded" });
+      is_merge AS "isMerge",state FROM factory.change_commit_operation WHERE change_id=${f.changeID} AND source='integration'`;
+    expect(commit).toEqual({ base: main, isMerge: true, state: "succeeded" });
     await expect(
       Promise.resolve(f.database.client`
       UPDATE factory.change_commit_operation SET integration_base_sha=${"c".repeat(40)}
@@ -541,8 +572,8 @@ test("lost integration acknowledgement observes the exact operation instead of r
     const verificationID = crypto.randomUUID(),
       reviewID = crypto.randomUUID();
     await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,state,completed_at)
-      VALUES(${verificationID},${f.changeID},${integrated},1,'owned-integrated',2,${f.userID},'succeeded',now())`;
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,created_by,state,completed_at)
+      VALUES(${verificationID},${f.changeID},${integrated},1,2,${f.userID},'succeeded',now())`;
     await f.database
       .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
       VALUES(${reviewID},${verificationID},${f.changeID},${integrated},${main},${f.userID})`;
@@ -643,8 +674,10 @@ test("one explicit implementation order waits for successful prerequisite Delive
       async () => {
         const [row] = await f.database.client<
           { state: string }[]
-        >`SELECT operation.state FROM factory.branch_create_operation operation
-        JOIN factory.change change ON change.id=operation.change_id WHERE change.ticket_id=${dependent.ticketID}`;
+        >`SELECT operation.state FROM factory.operation operation
+        JOIN factory.change change ON change.id::text=operation.scope_id
+        WHERE operation.kind='delivery.branch_create' AND operation.scope_type='change'
+          AND change.ticket_id=${dependent.ticketID}`;
         return row?.state === "succeeded";
       },
       (ready) => ready,
@@ -655,7 +688,7 @@ test("one explicit implementation order waits for successful prerequisite Delive
     expect(starts).toBe(1);
     const [order] = await f.database.client<
       { state: string; source: string }[]
-    >`SELECT state,source_sha AS source FROM factory.implementation_order WHERE command_id=${commandID}`;
+    >`SELECT state,payload->>'sourceSha' AS source FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${commandID}`;
     expect(order).toEqual({ state: "started", source: "a".repeat(40) });
   } finally {
     await dependent.dispose();
@@ -700,10 +733,24 @@ test("implementation dispatcher cancels obsolete commands and retains blocked or
           .client`UPDATE factory.ticket SET converted_to_epic_id=${epicID} WHERE id=${saved.ticketID}`;
       if (state !== "idle")
         await f.database
-          .client`INSERT INTO factory.implementation_order(command_id,project_id,ticket_id,
-          created_by,requirement_revision_id,source_sha,coding_reasoning)
-          VALUES(${saved.ticketID},${f.projectID},${saved.ticketID},${f.userID},${saved.revisionID},
-            ${"a".repeat(40)},'high')`;
+          .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+          VALUES(${saved.ticketID},'tickets.implementation_order','ticket',${saved.ticketID},
+            ${`tickets.implementation_order:${saved.ticketID}`},
+            ${`tickets.implementation_order:${saved.ticketID}`},'waiting',
+            ${JSON.stringify({
+              commandId: saved.ticketID,
+              projectId: f.projectID,
+              ticketId: saved.ticketID,
+              createdBy: f.userID,
+              requirementRevisionId: saved.revisionID,
+              technicalDesignRevisionId: null,
+              codingReasoning: "high",
+              sourceSha: "a".repeat(40),
+              changeId: null,
+              cancelledBy: null,
+              cancelledAt: null,
+              lastError: null,
+            })}::text::jsonb,${f.userID})`;
     }
     const blocked = fixtureValue(tickets[4], "blocked");
     const unknown = fixtureValue(tickets[5], "unknown");
@@ -742,8 +789,9 @@ test("implementation dispatcher cancels obsolete commands and retains blocked or
     );
     for (const saved of tickets.slice(0, 4)) {
       const [order] = await f.database.client`
-        SELECT state,cancelled_at AS at,source_sha AS source,requirement_revision_id AS revision
-        FROM factory.implementation_order WHERE command_id=${saved.ticketID}`;
+        SELECT state,payload->>'cancelledAt' AS at,payload->>'sourceSha' AS source,
+          payload->>'requirementRevisionId' AS revision
+        FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${saved.ticketID}`;
       expect(order).toMatchObject({
         state: "cancelled",
         source: "a".repeat(40),
@@ -752,12 +800,13 @@ test("implementation dispatcher cancels obsolete commands and retains blocked or
       expect(order?.["at"]).toBeTruthy();
     }
     const [rejected] = await f.database
-      .client`SELECT state,last_error FROM factory.implementation_order WHERE command_id=${blocked.ticketID}`;
+      .client`SELECT state,error AS last_error FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${blocked.ticketID}`;
     expect(rejected).toEqual({ state: "blocked", last_error: "x".repeat(2000) });
     const readUnknown = async () =>
       (
         await f.database.client`
-      SELECT state,last_error,updated_at,source_sha,created_by FROM factory.implementation_order WHERE command_id=${unknown.ticketID}`
+      SELECT state,error AS last_error,updated_at,payload->>'sourceSha' AS source_sha,created_by
+      FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${unknown.ticketID}`
       )[0];
     const retained = await readUnknown();
     expect(retained).toMatchObject({
@@ -865,7 +914,7 @@ test("a candidate awaiting human Delivery does not reclaim the queue ahead of in
     await d.controller.reconcile(f.changeID);
     const [slot] = await f.database.client<
       { id: string }[]
-    >`SELECT change_id AS id FROM factory.project_delivery_queue WHERE project_id=${f.projectID}`;
+    >`SELECT payload->>'changeId' AS id FROM factory.operation WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`;
     expect(slot?.id).toBe(other.changeID);
   } finally {
     await other.dispose();
@@ -886,10 +935,17 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
     await passingReview(f);
     await retainedPR(f);
     const { queue } = await enable(f);
-    await database.client`INSERT INTO factory.staging_preview(project_id,revision)
-      VALUES(${f.projectID},${"a".repeat(40)})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${f.projectID},
+        ${`delivery.staging_preview:${f.projectID}`},'pending',
+        ${JSON.stringify({
+          projectId: f.projectID,
+          revision: "a".repeat(40),
+          runtimeAttemptId: null,
+        })}::text::jsonb)`;
     const previous = await jobs.startStaging(f.userID);
     await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${previous}`;
+    const paused: string[] = [];
     const d = delivery(f, true, undefined, {
       startVerification: async () => {
         throw Error("Completed exact checks must not commission another native job");
@@ -898,8 +954,14 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
         await jobs.startStaging(userID, id);
         return null;
       },
+      pause: async (id) => {
+        expect(id).toBe(f.attemptID);
+        paused.push(id);
+        return null;
+      },
       stop: async (id) => {
-        if (id !== f.attemptID) await jobs.stop(id);
+        expect(id).not.toBe(f.attemptID);
+        await jobs.stop(id);
         return null;
       },
     });
@@ -909,15 +971,15 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
     expect(d.merges()).toBe(1);
     const [promotion] = await f.database.client<
       { id: string; replacement: string }[]
-    >`SELECT id,replacement_runtime_attempt_id AS replacement
-      FROM factory.promotion_operation WHERE change_id=${f.changeID}`;
+    >`SELECT id,payload->>'replacementRuntimeAttemptId' AS replacement
+      FROM factory.operation WHERE kind='delivery.promotion' AND scope_type='change' AND scope_id=${f.changeID}`;
     expect(promotion).toBeDefined();
     const replacement = fixtureValue(promotion, "promotion").replacement;
     expect(replacement).not.toBe(previous);
     await d.controller.reconcile(f.changeID);
     const [stillHealthy] = await f.database.client<
       { id: string }[]
-    >`SELECT runtime_attempt_id AS id FROM factory.staging_preview WHERE project_id=${f.projectID}`;
+    >`SELECT payload->>'runtimeAttemptId' AS id FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${f.projectID}`;
     expect(stillHealthy?.id).toBe(previous);
     expect(await queue.claim(f.projectID, other.changeID)).toBe(false);
     await f.database
@@ -925,14 +987,18 @@ test("ordinary delegated Delivery merges the reviewed commit and keeps healthy S
     await d.controller.reconcile(f.changeID);
     const [delivered] = await f.database.client<
       { state: string; revision: string }[]
-    >`SELECT ticket.state,preview.revision
-      FROM factory.ticket ticket JOIN factory.staging_preview preview ON preview.project_id=ticket.project_id WHERE ticket.id=${f.ticketID}`;
+    >`SELECT ticket.state,preview.payload->>'revision' AS revision
+      FROM factory.ticket ticket
+      JOIN factory.operation preview ON preview.kind='delivery.staging_preview'
+        AND preview.scope_type='project' AND preview.scope_id=ticket.project_id::text
+      WHERE ticket.id=${f.ticketID}`;
     expect(delivered).toEqual({ state: "done", revision: f.commit });
+    expect(paused).toEqual([f.attemptID]);
     expect(await queue.claim(f.projectID, other.changeID)).toBe(true);
     expect(jobs.calls.filter((call) => call.method === "CreateActor")).toHaveLength(2);
     expect(jobs.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
     const [retired] = await database.client`SELECT deleted_at IS NOT NULL AS confirmed
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${previous}`;
+      FROM factory.runtime_attempt WHERE id=${previous}`;
     expect(retired).toEqual({ confirmed: true });
   } finally {
     try {
@@ -1003,7 +1069,7 @@ test("renewing a revoked delegation creates a new approval and merge intent with
       async () => {
         const [row] = await f.database.client<
           { state: string }[]
-        >`SELECT state FROM factory.merge_operation WHERE change_id=${f.changeID}`;
+        >`SELECT state FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`;
         return row?.state;
       },
       (state) => state === "failed",
@@ -1017,8 +1083,8 @@ test("renewing a revoked delegation creates a new approval and merge intent with
     });
     await d.controller.approve(f.changeID, f.userID, undefined, renewed);
     await eventually(
-      async () => f.database.client<{ state: string }[]>`SELECT state FROM factory.merge_operation
-      WHERE change_id=${f.changeID} ORDER BY requested_at,id`,
+      async () => f.database.client<{ state: string }[]>`SELECT state FROM factory.operation
+      WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID} ORDER BY created_at,id`,
       (rows) => rows.length === 2 && rows[1]?.state === "succeeded",
       "Renewed Delivery did not retain both merge outcomes",
     );
@@ -1046,13 +1112,13 @@ test("a second Factory process cannot reconcile through another process's Projec
     await d.controller.reconcile(f.changeID);
     expect(
       await f.database
-        .client`SELECT project_id FROM factory.project_delivery_queue WHERE project_id=${f.projectID}`,
+        .client`SELECT id FROM factory.operation WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`,
     ).toHaveLength(0);
     await owner`SELECT pg_advisory_unlock(hashtextextended(${key},0))`;
     await d.controller.reconcile(f.changeID);
     expect(
       await f.database
-        .client`SELECT project_id FROM factory.project_delivery_queue WHERE project_id=${f.projectID}`,
+        .client`SELECT id FROM factory.operation WHERE kind='project.delivery_queue' AND idempotency_key=${`project.delivery_queue:${f.projectID}`}`,
     ).toHaveLength(1);
     expect(d.merges()).toBe(0);
   } finally {
@@ -1073,8 +1139,13 @@ test("revocation cannot turn a previously unconfirmed merge into proof that it n
       .client`INSERT INTO factory.delivery_approval(id,change_id,verification_id,commit_sha,approved_by,candidate_review_id,delivery_policy_id)
       VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commit},${f.userID},${f.reviewID},${policyId})`;
     await f.database
-      .client`INSERT INTO factory.merge_operation(id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key,state)
-      VALUES(${crypto.randomUUID()},${f.changeID},${approvalID},1,${"a".repeat(40)},${f.commit},${`uncertain:${f.changeID}`},'ambiguous')`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'delivery.merge','change',${f.changeID},
+        ${`delivery.merge:uncertain:${f.changeID}`},${`delivery.merge:${f.changeID}`},'ambiguous',
+        jsonb_build_object(
+          'changeId',${f.changeID}::text,'commitSha',${f.commit}::text,'baseSha',${"a".repeat(40)}::text,
+          'pullRequestNumber',1,'approvalId',${approvalID}::text,'deliveryPolicyId',${policyId}::text
+        ),${f.userID})`;
     await f.database.client`UPDATE factory.change SET state='delivering' WHERE id=${f.changeID}`;
     await queue.configure(f.projectID, f.userID, {
       commandId: crypto.randomUUID(),
@@ -1085,7 +1156,7 @@ test("revocation cannot turn a previously unconfirmed merge into proof that it n
     await d.controller.reconcile(f.changeID);
     const [row] = await f.database.client<
       { state: string }[]
-    >`SELECT state FROM factory.merge_operation WHERE change_id=${f.changeID}`;
+    >`SELECT state FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`;
     expect(row?.state).toBe("ambiguous");
     expect(d.merges()).toBe(0);
     expect(await queue.claim(f.projectID, other.changeID)).toBe(false);
@@ -1106,8 +1177,13 @@ test("an unconfirmed merge remains fenced when the default branch moves beyond i
       .client`INSERT INTO factory.delivery_approval(id,change_id,verification_id,commit_sha,approved_by,candidate_review_id)
         VALUES(${approvalID},${f.changeID},${f.verificationID},${f.commit},${f.userID},${f.reviewID})`;
     await f.database
-      .client`INSERT INTO factory.merge_operation(id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key,state)
-        VALUES(${crypto.randomUUID()},${f.changeID},${approvalID},1,${"a".repeat(40)},${f.commit},${`uncertain:${f.changeID}`},'ambiguous')`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+        VALUES(${crypto.randomUUID()},'delivery.merge','change',${f.changeID},
+          ${`delivery.merge:uncertain:${f.changeID}`},${`delivery.merge:${f.changeID}`},'ambiguous',
+          jsonb_build_object(
+            'changeId',${f.changeID}::text,'commitSha',${f.commit}::text,'baseSha',${"a".repeat(40)}::text,
+            'pullRequestNumber',1,'approvalId',${approvalID}::text,'deliveryPolicyId',NULL::text
+          ),${f.userID})`;
     await f.database.client`UPDATE factory.change SET state='delivering' WHERE id=${f.changeID}`;
     const forge = {
       getPullRequest: async () => ({ number: 1, headSha: f.commit, merged: true }),
@@ -1121,6 +1197,9 @@ test("an unconfirmed merge remains fenced when the default branch moves beyond i
       {
         startVerification: async () => null,
         startStagingReplacement: async () => null,
+        pause: async () => {
+          throw new Error("An unconfirmed merge must not pause Coding compute");
+        },
         stop: async () => null,
       },
       { prompt: async () => null },
@@ -1130,7 +1209,7 @@ test("an unconfirmed merge remains fenced when the default branch moves beyond i
     await controller.reconcile(f.changeID);
     const [row] = await f.database.client<
       { state: string; completedAt: string | null }[]
-    >`SELECT state,completed_at AS "completedAt" FROM factory.merge_operation WHERE change_id=${f.changeID}`;
+    >`SELECT state,completed_at AS "completedAt" FROM factory.operation WHERE kind='delivery.merge' AND scope_type='change' AND scope_id=${f.changeID}`;
     expect(row).toEqual({ state: "ambiguous", completedAt: null });
     expect(await createDeliveryCoordination(f.database).claim(f.projectID, other.changeID)).toBe(
       false,

@@ -1,13 +1,14 @@
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
+import { runCommand } from "#runtime-kubernetes/command";
+import { kubernetesCommand } from "#runtime-kubernetes/config";
+import { serviceAccountConfiguration } from "#runtime-kubernetes/service-account";
+import { runtimeVolumeClaimSpec } from "#runtime-kubernetes/storage";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import { finishInstallationMaintenance } from "../../apps/factory/src/installation/maintenance";
 import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
-import { createDatabase } from "../../packages/db/src/client";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
-import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
-import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
-import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
 import { runtimeArtifactEnvironment, runtimeArtifactsSchema } from "../factory/artifacts";
 import { ensureLocalForgeIdentity } from "../factory/forge-identity";
 import { installForgeBrowserLogout } from "../factory/forge-logout";
@@ -15,6 +16,7 @@ import {
   requireNativeForgeOrigin,
   requireNativeInstallation,
   requireNativeRuntimeArtifact,
+  requireNativeStarterImages,
 } from "../factory/native-installation";
 import { bootstrapOpenBao } from "../factory/openbao-bootstrap";
 import { waitForFactory } from "../factory/readiness";
@@ -110,7 +112,12 @@ if (previousIdentity === null)
 else if (previousIdentity !== JSON.stringify(identity))
   throw new Error("Kubernetes installation identity changed; retained state was not adopted");
 
-const runtimeEnvironment = runtimeArtifactEnvironment(artifacts);
+const runtimeEnvironment = runtimeArtifactEnvironment(
+  artifacts,
+  nativeRuntimeArchitecture(nativeConfiguration.runtime),
+);
+if (process.env["FACTORY_STARTER_IMAGES"])
+  runtimeEnvironment.FACTORY_STARTER_IMAGES = JSON.stringify(requireNativeStarterImages());
 
 console.log("Checking the installation's actual writable runtime storage");
 await requireWritableRuntimeStorage({

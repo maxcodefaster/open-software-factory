@@ -11,23 +11,22 @@ import {
   sql as query,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
   changeAgentSession,
   changeCommitOperation,
+  operation as operationTable,
   project,
-  projectDeliveryQueue,
   requirementApproval,
   requirementRevision,
   runtimeAttempt,
-  substrateBinding,
   ticket,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { type createAgentController } from "../agent/api";
+import type { createAgentController } from "../agent/api";
 import { CommandError, plainErrorMessage } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/transport-api";
@@ -64,7 +63,7 @@ export function createChangeIntegration(
       .select({
         id: changeCommitOperation.id,
         changeID: changeCommitOperation.changeId,
-        attemptID: query<string>`${changeCommitOperation.runtimeAttemptId}`,
+        attemptID: changeCommitOperation.runtimeAttemptId,
         parent: changeCommitOperation.expectedParentSha,
         base: query<string>`${changeCommitOperation.integrationBaseSha}`,
         branch: changeCommitOperation.branchName,
@@ -95,19 +94,19 @@ export function createChangeIntegration(
     const currentAttempt = alias(runtimeAttempt, "current");
     const originalAttempt = alias(runtimeAttempt, "original");
     const [current] = await database.db
-      .select({ id: currentAttempt.id, nativeIntent: substrateBinding.intent })
+      .select({ id: currentAttempt.id, nativeIntent: currentAttempt.bindingIntent })
       .from(change)
       .innerJoin(currentAttempt, eq(currentAttempt.id, change.runtimeAttemptId))
       .innerJoin(originalAttempt, eq(originalAttempt.id, op.attemptID))
-      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, currentAttempt.id))
       .where(
         and(
           eq(change.id, op.changeID),
           eq(currentAttempt.state, "ready"),
           eq(originalAttempt.workspaceId, currentAttempt.workspaceId),
           isNull(currentAttempt.stopIntendedAt),
-          isNull(substrateBinding.deleteIntendedAt),
-          isNull(substrateBinding.deletedAt),
+          isNotNull(currentAttempt.atespace),
+          isNull(currentAttempt.deleteIntendedAt),
+          isNull(currentAttempt.deletedAt),
         ),
       );
     if (!current)
@@ -138,7 +137,7 @@ export function createChangeIntegration(
             .select({
               id: changeCommitOperation.id,
               repository: project.repositoryUrl,
-              nativeIntent: substrateBinding.intent,
+              nativeIntent: currentAttempt.bindingIntent,
             })
             .from(changeCommitOperation)
             .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
@@ -154,12 +153,20 @@ export function createChangeIntegration(
               originalAttempt,
               eq(originalAttempt.id, changeCommitOperation.runtimeAttemptId),
             )
-            .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, currentAttempt.id))
             .innerJoin(
-              projectDeliveryQueue,
+              operationTable,
               and(
-                eq(projectDeliveryQueue.projectId, change.projectId),
-                eq(projectDeliveryQueue.changeId, change.id),
+                eq(operationTable.kind, "project.delivery_queue"),
+                eq(operationTable.scopeType, "project"),
+                eq(operationTable.scopeId, query<string>`${change.projectId}::text`),
+                eq(
+                  operationTable.idempotencyKey,
+                  query<string>`'project.delivery_queue:' || ${change.projectId}::text`,
+                ),
+                eq(
+                  operationTable.activeKey,
+                  query<string>`'project.delivery_queue.change:' || ${change.id}::text`,
+                ),
               ),
             )
             .where(
@@ -167,7 +174,8 @@ export function createChangeIntegration(
                 eq(changeCommitOperation.id, op.id),
                 eq(changeCommitOperation.source, "integration"),
                 eq(changeCommitOperation.expectedParentSha, op.parent),
-                eq(changeCommitOperation.mergeParentSha, op.base),
+                eq(changeCommitOperation.integrationBaseSha, op.base),
+                eq(changeCommitOperation.isMerge, true),
                 eq(
                   changeCommitOperation.state,
                   action === "git-push" ? "push-intended" : "commit-intended",
@@ -184,8 +192,9 @@ export function createChangeIntegration(
                 eq(currentAttempt.state, "ready"),
                 eq(currentAttempt.workspaceId, originalAttempt.workspaceId),
                 isNull(currentAttempt.stopIntendedAt),
-                isNull(substrateBinding.deleteIntendedAt),
-                isNull(substrateBinding.deletedAt),
+                isNotNull(currentAttempt.atespace),
+                isNull(currentAttempt.deleteIntendedAt),
+                isNull(currentAttempt.deletedAt),
                 eq(
                   requirementApproval.requirementRevisionId,
                   db
@@ -289,7 +298,16 @@ export function createChangeIntegration(
             })
             .from(change)
             .innerJoin(changeAgentSession, eq(changeAgentSession.changeId, change.id))
-            .innerJoin(projectDeliveryQueue, eq(projectDeliveryQueue.changeId, change.id))
+            .innerJoin(
+              operationTable,
+              and(
+                eq(operationTable.kind, "project.delivery_queue"),
+                eq(
+                  operationTable.activeKey,
+                  query<string>`'project.delivery_queue.change:' || ${change.id}::text`,
+                ),
+              ),
+            )
             .where(
               and(
                 eq(change.id, changeID),
@@ -324,7 +342,7 @@ export function createChangeIntegration(
                 ),
               ),
             );
-          if (!row) return false;
+          if (!row?.attemptID) return false;
           await projectAuthorityIn(sql, row.userID, writer.projectID);
           const latestCommit = db
             .select({ sha: changeCommitOperation.commitSha })
@@ -352,7 +370,7 @@ export function createChangeIntegration(
             branchName: row.branch,
             expectedParentSha: query`(${latestCommit})`,
             integrationBaseSha: base,
-            mergeParentSha: base,
+            isMerge: true,
             commitMessage: "Integrate current main",
             idempotencyKey: query`${`integration:${changeID}:${base}:`} || (${latestCommit})`,
             state: "commit-intended",
@@ -409,7 +427,7 @@ export function createChangeIntegration(
                   eq(changeCommitOperation.branchName, refused.branch),
                   eq(changeCommitOperation.expectedParentSha, refused.parent),
                   eq(changeCommitOperation.integrationBaseSha, refused.base),
-                  eq(changeCommitOperation.mergeParentSha, refused.base),
+                  eq(changeCommitOperation.isMerge, true),
                   eq(changeCommitOperation.state, "commit-intended"),
                   isNull(changeCommitOperation.lastError),
                   isNull(changeCommitOperation.commitSha),

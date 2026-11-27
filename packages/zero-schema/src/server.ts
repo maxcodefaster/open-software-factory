@@ -1,11 +1,11 @@
 import { defineMutatorsWithType, defineMutatorWithType, type Transaction } from "@rocicorp/zero";
 import type { DrizzleTransaction } from "@rocicorp/zero/server/adapters/drizzle";
 import { and, eq, sql } from "drizzle-orm";
-import type { createDatabase } from "../../db/src/client";
-import { epic, project, ticket, ticketDependency } from "../../db/src/schema";
-import { createPlanningTicketIn } from "../../ticket-authoring/src/authoring";
-import { dependencyWouldCycle } from "../../ticket-domain/src/dependency";
-import { canPlanTicket } from "../../ticket-domain/src/ticket";
+import type { createDatabase } from "#db/client";
+import { epic, project, ticket, ticketDependency } from "#db/schema";
+import { createPlanningTicketIn } from "#ticket-authoring/authoring";
+import { dependencyWouldCycle } from "#ticket-domain/dependency";
+import { canPlanTicket } from "#ticket-domain/ticket";
 import { ticketDependencyValidator } from "./dependencies";
 import { assignTicketEpicValidator, createEpicValidator, updateEpicValidator } from "./epics";
 import { knowledgePageIconValidator, moveKnowledgePageValidator } from "./knowledge";

@@ -1,4 +1,4 @@
-import { z } from "zod";
+import type { z } from "zod";
 import type { codeReadInput } from "./contracts";
 
 // Whole blobs remain bounded in the repository adapter; model reads are still

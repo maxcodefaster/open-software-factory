@@ -9,6 +9,10 @@ development: false
 # Ingress installations use publicURL/zero automatically.
 developmentZeroURL: ""
 adminEmail: admin@factory.local
+# Optional override of the prepared Starter images in the release's complete artifact bundle.
+# Set platform (linux/arm64 or linux/amd64), development and postgres (@sha256 references).
+# Installation selects existing images; it never builds or invents them.
+starterImages: {}
 
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.
 storageClass: ""

@@ -1,11 +1,8 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
-import {
-  librarySkillsAvailable,
-  type SkillLibraryView,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
+import type { ConversationMode } from "#conversation-domain/conversation";
+import type { InheritedModelSettingsView } from "#conversation-domain/model-inheritance";
+import { librarySkillsAvailable, type SkillLibraryView } from "#conversation-domain/skill-library";
+import type { TurnObservation } from "#conversation-domain/turn-observation";
 import { getProjectModels } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
 import { getSkillLibrary } from "../server-functions/skills";

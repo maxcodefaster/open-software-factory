@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { PasswordChangeError } from "../../packages/auth/src/policy";
-import { createFactoryAuth } from "../../packages/auth/src/server";
+import { PasswordChangeError } from "#auth/policy";
+import { createFactoryAuth } from "#auth/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 const initial = "initial-password-for-owned-test";

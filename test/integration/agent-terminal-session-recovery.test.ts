@@ -59,29 +59,26 @@ test.each(["failed", "pre-dispatch failed"] as const)(
             epoch: number;
             checkpoint: unknown;
             parentHash: string;
-            childHash: string;
           }[]
-        >`SELECT binding.actor_uid AS "actorUID",source.actor_uid AS "sourceUID",
+        >`SELECT attempt.actor_uid AS "actorUID",source.actor_uid AS "sourceUID",
             source.owner,source.writer_epoch::float8 AS epoch,source.checkpoint,
-            attempt.parent_connector_token_hash AS "parentHash",
-            attempt.child_connector_token_hash AS "childHash"
+            attempt.parent_connector_token_hash AS "parentHash"
           FROM factory.runtime_attempt attempt
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           JOIN factory.substrate_source source ON source.workspace_id=attempt.workspace_id
           WHERE attempt.id=${owned.attemptID}`;
         return row;
       };
       const originalSource = await sourceBinding();
-      const originalUID = (await peer.connectorHeaders(owned.attemptID, "parent"))[
-        "x-factory-runtime-actor-uid"
-      ];
+      const parentHeaders = await peer.connectorHeaders(owned.attemptID, "parent");
+      const childHeaders = await peer.connectorHeaders(owned.attemptID, "child");
+      const originalUID = parentHeaders["x-factory-runtime-actor-uid"];
       expect(originalSource).toMatchObject({
         actorUID: originalUID,
         sourceUID: originalUID,
         owner: "actor",
         checkpoint: expect.objectContaining({ workspaceID: owned.workspaceID, actorUID: null }),
       });
-      expect(originalSource?.parentHash).not.toBe(originalSource?.childHash);
+      expect(parentHeaders.authorization).not.toBe(childHeaders.authorization);
       const lifecycleBefore = peer.calls.filter((call) => !call.method.startsWith("Get"));
       const first = await process.start();
       const cookie = await process.signIn();

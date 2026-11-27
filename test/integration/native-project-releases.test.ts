@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { createForgejoReleases } from "../../packages/forge/src/releases";
-import { releasePackageOwner } from "../../packages/project-domain/src/release";
+import { createForgejoClient } from "#forge/forge";
+import { createForgejoReleases } from "#forge/releases";
+import { releasePackageOwner } from "#project-domain/release";
 import { releaseArgoProof } from "../fixtures/release-argo";
 import { fixtureValue } from "../fixtures/value";
 

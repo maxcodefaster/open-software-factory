@@ -1,6 +1,7 @@
 import { type Accessor, createSignal, onCleanup } from "solid-js";
-import { type ConversationView } from "../project-agent/contracts";
+import type { ConversationView } from "../project-agent/contracts";
 import type { createConversationSelection } from "../project-agent/selection";
+import { isActiveTurnState } from "../tickets/client";
 
 type Selection = Pick<
   ReturnType<typeof createConversationSelection>,
@@ -15,7 +16,7 @@ export function createConversationState(input: {
 }) {
   const [stored, setStored] = createSignal<ConversationView>();
   const [answers, setAnswers] = createSignal<Record<string, { turnId: string; text: string }>>({});
-  const streams = new Set<AbortController>();
+  const streams = new Map<AbortController, (() => string | undefined) | undefined>();
   let generation = 0;
   let disposed = false;
   const current = () => {
@@ -37,6 +38,12 @@ export function createConversationState(input: {
   function publish(value: ConversationView | undefined) {
     if (disposed) return;
     replace(value);
+    if (value?.turn && !isActiveTurnState(value.turn.state)) {
+      const settledTurnId = value.turn.id;
+      for (const [controller, streamTurnId] of streams) {
+        if (streamTurnId?.() === settledTurnId) controller.abort();
+      }
+    }
     if (value && !input.selection.selected())
       input.selection.setSelections((previous) => ({
         ...previous,
@@ -49,7 +56,7 @@ export function createConversationState(input: {
   }
   onCleanup(() => {
     disposed = true;
-    for (const controller of streams) controller.abort();
+    for (const controller of streams.keys()) controller.abort();
     streams.clear();
   });
   return {
@@ -70,10 +77,7 @@ export function createConversationState(input: {
       const answer = answers()[input.selection.key()];
       if (!answer?.text) return undefined;
       const turn = current()?.turn;
-      return turn?.id === answer.turnId &&
-        !["pending", "dispatching", "running"].includes(turn.state)
-        ? undefined
-        : answer;
+      return turn?.id === answer.turnId && !isActiveTurnState(turn.state) ? undefined : answer;
     },
     publishProvisional(scope: string, turnId: string, text: string) {
       if (!disposed) setAnswers((previous) => ({ ...previous, [scope]: { turnId, text } }));
@@ -87,9 +91,9 @@ export function createConversationState(input: {
         return next;
       });
     },
-    trackStream(controller: AbortController) {
+    trackStream(controller: AbortController, turnId?: () => string | undefined) {
       if (disposed) controller.abort();
-      else streams.add(controller);
+      else streams.set(controller, turnId);
       return () => {
         streams.delete(controller);
       };

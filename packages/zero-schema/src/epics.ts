@@ -5,7 +5,7 @@ import {
   createEpicInput,
   epicParentWouldCycle,
   updateEpicInput,
-} from "../../ticket-domain/src/epic";
+} from "#ticket-domain/epic";
 import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
 import { validator } from "./validation";
 

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { candidateReviewCallInput } from "#conversation-domain/candidate-review";
+import { environmentMetadata } from "#project-domain/environment";
 import { createReviewExecutionReader } from "../../apps/factory/src/agent/review-execution";
 import type {
   EnvironmentSecrets,
@@ -6,8 +8,6 @@ import type {
 } from "../../apps/factory/src/environments/openbao";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import type { RuntimeHub } from "../../apps/factory/src/runtime/hub";
-import { candidateReviewCallInput } from "../../packages/conversation-domain/src/candidate-review";
-import { environmentMetadata } from "../../packages/project-domain/src/environment";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { eventually } from "../fixtures/factory-process";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
@@ -21,8 +21,9 @@ test("feedback CRUD rolls back its command snapshot and rejects a stale reply af
   try {
     await f.database.client.unsafe(`CREATE FUNCTION factory.owned_feedback_rollback() RETURNS trigger
       LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'Owned feedback command rollback'; END$$;
-      CREATE TRIGGER owned_feedback_rollback BEFORE INSERT ON factory.review_feedback_command
-      FOR EACH ROW EXECUTE FUNCTION factory.owned_feedback_rollback()`);
+      CREATE TRIGGER owned_feedback_rollback BEFORE INSERT ON factory.audit_event
+      FOR EACH ROW WHEN (NEW.kind='review.feedback_command')
+      EXECUTE FUNCTION factory.owned_feedback_rollback()`);
     await expect(
       review.create(f.changeID, f.userID, {
         commandId: crypto.randomUUID(),
@@ -34,10 +35,10 @@ test("feedback CRUD rolls back its command snapshot and rejects a stale reply af
       { feedback: number; messages: number; commands: number }[]
     >`
       SELECT (SELECT count(*)::int FROM factory.review_feedback WHERE change_id=${f.changeID}) AS feedback,
-        (SELECT count(*)::int FROM factory.review_feedback_message) AS messages,
-        (SELECT count(*)::int FROM factory.review_feedback_command WHERE change_id=${f.changeID}) AS commands`;
+        (SELECT count(*)::int FROM factory.audit_event WHERE kind='review.feedback_message') AS messages,
+        (SELECT count(*)::int FROM factory.audit_event WHERE kind='review.feedback_command' AND payload->>'changeId'=${f.changeID}) AS commands`;
     expect(rollback).toEqual({ feedback: 0, messages: 0, commands: 0 });
-    await f.database.client.unsafe(`DROP TRIGGER owned_feedback_rollback ON factory.review_feedback_command;
+    await f.database.client.unsafe(`DROP TRIGGER owned_feedback_rollback ON factory.audit_event;
       DROP FUNCTION factory.owned_feedback_rollback()`);
     const input = {
       commandId: crypto.randomUUID(),
@@ -92,7 +93,7 @@ test("feedback CRUD rolls back its command snapshot and rejects a stale reply af
     await holder;
     expect(await rejected).toMatchObject({ message: expect.stringContaining("Feedback changed") });
     const [stale] = await f.database
-      .client`SELECT id FROM factory.review_feedback_command WHERE id=${staleCommandID}`;
+      .client`SELECT id FROM factory.audit_event WHERE id=${staleCommandID} AND kind='review.feedback_command'`;
     expect(stale).toBeUndefined();
     const reply = {
       commandId: crypto.randomUUID(),
@@ -139,13 +140,68 @@ test("review projections keep native microsecond ordering, finding lineage and r
         '2050-01-01 00:00:00.000002+00'),
       (${retryID},${f.verificationID},${f.changeID},${f.commit},${"a".repeat(40)},${f.userID},3,
         '2050-01-01 00:00:00.000001+00')`;
-    await f.database
-      .client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,
-      observation_kind,media_started_ms,started_at) VALUES
-      (${sourceID},'z-first','First','normal',1,'Original candidate','app',20,'2050-01-01 00:00:00.000001+00'),
-      (${sourceID},'source-case','Source','normal',1,'Source only','source',30,'2050-01-01 00:00:00.000002+00'),
-      (${sourceID},'a-next','Next','boundary',1,'Later app case','app',80,'2050-01-01 00:00:00.000003+00'),
-      (${retryID},'retry-case','Retry','normal',1,'Other review','app',0,'2050-01-01 00:00:00.000001+00')`;
+    for (const item of [
+      {
+        reviewID: sourceID,
+        id: "z-first",
+        title: "First",
+        category: "normal",
+        expected: "Original candidate",
+        observationKind: "app",
+        mediaStartedMs: 20,
+        startedAt: "2050-01-01 00:00:00.000001+00",
+      },
+      {
+        reviewID: sourceID,
+        id: "source-case",
+        title: "Source",
+        category: "normal",
+        expected: "Source only",
+        observationKind: "source",
+        mediaStartedMs: 30,
+        startedAt: "2050-01-01 00:00:00.000002+00",
+      },
+      {
+        reviewID: sourceID,
+        id: "a-next",
+        title: "Next",
+        category: "boundary",
+        expected: "Later app case",
+        observationKind: "app",
+        mediaStartedMs: 80,
+        startedAt: "2050-01-01 00:00:00.000003+00",
+      },
+      {
+        reviewID: retryID,
+        id: "retry-case",
+        title: "Retry",
+        category: "normal",
+        expected: "Other review",
+        observationKind: "app",
+        mediaStartedMs: 0,
+        startedAt: "2050-01-01 00:00:00.000001+00",
+      },
+    ])
+      await f.database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at)
+        VALUES(${crypto.randomUUID()},'review.scenario','candidate_review',${item.reviewID},
+          ${`review.scenario:${item.reviewID}:${item.id}`},'active',
+          ${JSON.stringify({
+            reviewId: item.reviewID,
+            id: item.id,
+            title: item.title,
+            category: item.category,
+            criterion: 1,
+            expected: item.expected,
+            startedAt: item.startedAt,
+            endedAt: null,
+            observed: null,
+            mediaStartedMs: item.mediaStartedMs,
+            mediaSessionId: null,
+            status: null,
+            observationKind: item.observationKind,
+          })}::jsonb,
+          ${item.startedAt}::timestamptz,${item.startedAt}::timestamptz)`;
     const fallback = await review.get(f.changeID, f.userID);
     expect(fallback.scenarios.map((item) => item.id)).toEqual(["z-first", "source-case", "a-next"]);
     expect(fallback.scenarios.every((item) => item.startedMs === 0 && item.endedMs === null)).toBe(
@@ -209,9 +265,8 @@ test("execution receipts use the last successful exact candidate and preserve mi
   try {
     await f.database.client`INSERT INTO factory.change_commit_operation(
       id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
-      observed_remote_sha,commit_message,idempotency_key,state,source,repository_path,
-      repository_blob_sha,repository_content,content_digest,created_by,created_at,completed_at)
-      SELECT gen_random_uuid(),change.id,CASE WHEN sequence=3 THEN NULL ELSE ${f.attemptID}::uuid END,
+      observed_remote_sha,commit_message,idempotency_key,state,source,created_by,created_at,completed_at)
+      SELECT gen_random_uuid(),change.id,${f.attemptID}::uuid,
         sequence,change.branch_name,change.base_sha,
         CASE WHEN sequence IN (2,38) THEN NULL WHEN sequence IN (34,35,36) THEN ${f.commit}
           ELSE ${"c".repeat(40)} END,
@@ -220,12 +275,9 @@ test("execution receipts use the last successful exact candidate and preserve mi
         'Private receipt message',change.id::text || ':receipt:' || sequence::text,
         CASE WHEN sequence=38 THEN 'commit-intended' WHEN sequence IN (2,36) THEN 'failed'
           ELSE 'succeeded' END::factory.change_commit_state,
-        CASE WHEN sequence=3 THEN 'repository-document' WHEN sequence=4 THEN 'integration'
+        CASE WHEN sequence=4 THEN 'integration'
           WHEN sequence=5 THEN 'workspace' ELSE 'agent' END::factory.change_commit_source,
-        CASE WHEN sequence=3 THEN 'README.md' END,
-        CASE WHEN sequence=3 THEN ${"b".repeat(40)} END,
-        CASE WHEN sequence=3 THEN 'Private repository content' END,
-        CASE WHEN sequence=3 THEN ${"e".repeat(64)} END,change.created_by,
+        change.created_by,
         CASE WHEN sequence IN (36,37) THEN '2050-01-01 00:00:00.000003+00'
           WHEN sequence=35 THEN '2050-01-01 00:00:00.000002+00'
           ELSE '2050-01-01 00:00:00.000001+00' END::timestamptz,
@@ -252,7 +304,7 @@ test("execution receipts use the last successful exact candidate and preserve mi
       source: "agent",
       completedAt: "2050-01-01 00:00:00.000001+00",
     });
-    expect(first.commits[2]).toMatchObject({ source: "repository-document", runtimeID: null });
+    expect(first.commits[2]).toMatchObject({ source: "agent", runtimeID: f.attemptID });
     expect(first.commits[3]).toMatchObject({ source: "integration" });
     expect(first.commits[4]).toMatchObject({ source: "workspace" });
     expect(JSON.stringify(first)).not.toContain("Private");
@@ -303,30 +355,33 @@ test("execution history uses only recorded implementation ancestry, bounded page
       fingerprint: "d".repeat(64),
       bundle: {
         variables: [
-          { name: "APP_DISPLAY", value: "a b c", runtime: true, build: false, verification: false },
-        ],
-        registries: [
+          { name: "APP_DISPLAY", value: "a b c", runtime: true, verification: false },
           {
-            host: "owned.invalid",
-            username: "test",
-            password: "registry value with spaces",
-            certificate: "",
-            verification: false,
-            publish: false,
+            name: "QA_VALUE",
+            value: "protected variable with spaces",
+            runtime: false,
+            verification: true,
           },
         ],
       },
     };
-    const manifest = JSON.stringify(environmentMetadata(value.bundle));
+    const manifestObject = environmentMetadata(value.bundle);
     stored.set(key, value);
-    await sql`INSERT INTO factory.environment_write(command_id,project_id,environment,base_version,
-      fingerprint,manifest,secret_key,state,created_by,committed_at)
-      VALUES(${commandID},${context.projectID},'development',0,${value.fingerprint},${manifest}::jsonb,
-        ${key},'committed',${context.userID},now())`;
-    await sql`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
-      VALUES(${context.projectID},'development',1,${manifest}::jsonb,${key})
-      ON CONFLICT(project_id,environment) DO UPDATE SET version=1,manifest=excluded.manifest,
-        secret_key=excluded.secret_key`;
+    await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+      VALUES(${commandID},'environments.write','project_environment',${`${context.projectID}:development`},${`environments.write:${key}`},'committed',
+        ${JSON.stringify({ projectID: context.projectID, environment: "development", baseVersion: 0, fingerprint: value.fingerprint, manifest: manifestObject, secretKey: key })}::jsonb,
+        ${context.userID},now())`;
+    await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'environments.environment','project',${context.projectID},
+        ${`environments.environment:${context.projectID}:development`},'saved',
+        ${JSON.stringify({
+          projectId: context.projectID,
+          environment: "development",
+          version: 1,
+          manifest: manifestObject,
+          secretKey: key,
+        })}::jsonb,${context.userID})
+      ON CONFLICT(idempotency_key) DO UPDATE SET payload=excluded.payload,updated_at=now()`;
   });
   const [intent] = await f.database.client<{ sessionID: string }[]>`
     SELECT session_id AS "sessionID" FROM factory.change_agent_turn_intent WHERE turn_id=${f.initial.id}`;
@@ -343,6 +398,10 @@ test("execution history uses only recorded implementation ancestry, bounded page
       expect(request.method).toBe("GET");
       const url = new URL(request.url);
       reads.push({ attempt, path: url.pathname, query: Object.fromEntries(url.searchParams) });
+      if (url.pathname === `/api/session/${root}`)
+        return Response.json({
+          data: { id: root, location: { directory: "/workspace/project" } },
+        });
       if (url.pathname === "/api/session")
         return Response.json({
           data:
@@ -494,7 +553,7 @@ test("execution history uses only recorded implementation ancestry, bounded page
     expect("actions" in detailedFallback && detailedFallback.actions).toHaveLength(12);
     oversizedInventory = false;
 
-    command = "printf '%s' 'a b c' 'registry value with spaces'";
+    command = "printf '%s' 'a b c' 'protected variable with spaces'";
     const beforeSecrets = reads.length;
     expect(await createReviewExecutionReader(f.database, native)(scope, actions())).toMatchObject({
       unavailable: "Historical input redaction is unavailable",
@@ -508,7 +567,7 @@ test("execution history uses only recorded implementation ancestry, bounded page
     incorrectFingerprint = false;
     const redacted = await read(scope, actions());
     expect(JSON.stringify(redacted)).not.toContain("a b c");
-    expect(JSON.stringify(redacted)).not.toContain("registry value with spaces");
+    expect(JSON.stringify(redacted)).not.toContain("protected variable with spaces");
     expect("actions" in redacted && redacted.actions[0]?.redacted).toBe(true);
   } finally {
     await f.dispose();

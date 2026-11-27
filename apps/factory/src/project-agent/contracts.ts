@@ -1,9 +1,6 @@
 import { z } from "zod";
-import {
-  conversationModeInput,
-  sourceCitationInput,
-} from "../../../../packages/conversation-domain/src/conversation";
-import { turnObservationInput } from "../../../../packages/conversation-domain/src/turn-observation";
+import { conversationModeInput, sourceCitationInput } from "#conversation-domain/conversation";
+import { turnObservationInput } from "#conversation-domain/turn-observation";
 import { agentMessageSchema } from "../agent/contracts";
 import { optionalString } from "../optional-values";
 

@@ -2,14 +2,12 @@ package connector
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +34,12 @@ func TestRuntimeEnvironmentProxySubprocess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	started := time.Now()
-	environment, err := readRuntimeEnvironment(ctx, assignment, "owned-environment-capability")
+	entry := nativeProjectServiceFixture()
+	entry.Assignment, entry.EntryToken = assignment, "owned-environment-capability"
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	environment, err := readNativeProjectEnvironment(ctx, entry, "bda5f2f0-5ef7-4e8d-92d4-167c8397ad31", client)
 	success := os.Getenv("FACTORY_ENVIRONMENT_PROXY_EXPECT") == "success"
 	if (err == nil) != success {
 		t.Fatalf("environment read: %v", err)
@@ -88,7 +91,9 @@ func TestRuntimeEnvironmentRetriesOnlyTransientReadFailuresThroughTLSProxy(t *te
 				if r.Method != http.MethodGet ||
 					r.URL.Path != "/internal/runtime-environment/"+validAssignment().RuntimeAttemptID ||
 					r.Header.Get("Authorization") != "Bearer owned-environment-capability" ||
-					r.Header.Get("X-Factory-Runtime-Generation") != "1" {
+					r.Header.Get("X-Factory-Runtime-Generation") != "1" ||
+					r.Header.Get("X-Factory-Runtime-Actor-UID") != "bda5f2f0-5ef7-4e8d-92d4-167c8397ad31" ||
+					r.Header.Get("X-Factory-Runtime-Container") != "database" {
 					t.Error("environment read changed its authority or immutable identity")
 					w.WriteHeader(403)
 					return
@@ -198,28 +203,6 @@ func TestRuntimeEnvironmentRetriesOnlyTransientReadFailuresThroughTLSProxy(t *te
 			if connects.Load() != scenario.connects || requests.Load() != scenario.requests {
 				t.Fatalf("CONNECTs=%d, reads=%d; expected %d and %d",
 					connects.Load(), requests.Load(), scenario.connects, scenario.requests)
-			}
-		})
-	}
-}
-
-func TestRuntimeEnvironmentReadRetryClassification(t *testing.T) {
-	for _, scenario := range []struct {
-		name  string
-		err   error
-		retry bool
-	}{
-		{"temporary-dns", &net.DNSError{IsTemporary: true}, true},
-		{"dns-timeout", &net.DNSError{IsTimeout: true}, true},
-		{"denied-dns", &net.DNSError{IsNotFound: true, IsTemporary: true}, false},
-		{"untrusted-certificate", x509.UnknownAuthorityError{}, false},
-		{"wrong-certificate-name", x509.HostnameError{}, false},
-		{"caller-cancelled", context.Canceled, false},
-		{"connection-closed", io.EOF, true},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			if retryRuntimeEnvironmentRead(&url.Error{Op: "Get", Err: scenario.err}) != scenario.retry {
-				t.Fatal("environment read retry classification changed")
 			}
 		})
 	}

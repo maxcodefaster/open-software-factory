@@ -1,7 +1,7 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forgeBrowserLogoutPage } from "../../packages/forge/src/browser-logout";
+import { forgeBrowserLogoutPage } from "#forge/browser-logout";
 
 export async function installForgeBrowserLogout(options: {
   factoryURL: string;
@@ -12,6 +12,7 @@ export async function installForgeBrowserLogout(options: {
   try {
     const page = join(directory, "factory-sign-out.html");
     await writeFile(page, forgeBrowserLogoutPage(options.factoryURL), { mode: 0o644 });
+    await chmod(page, 0o644);
     const assets = "/var/lib/gitea/custom/public/assets";
     await options.execute(["mkdir", "-p", assets]);
     await options.copy(page, `${assets}/factory-sign-out.html`);

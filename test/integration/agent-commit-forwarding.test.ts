@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { fixture } from "../fixtures/change-agent-turns";
 
 async function forwarding(connections?: number) {
@@ -144,7 +144,7 @@ test.each([
         .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
     if (boundary === "native Delete")
       await owned.database
-        .client`UPDATE factory.substrate_binding SET delete_intended_at=now() WHERE runtime_attempt_id=${owned.attemptID}`;
+        .client`UPDATE factory.runtime_attempt SET delete_intended_at=now() WHERE id=${owned.attemptID}`;
     await expect(scope.transport(owned.attemptID, scope.operation)).rejects.toThrow(
       "authority changed before dispatch",
     );

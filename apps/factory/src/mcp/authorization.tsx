@@ -1,6 +1,6 @@
 import { createMemo, createSignal, Loading, Show } from "solid-js";
+import { defaultDesktopBackgroundKey } from "#interface-domain/background";
 import { factoryIdentityClient } from "../auth-client";
-import { defaultDesktopBackgroundKey } from "../../../../packages/interface-domain/src/background";
 import { getMCPAuthorization } from "../server-functions/access";
 import { serverCall } from "../server-functions/result";
 

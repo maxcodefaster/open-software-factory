@@ -1,7 +1,9 @@
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { BrowserContext } from "@playwright/test";
 import { expect as visible } from "@playwright/test";
+import { runProcess } from "../../scripts/owned-client-process";
 import { eventually } from "./factory-process";
 
 /** Test the installed client through its normal API/auth discovery, without copying credentials. */
@@ -11,14 +13,15 @@ export async function proveLocalOpenCodeMCP(input: {
   browser: BrowserContext;
   evidenceDirectory: string;
 }) {
-  const binary = process.env["FACTORY_LOCAL_OPENCODE_BINARY"] ?? "/opt/homebrew/bin/opencode";
+  const installed = Bun.which(process.env["FACTORY_LOCAL_OPENCODE_BINARY"] ?? "opencode");
+  if (!installed)
+    throw new Error(
+      "Installed OpenCode V2 executable not found; put opencode on PATH or set FACTORY_LOCAL_OPENCODE_BINARY",
+    );
+  const binary = installed;
   const id = crypto.randomUUID();
   const name = `fproof_${id.replaceAll("-", "").slice(0, 16)}`;
-  const directory = resolve(
-    "/private/var/folders/gk/q1vhx9wx4zg6yr8gn68q70_80000gn/T/opencode",
-    `factory-mcp-${id}`,
-  );
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directory = await mkdtemp(resolve(tmpdir(), "factory-mcp-"));
   await writeFile(
     resolve(directory, "opencode.json"),
     JSON.stringify(
@@ -41,7 +44,7 @@ export async function proveLocalOpenCodeMCP(input: {
   );
   const location = `location[directory]=${encodeURIComponent(directory)}`;
   async function api(method: string, path: string, body?: unknown) {
-    const process = Bun.spawn(
+    const process = await runProcess(
       [
         binary,
         "api",
@@ -49,22 +52,19 @@ export async function proveLocalOpenCodeMCP(input: {
         path,
         ...(body === undefined ? [] : ["--data", JSON.stringify(body)]),
       ],
-      { cwd: directory, stdout: "pipe", stderr: "pipe" },
+      { cwd: directory, allowFailure: true },
     );
-    const [stdout] = await Promise.all([
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ]);
-    if ((await process.exited) !== 0)
+    if (process.code !== 0)
       throw new Error(
         `Local OpenCode API ${method} ${path.split("?")[0]} failed. Sensitive diagnostics suppressed.`,
       );
-    return stdout.trim() ? JSON.parse(stdout) : undefined;
+    return process.stdout.trim() ? JSON.parse(process.stdout) : undefined;
   }
   const info = await api("get", "/api/info");
-  const version = Bun.spawn([binary, "--version"], { stdout: "pipe", stderr: "ignore" });
-  const cliVersion = (await new Response(version.stdout).text()).trim();
-  await version.exited;
+  const version = await runProcess([binary, "--version"], { cwd: directory, allowFailure: true });
+  if (version.code !== 0)
+    throw new Error("Installed OpenCode version check failed. Sensitive diagnostics suppressed.");
+  const cliVersion = version.stdout.trim();
   const page = await input.browser.newPage();
   try {
     await api("get", `/api/location?${location}`);
@@ -144,7 +144,11 @@ export async function proveLocalOpenCodeMCP(input: {
       );
     const sessionID = String(created.data.id);
     const prompt = `This is an acceptance test of Factory MCP. Use only the ${name} MCP tools, not local files or shell tools. Call ${name}_getWorkspace for workspaceID ${input.workspaceID}. Then call ${name}_runCommand with workspaceID ${input.workspaceID}, requestID ${commandID}, command "printf local-opencode-native-proof". Observe that exact command ID with getCommand and readCommandOutput until it exits. Do not start another execution, edit files, approve or deliver anything. Report its actual exit code and output. If any step fails, report failure instead of claiming success.`;
-    const run = Bun.spawn(
+    const {
+      stdout,
+      stderr,
+      code: status,
+    } = await runProcess(
       [
         binary,
         "run",
@@ -161,13 +165,8 @@ export async function proveLocalOpenCodeMCP(input: {
         `Factory MCP acceptance ${id}`,
         prompt,
       ],
-      { cwd: directory, stdout: "pipe", stderr: "pipe" },
+      { cwd: directory, allowFailure: true },
     );
-    const [stdout, stderr, status] = await Promise.all([
-      new Response(run.stdout).text(),
-      new Response(run.stderr).text(),
-      run.exited,
-    ]);
     // The test prompt contains only owned IDs. Redact transport credentials if an upstream diagnostic includes one.
     const redact = (value: string) =>
       value
@@ -186,12 +185,10 @@ export async function proveLocalOpenCodeMCP(input: {
     };
   } finally {
     await page.close();
-    const logout = Bun.spawn([binary, "mcp", "logout", name], {
+    await runProcess([binary, "mcp", "logout", name], {
       cwd: directory,
-      stdout: "ignore",
-      stderr: "ignore",
+      allowFailure: true,
     });
-    await logout.exited;
     await api("delete", `/api/experimental/mcp/${encodeURIComponent(name)}?${location}`).catch(
       () => undefined,
     );

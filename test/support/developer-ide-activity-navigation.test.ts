@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
 import { activityNavigationMessage } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-activity-message";
 import { AgentFollowGate } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-agent-follow";
 import { workspaceResource } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-files";
+import URI from "../../deploy/theia-ide/node_modules/@theia/core/lib/common/uri";
 
 test("IDE navigation accepts scoped relative source and bounded read-only diff snapshots", () => {
   const message = {

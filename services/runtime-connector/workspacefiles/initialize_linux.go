@@ -233,19 +233,13 @@ func InitializeActor(ctx context.Context, parent string, input Initialization) e
 }
 
 func ValidateActorSourceIdentity(parent string) error {
-	uidMap, uidErr := os.ReadFile("/proc/self/uid_map")
-	gidMap, gidErr := os.ReadFile("/proc/self/gid_map")
-	// connector.sh enters RootlessKit's existing private user namespace. Its
-	// root maps to the unprivileged Actor UID 1000, NOT to host/Actor root.
-	if os.Geteuid() != 0 || os.Getegid() != 0 || uidErr != nil || gidErr != nil || !actorSourceIDMap(string(uidMap)) || !actorSourceIDMap(string(gidMap)) || parent != "/home/rootless/persist" {
-		return errors.New("Actor Source requires its private RootlessKit identity and durable parent")
+	identity, err := os.ReadFile("/run/ate/identity/uid")
+	if os.Getpid() != 1 || os.Geteuid() != 0 || os.Getegid() != 0 ||
+		parent != "/var/lib/factory/source" || err != nil ||
+		!regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(strings.TrimSpace(string(identity))) {
+		return errors.New("Actor Source requires the trusted native controller PID1 and its durable parent")
 	}
 	return nil
-}
-
-func actorSourceIDMap(value string) bool {
-	fields := strings.Fields(value)
-	return len(fields) == 6 && fields[0] == "0" && fields[1] == "1000" && fields[2] == "1" && fields[3] == "1" && fields[4] == "100000" && fields[5] == "65536"
 }
 
 func initialize(ctx context.Context, parent string, input Initialization, uid, gid int) error {

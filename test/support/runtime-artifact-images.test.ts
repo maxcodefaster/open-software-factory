@@ -2,61 +2,89 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import upstream from "../../upstream.json";
 
-test("runtime Compose pins the upstream configured-input grant fix without disabling Bake security", async () => {
+test("native runtime host uses pinned Node, Connector, Git and CA without retired packaging", async () => {
   const dockerfile = await readFile("deploy/runtime-host/Dockerfile", "utf8");
-  const environment = await readFile("services/runtime-connector/connector/environment.go", "utf8");
-  expect(upstream.dockerCompose.commit).toMatch(/^[a-f0-9]{40}$/);
-  expect(upstream.dockerCompose.sha256).toMatch(/^[a-f0-9]{64}$/);
-  expect(upstream.dockerCompose.source).toContain(upstream.dockerCompose.commit);
-  expect(dockerfile).toContain(`FROM ${upstream.go.image} AS compose`);
+  expect(upstream.node.image).toMatch(/@sha256:[a-f0-9]{64}$/);
+  expect(dockerfile).toContain(`FROM ${upstream.node.image} AS node`);
+  expect(dockerfile).toContain("FROM node AS runtime-host-base");
+  expect(dockerfile).toContain(`FROM ${upstream.go.image} AS connector`);
+  expect(dockerfile).toContain("-o /factory-runtime-connector ./cmd/factory-runtime-connector");
   expect(dockerfile).toContain(
-    `ADD --checksum=sha256:${upstream.dockerCompose.sha256} ${upstream.dockerCompose.source}`,
+    "COPY --from=connector /factory-runtime-connector /usr/local/bin/factory-runtime-connector",
   );
+  expect(dockerfile).toContain("apk add --no-cache ca-certificates git libgcc libstdc++");
   expect(dockerfile).toContain(
-    `github.com/docker/compose/v5/internal.Version=v${upstream.dockerCompose.version}`,
+    "factory-runtime-connector 2>&1 | grep -q 'usage: factory-runtime-connector'",
   );
-  expect(dockerfile).toContain(
-    "COPY --from=compose /docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose",
+  expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/factory-runtime-connector"]\nCMD []');
+  expect(dockerfile).not.toMatch(
+    /library\/docker:|AS compose\b|COPY --from=compose|docker-compose|docker-buildx|dockerd|@devcontainers|devcontainer|factory-project-prebuild/,
   );
-  expect(dockerfile).toContain(
-    "COPY --from=compose /src/compose/LICENSE /usr/local/share/licenses/docker-compose/LICENSE",
-  );
-  expect(dockerfile).toContain(
-    `test "$(docker compose version --short)" = "${upstream.dockerCompose.version}"`,
-  );
-  expect(dockerfile).toContain(`FROM ${upstream.docker.image} AS runtime-host-base`);
-  for (const source of [dockerfile, environment]) {
-    expect(source).not.toContain("BUILDX_BAKE_ENTITLEMENTS_FS=0");
-    expect(source).not.toContain("COMPOSE_BAKE");
-  }
 });
 
-test("both native release jobs prove configured Compose inputs before pushing the runtime image", async () => {
+test("both native architectures gate loaded packages and bind signed publication to the proven config", async () => {
   const [workflow, proof] = await Promise.all([
     readFile(".github/workflows/images.yaml", "utf8"),
-    readFile("scripts/runtime/compose-inputs-proof.sh", "utf8"),
+    readFile("scripts/runtime/substrate-image-proof.sh", "utf8"),
   ]);
-  expect(workflow).toContain("runner: ubuntu-24.04-arm");
-  const load = workflow.indexOf("--provenance=false --sbom=false --load");
-  const configBytes = workflow.indexOf(
-    'tar -xOf "$proof_archive" -- "$config_file" | sha256sum',
-    load,
+  const roles = workflow.split("\n  roles:\n")[1]?.split("\n  manifests:\n")[0];
+  if (!roles) throw new Error("Missing native role publication job");
+  expect(roles).toContain("- arch: arm64\n            runner: ubuntu-24.04-arm");
+  expect(roles).toContain("- arch: amd64\n            runner: ubuntu-24.04");
+  expect(roles).toContain('attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")');
+  expect(roles).toContain(
+    'if [[ "$role" == runtime-host ]]; then\n                  bash scripts/runtime/substrate-image-proof.sh "$image_id"',
   );
-  const gate = workflow.indexOf('bash scripts/runtime/compose-inputs-proof.sh "$image_id"');
-  const push = workflow.indexOf(['"$', '{attest[@]}" --push --metadata-file'].join(""));
-  const sameImage = workflow.indexOf('test "$published_config" = "$proven_config"', push);
-  expect(load).toBeGreaterThan(0);
-  expect(configBytes).toBeGreaterThan(load);
-  expect(configBytes).toBeLessThan(gate);
-  expect(gate).toBeGreaterThan(load);
-  expect(push).toBeGreaterThan(gate);
-  expect(sameImage).toBeGreaterThan(push);
-  expect(workflow).toContain('docker buildx imagetools inspect "$image@$native_child" --raw');
-  expect(proof).toContain('test "$image_arch" = "$server_arch"');
-  expect(proof).toContain("BUILDX_BAKE_ENTITLEMENTS_FS=1");
-  expect(proof).toContain("--network=none --cpus=3 --memory=3g");
-  expect(proof).toContain("configuredDockerfileBuilt");
-  expect(proof).toContain("unconfiguredReadRefused");
+  let previous = -1;
+  for (const step of [
+    "--provenance=false --sbom=false --load",
+    'image_id="$(docker image inspect --format \'{{.Id}}\' "$image")"',
+    'docker image save --output "$proof_archive" "$image_id"',
+    'config_file="$(tar -xOf "$proof_archive" manifest.json',
+    'proven_config="sha256:$(tar -xOf "$proof_archive" -- "$config_file" | sha256sum',
+    '[[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]',
+    'bash scripts/runtime/substrate-image-proof.sh "$image_id"',
+    'elif [[ "$role" == substrate-runtime ]]; then\n                  bash scripts/runtime/substrate-image-proof.sh "$image_id"',
+    'test "$(docker image inspect --format \'{{.Id}}\' "$image")" = "$image_id"',
+    `"\${build[@]}" "\${attest[@]}" --push --metadata-file`,
+    'native_child="$(docker buildx imagetools inspect "$image" --raw',
+    'published_config="$(docker buildx imagetools inspect "$image@$native_child" --raw',
+    'test "$published_config" = "$proven_config"',
+    'digest="$(release_digest "$image")"',
+    'release_sign "$IMAGE_ROOT/$role@$digest"',
+  ]) {
+    const index = roles.indexOf(step);
+    expect(index, step).toBeGreaterThan(previous);
+    previous = index;
+  }
+  expect(roles).toContain('else error("unexpected proof image count") end');
+  expect(roles).toContain('select(.platform.os == "linux" and .platform.architecture == $arch)');
+  expect(roles).toContain('else error("unexpected published platform count") end');
+  expect(roles).toContain("jq -er '.config.digest'");
+  expect(roles).toContain(
+    'if release_exists "$IMAGE_ROOT/factory:$RELEASE" && ! release_overwrite; then',
+  );
+  expect(roles).toContain('release_require_revision "$image" "$REVISION"');
+  expect(roles).toContain(
+    `cosign verify --certificate-identity-regexp "^https://github.com/\${GITHUB_REPOSITORY}/"`,
+  );
+  expect(roles).toContain("--certificate-oidc-issuer https://token.actions.githubusercontent.com");
+  expect(workflow).toContain('test "$RELEASE_TAG" = v0.1.0-beta.1');
+  expect(workflow).not.toContain("scripts/runtime/compose-inputs-proof.sh");
+  expect(proof).toContain('[[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]]');
+  expect(proof).toContain('case "$platform" in linux/amd64|linux/arm64)');
+  expect(proof).toContain(
+    'test "$(docker version --format \'{{.Server.Os}}/{{.Server.Arch}}\')" = "$platform"',
+  );
+  expect(proof).toContain(
+    "docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000",
+  );
+  expect(proof).toContain(
+    '--security-opt=no-new-privileges --tmpfs /tmp --entrypoint /bin/sh "$image" -ec',
+  );
+  expect(proof).not.toMatch(/--privileged|--volume|--mount/);
+  expect(proof).toContain('"nativeActorImagePackages":true');
+  expect(proof).toContain('"nativeActorLifecycle":false');
 });
 
 test("one runtime host contains role tools while the independent editor remains separate", async () => {
@@ -65,7 +93,9 @@ test("one runtime host contains role tools while the independent editor remains 
     .split(" AS runtime-host-base\n")[1]
     ?.split("FROM runtime-host-base AS runtime-host")[0];
   expect(base).toBeDefined();
-  expect(base).toContain("@devcontainers/cli@0.89.0");
+  expect(base).toContain(
+    "COPY --from=connector /factory-runtime-connector /usr/local/bin/factory-runtime-connector",
+  );
   expect(base).not.toContain("opencode");
   expect(base).not.toContain("forgejo-runner");
   expect(base).not.toContain("theia");
@@ -213,16 +243,49 @@ test("pinned process fixture uses native server identity and retains explicit ca
     expect(fixture).not.toContain(obsolete);
 });
 
-test("Project prebuild identity binds the same integrity-checked Dev Containers CLI shipped by the host", async () => {
-  const [producer, dockerfile] = await Promise.all([
-    readFile("services/runtime-connector/connector/prebuild.go", "utf8"),
-    readFile("deploy/runtime-host/Dockerfile", "utf8"),
+test("native package proof requires role tools and rejects retired Docker, Dev Containers and prebuild binaries", async () => {
+  const proof = await readFile("scripts/runtime/substrate-image-proof.sh", "utf8");
+  for (const check of [
+    "test -x /usr/local/bin/factory-runtime-connector",
+    "test -x /usr/bin/git",
+    "test -s /etc/ssl/certs/ca-certificates.crt",
+    'test -n "$(node --version)"',
+    'test -n "$(npm --version)"',
+    'test -n "$(forgejo-runner --version)"',
+    "for libc in glibc musl; do",
+    'test -x "/opt/factory/opencode/$libc/bun"',
+    'test -x "/opt/factory/language-tools/$libc/node"',
+    'test -s "/opt/factory/language-tools/$libc/lib/libgcc_s.so.1"',
+    'test -s "/opt/factory/language-tools/$libc/lib/libstdc++.so.6"',
+    "test -s /opt/factory/opencode/server/server.mjs",
+    "test -s /opt/factory/opencode/server/input-stop.mjs",
+    "test -s /opt/factory/opencode/manifest.json",
+    "test -r /opt/factory/opencode/server/config/AGENTS.md",
+    "test -r /opt/factory/opencode/server/config/opencode.json",
+  ])
+    expect(proof).toContain(check);
+  const retired = /for executable in ([\s\S]*?); do([\s\S]*?)\n {4}done/.exec(proof);
+  expect(retired?.[1]?.replace(/\\\n/g, " ").trim().split(/\s+/)).toEqual([
+    "docker",
+    "dockerd",
+    "docker-compose",
+    "docker-buildx",
+    "devcontainer",
+    "containerd",
+    "containerd-shim-runc-v2",
+    "ctr",
+    "runc",
+    "buildkitd",
+    "buildctl",
+    "rootlesskit",
+    "dockerd-entrypoint.sh",
+    "factory-project-prebuild",
   ]);
-  expect(producer).toContain(`const prebuildCLIVersion = "${upstream.devcontainersCli.version}"`);
-  expect(producer).toContain(
-    `const prebuildCLIIntegrity = "${upstream.devcontainersCli.integrity}"`,
+  expect(retired?.[2]).toContain('if command -v "$executable" >/dev/null 2>&1; then');
+  expect(retired?.[2]).toContain("exit 1");
+  expect(proof).toContain(
+    "/usr/lib/docker /usr/local/lib/node_modules/@devcontainers /opt/factory-rootless; do",
   );
-  expect(dockerfile).toContain(
-    "COPY --from=connector /factory-project-prebuild /usr/local/bin/factory-project-prebuild",
-  );
+  expect(proof).toContain('test ! -e "$path"');
+  expect(proof).toContain("test ! -S /var/run/docker.sock");
 });

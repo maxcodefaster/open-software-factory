@@ -1,19 +1,19 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { For, Show, untrack } from "solid-js";
-import type { DesktopBackgroundKey } from "../../../../packages/interface-domain/src/background";
+import type { DesktopBackgroundKey } from "#interface-domain/background";
 import type { DesktopBackground } from "../artworks";
-import { type Change, type PersonalTicketDraft, type Ticket } from "../change/contracts";
+import type { Change, PersonalTicketDraft, Ticket } from "../change/contracts";
 import { DockAppButton, DockButton } from "../dock";
 import { Icon } from "../icon";
-import type { InboxItem } from "../inbox/contracts";
 import type { createKnowledgeState } from "../knowledge/state";
 import type { createProjectPlanning } from "../projects/planning";
 import { ticketReference } from "../projects/ticket-content";
-import { type RuntimeDockTarget } from "../runtime/contracts";
+import type { RuntimeDockTarget } from "../runtime/contracts";
 import type { createProjectSetupInteraction } from "../setup/panel";
-import { TicketQuickFind } from "../ticket-quick-find";
+import { TicketQuickFind } from "../tickets/ticket-quick-find";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
 import type { DesktopProject, FactoryDesktopProps, TicketDetail } from "./contracts";
+import type { DesktopMenuOverlay } from "./window-state-machine";
 
 export interface DesktopTopbarModel {
   agentOpen: SourceAccessor<boolean>;
@@ -21,11 +21,12 @@ export interface DesktopTopbarModel {
   rememberAgentOpener: () => void;
   setAgentOpen: (value: boolean | ((previous: boolean) => boolean)) => boolean;
   projectControlElement: HTMLDivElement | undefined;
-  narrowViewport: SourceAccessor<boolean>;
-  projectMenuOpen: ReturnType<typeof createProjectPlanning>["projectMenuOpen"];
+  narrowViewport: Accessor<boolean>;
+  activeMenu: Accessor<DesktopMenuOverlay>;
+  setActiveMenu: (menu: DesktopMenuOverlay) => void;
+  toggleMenu: (menu: Exclude<DesktopMenuOverlay, "none">) => void;
+  closeMenus: () => void;
   selectedProject: Accessor<DesktopProject | undefined>;
-  setSettingsOpen: Setter<boolean>;
-  setProjectMenuOpen: ReturnType<typeof createProjectPlanning>["setProjectMenuOpen"];
   projectPopover: HTMLElement | undefined;
   bootstrap: FactoryDesktopProps;
   setError: Setter<string>;
@@ -53,37 +54,7 @@ export interface DesktopTopbarModel {
   openIDETarget: (target: RuntimeDockTarget) => Promise<void>;
   previewTargets: () => RuntimeDockTarget[];
   openPreviewTarget: (target: RuntimeDockTarget) => Promise<void>;
-  inbox: {
-    view: SourceAccessor<
-      | {
-          items: {
-            id: string;
-            eventId: string;
-            projectId: string;
-            projectName: string;
-            ticketId: string | null;
-            ticketTitle: string;
-            title: string;
-            preview: string;
-            createdAt: string;
-            needsAction: boolean;
-            unread: boolean;
-            archived: boolean;
-            updates: number;
-            target: "ticket" | "conversation" | "review" | "coding" | "inputs";
-            targetId: string | null;
-            contextId: string | null;
-          }[];
-          count: number;
-        }
-      | undefined
-    >;
-    loading: SourceAccessor<boolean>;
-    busy: SourceAccessor<boolean>;
-    error: SourceAccessor<string>;
-    refresh: () => Promise<void>;
-    mark: (item: InboxItem, action: "read" | "unread" | "archive") => Promise<void>;
-  };
+  inboxCount: Accessor<number | undefined>;
   returnToInbox: (publish?: boolean) => void;
   agentOverlay: () => boolean;
   foundTickets: ReturnType<typeof createProjectPlanning>["foundTickets"];
@@ -92,23 +63,16 @@ export interface DesktopTopbarModel {
   pending: () => boolean;
   openTicketDraft: (proposed?: PersonalTicketDraft, stage?: "inbox" | "ready") => void;
   settingsControlElement: HTMLDivElement | undefined;
-  settingsOpen: SourceAccessor<boolean>;
   settingsPopover: HTMLElement | undefined;
   openSettings: () => void;
   openWorkspaceTab: (tab: WorkspaceTab, publish?: boolean) => void;
   backgroundSaves: SourceAccessor<Record<string, boolean>>;
   canManageProject: () => boolean;
   backgroundChoices: SourceAccessor<DesktopBackground[]>;
-  backgroundPickerExpanded: SourceAccessor<boolean>;
-  desktopBackgroundKey: () =>
-    | "river-landscape"
-    | "the-harvesters"
-    | "mountainous-landscape"
-    | "gulf-of-marseille"
-    | "scene-on-the-ice"
-    | "moonlit-landscape";
+  backgroundPickerExpanded: Accessor<boolean>;
+  desktopBackgroundKey: () => DesktopBackgroundKey;
   chooseDesktopBackground: (key: DesktopBackgroundKey) => Promise<void>;
-  setBackgroundPickerExpanded: Setter<boolean>;
+  setBackgroundPickerExpanded: (value: boolean | ((previous: boolean) => boolean)) => boolean;
 }
 
 export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
@@ -141,19 +105,16 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
               type="button"
               class="context-button project-selector"
               aria-label={`${model.selectedProject()?.name ?? "Choose project"}, open project menu`}
-              aria-expanded={model.projectMenuOpen() ? "true" : "false"}
+              aria-expanded={model.activeMenu() === "project-menu" ? "true" : "false"}
               aria-controls="project-popover"
               title={model.selectedProject()?.name ?? "Choose project"}
-              onClick={() => {
-                model.setSettingsOpen(false);
-                model.setProjectMenuOpen((open) => !open);
-              }}
+              onClick={() => model.toggleMenu("project-menu")}
             >
               <span>{model.selectedProject()?.name ?? "Choose project"}</span>
               <Icon name="chevron" />
             </button>
           </Show>
-          <Show when={model.projectMenuOpen()}>
+          <Show when={model.activeMenu() === "project-menu"}>
             <section
               class="floating-menu project-menu"
               id="project-popover"
@@ -167,7 +128,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                     type="button"
                     class="quiet-button"
                     onClick={() => {
-                      model.setProjectMenuOpen(false);
+                      model.closeMenus();
                       model.setError("");
                       model.setWorkspaceVisible(false);
                       void model.projectSetup?.open();
@@ -326,7 +287,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
         <DockButton
           label="Inbox"
           icon="inbox"
-          count={model.inbox.view()?.count}
+          count={model.inboxCount()}
           active={model.workspaceVisible() && model.workspaceView() === "inbox"}
           open={model.workspaceTabs().some((tab) => tab.view === "inbox")}
           onClick={() => {
@@ -367,17 +328,14 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
             type="button"
             class="icon-button"
             aria-label="Settings"
-            aria-expanded={model.settingsOpen() ? "true" : "false"}
+            aria-expanded={model.activeMenu() === "settings-menu" ? "true" : "false"}
             aria-controls="settings-popover"
             data-tooltip="Settings"
-            onClick={() => {
-              model.setSettingsOpen((open) => !open);
-              model.setProjectMenuOpen(false);
-            }}
+            onClick={() => model.toggleMenu("settings-menu")}
           >
             <Icon name="settings" />
           </button>
-          <Show when={model.settingsOpen()}>
+          <Show when={model.activeMenu() === "settings-menu"}>
             <section
               class="floating-menu settings-menu"
               id="settings-popover"
@@ -396,10 +354,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                   aria-label="Open project menu"
                   aria-controls="project-popover"
                   aria-expanded="false"
-                  onClick={() => {
-                    model.setSettingsOpen(false);
-                    model.setProjectMenuOpen(true);
-                  }}
+                  onClick={() => model.setActiveMenu("project-menu")}
                 >
                   <Icon name="home" />
                   <span>{model.selectedProject()?.name ?? "Choose project"}</span>
@@ -424,7 +379,7 @@ export function DesktopTopbar(props: { model: DesktopTopbarModel }) {
                   type="button"
                   class="settings-model-link"
                   onClick={() => {
-                    model.setSettingsOpen(false);
+                    model.closeMenus();
                     model.openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
                   }}
                 >

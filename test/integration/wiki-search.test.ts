@@ -35,8 +35,8 @@ test("Wiki search combines active pages and source documents without repeating e
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userID},'Owned Wiki administrator',${`wiki-admin-${projectID}@factory.local`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userID})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`wiki-search-${projectID}`},'Wiki search',${`${configuration.FACTORY_FORGEJO_PUBLIC_URL}/${owner}/wiki.git`},'main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`wiki-search-${projectID}`},'Wiki search',${`${configuration.FACTORY_FORGEJO_PUBLIC_URL}/${owner}/wiki.git`},'main','.factory/actor-template.json',${userID})`;
     for (const state of ["active", "archived"] as const) {
       await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,state,current_body,generated_body,source_commit_sha,created_by)
         VALUES(${crypto.randomUUID()},${projectID},${state},'Release overview',${state}::factory.knowledge_page_state,

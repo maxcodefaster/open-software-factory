@@ -21,9 +21,9 @@ test.beforeAll(async () => {
         resolveId(source, importer) {
           if (
             [
-              "./server-functions/workspaces",
-              "./server-functions/runtime",
-              "./server-functions/writer",
+              "../server-functions/workspaces",
+              "../server-functions/runtime",
+              "../server-functions/writer",
             ].includes(source) &&
             importer?.endsWith("/workspace-sharing.tsx")
           )
@@ -96,8 +96,57 @@ for (const viewport of [
       await page.getByRole("button", { name: "Done", exact: true }).click();
       await expect(opener).toBeFocused();
       await opener.click();
-      await page.getByRole("button", { name: "Close workspace", exact: true }).click();
+      await page.getByRole("button", { name: "Close Share Workspace", exact: true }).click();
       await expect(opener).toBeFocused();
+    });
+
+    test("a recovered Workspace listing clears its read error without opening a Workspace", async ({
+      page,
+    }) => {
+      await page.clock.install();
+      await page.goto(
+        `${origin}/workspace-sharing.html?workspace=workspace-owner&listing-failure=once`,
+      );
+      await page.getByRole("button", { name: "Load available Workspaces" }).click();
+      await expect(page.getByRole("alert")).toHaveText(
+        "Workspace listing temporarily unavailable.",
+      );
+      await page.clock.fastForward(5000);
+      const selector = page.getByRole("combobox", { name: "Choose shared Workspace" });
+      await expect(selector.locator("option")).toHaveCount(3);
+      await expect(page.getByRole("alert")).toHaveCount(0, { timeout: 1500 });
+      await expect(selector).toHaveValue("workspace-owner");
+      await expect(page.getByLabel("Opened Workspace")).toHaveText("No Workspace opened");
+      await expect(page.getByLabel("Sharing decisions")).toHaveText("0");
+      await page.screenshot({
+        path: `${evidence}/listing-recovered-${viewport.name}.png`,
+        fullPage: true,
+      });
+    });
+
+    test("healthy listing refreshes neither hide nor replay an unconfirmed sharing decision", async ({
+      page,
+    }) => {
+      await page.clock.install();
+      await page.goto(
+        `${origin}/workspace-sharing.html?workspace=workspace-owner&sharing-failure=unknown`,
+      );
+      await page.getByRole("button", { name: "Load available Workspaces" }).click();
+      await page.getByRole("button", { name: "Share Workspace", exact: true }).click();
+      await page
+        .getByRole("combobox", { name: "Access for Observer Developer" })
+        .selectOption("collaborate");
+      const message = "Sharing outcome is unconfirmed. Reopen sharing to see its recorded state.";
+      await expect(page.getByRole("alert")).toHaveText(message);
+      await page.getByRole("button", { name: "Done", exact: true }).click();
+      await page.clock.fastForward(10_000);
+      await expect(page.getByRole("alert")).toHaveText(message);
+      await expect(page.getByLabel("Sharing decisions")).toHaveText("1");
+      await expect(page.getByLabel("Opened Workspace")).toHaveText("No Workspace opened");
+      await page.screenshot({
+        path: `${evidence}/sharing-unconfirmed-${viewport.name}.png`,
+        fullPage: true,
+      });
     });
   });
 }

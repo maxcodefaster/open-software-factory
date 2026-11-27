@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createCanvas } from "@napi-rs/canvas";
+import { runtimeModelToken } from "#runtime-domain/identity";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createModelRelay } from "../../apps/factory/src/models/relay";
-import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 test("the admitted model can receive retained browser screenshots beyond the old text-only relay bound", async () => {

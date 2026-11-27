@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
+import { visualReviewSchema } from "#conversation-domain/visual-review";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";

@@ -1,17 +1,12 @@
 package connector
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,12 +31,6 @@ type childRuntime struct {
 	files          *containerFileManager
 }
 
-type terminalControl struct {
-	Type    string `json:"type"`
-	Columns uint16 `json:"columns"`
-	Rows    uint16 `json:"rows"`
-}
-
 func RunChild(ctx context.Context, assignment Assignment, token string) error {
 	ctx, cancelChild := context.WithCancel(ctx)
 	defer cancelChild()
@@ -50,21 +39,13 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 	}
 	resetStartupTimings()
 	var backoff reconnectBackoff
-	control, err := dialControl(ctx, assignment, "child", token)
-	for err != nil {
-		// Injection can finish while Factory is restarting. The admitted child
-		// must survive first-connect downtime just as it survives later disconnects.
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(backoff.next()):
-		}
-		control, err = dialControl(ctx, assignment, "child", token)
+	control := dialInitialControl(ctx, assignment, token, &backoff)
+	if control == nil {
+		return nil
 	}
-	backoff.reset()
 	fail := func(err error) error {
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		control.close()
+		control.Write(Message{Type: "status", Phase: "failed", Error: err.Error()})
+		control.Close()
 		return err
 	}
 	output := io.Writer(os.Stdout)
@@ -72,16 +53,16 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 		output = io.Discard
 	}
 	processes := newProcessManager(ctx, assignment, output)
-	defer processes.stopAll()
-	if !processes.development {
+	defer processes.StopAll()
+	if !processes.Development() {
 		// Development announces its independent Terminal immediately below.
 		// Non-development Apps can take time to become healthy; publish their
 		// real process state and output without claiming channel readiness.
-		processes.connect(control)
-		defer processes.connect(nil)
+		processes.Connect(control)
+		defer processes.Connect(nil)
 	}
 	finishProcesses := startupPhase("process-start")
-	processErr := processes.startAll()
+	processErr := processes.StartAll()
 	finishProcesses()
 	if processErr != nil {
 		return fail(processErr)
@@ -92,7 +73,7 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 	if readinessErr != nil {
 		return fail(readinessErr)
 	}
-	processes.supervise()
+	processes.Supervise()
 	runtime := &childRuntime{
 		assignment: assignment,
 		httpClient: &http.Client{
@@ -113,17 +94,18 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 	defer func() {
 		cancelChild()
 		runtime.setControl(nil)
-		control.close()
+		control.Close()
 		<-agentDone
 	}()
 	runtime.commands = newCommandManager(ctx, assignment, runtime.send)
-	defer runtime.commands.close()
-	if processes.development {
+	defer runtime.commands.Close()
+	if processes.Development() {
+		var err error
 		runtime.files, err = newContainerFileManager("/")
 		if err != nil {
 			return fail(errors.New("container file access could not initialize"))
 		}
-		defer runtime.files.close()
+		defer runtime.files.Close()
 		go func() {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
@@ -132,22 +114,22 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					runtime.files.sweep()
+					runtime.files.Sweep()
 				}
 			}
 		}()
 	}
 	runtime.terminals = newTerminalManager(ctx, assignment, runtime.send)
-	go runtime.terminals.watch()
-	defer runtime.terminals.closeAll()
+	go runtime.terminals.Watch()
+	defer runtime.terminals.CloseAll()
 	runtime.languages = newLanguageManager(ctx, assignment, runtime.send)
-	defer runtime.languages.closeAll()
+	defer runtime.languages.CloseAll()
 	for {
-		runtime.languages.reconnect()
+		runtime.languages.Reconnect()
 		runtime.setControl(control)
-		terminals := runtime.terminals.observation()
-		commandCount := runtime.commands.activeCount()
-		if err := control.write(Message{
+		terminals := runtime.terminals.Observation()
+		commandCount := runtime.commands.ActiveCount()
+		if err := control.Write(Message{
 			Type:             "hello",
 			Role:             "child",
 			AttemptID:        assignment.RuntimeAttemptID,
@@ -158,123 +140,92 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 			TerminalRevision: terminals.TerminalRevision,
 			CommandCount:     &commandCount,
 		}); err != nil {
-			control.close()
+			control.Close()
 		} else {
-			processes.connect(control)
-			runtime.commands.reconnect()
+			processes.Connect(control)
+			runtime.commands.Reconnect()
 			readErrors := make(chan error, 1)
 			go func() { readErrors <- runtime.readLoop(ctx, control) }()
 			select {
 			case <-ctx.Done():
-				processes.connect(nil)
+				processes.Connect(nil)
 				runtime.setControl(nil)
-				control.close()
+				control.Close()
 				return nil
-			case err := <-processes.fatal:
-				processes.connect(nil)
+			case err := <-processes.Fatal():
+				processes.Connect(nil)
 				runtime.setControl(nil)
 				return fail(err)
 			case <-readErrors:
-				processes.connect(nil)
+				processes.Connect(nil)
 				runtime.setControl(nil)
 				runtime.disconnectStreams()
-				control.close()
+				control.Close()
 			}
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case err := <-processes.fatal:
+		case err := <-processes.Fatal():
 			return err
 		case <-time.After(250 * time.Millisecond):
 		}
-		for {
-			control, err = dialControl(ctx, assignment, "child", token)
-			if err == nil {
-				backoff.reset()
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case processErr := <-processes.fatal:
-				return processErr
-			case <-time.After(backoff.next()):
-			}
+		var err error
+		control, err = reconnectControl(ctx, assignment, token, &backoff, processes.Fatal())
+		if control == nil {
+			return err
 		}
 	}
 }
 
-func waitForChannels(ctx context.Context, assignment Assignment, processes *processManager) error {
-	return waitForChannelsWithClient(ctx, assignment, processes, &http.Client{Timeout: 2 * time.Second})
-}
-
-func waitForChannelsWithClient(ctx context.Context, assignment Assignment, processes *processManager, client *http.Client) error {
-	for _, channel := range assignment.Channels {
-		if channel.Kind == "ide" {
-			// This child owns real PTYs. No editor lives in execution, and App
-			// or Agent health must not gate its authenticated connection.
+func dialInitialControl(ctx context.Context, assignment Assignment, token string, backoff *reconnectBackoff) *controlConnection {
+	for {
+		control, err := dialControl(ctx, assignment, "child", token)
+		if err == nil {
+			backoff.Reset()
+			return control
+		}
+		// Injection can finish while Factory is restarting. The admitted child
+		// must survive first-connect downtime just as it survives later disconnects.
+		select {
+		case <-ctx.Done():
 			return nil
+		case <-time.After(backoff.Next()):
 		}
 	}
-	// A refused TCP connection is fast, not evidence that an App exhausted its
-	// startup window. Share one elapsed lifecycle window across all required
-	// channels; caller cancellation and real process failures still end it early.
-	ctx, cancel := context.WithTimeout(ctx, channelReadinessTimeout)
-	defer cancel()
-	for _, channel := range assignment.Channels {
-		healthURL := strings.TrimSuffix(channel.Target, "/") + channel.HealthPath
-		lastFailure := "health endpoint has not responded"
-		readinessFailure := func(cause error) error {
-			detail := lastFailure
-			if processes != nil {
-				if output := processes.startupDiagnostic(channel.Name, assignment); output != "" {
-					detail += "; " + output
+}
+
+func reconnectControl(ctx context.Context, assignment Assignment, token string, backoff *reconnectBackoff, fatal <-chan error) (*controlConnection, error) {
+	for {
+		if gate := assignment.NativeWriters(); gate != nil && gate.Frozen() {
+			if err := gate.Resume(ctx); err != nil {
+				select {
+				case <-ctx.Done():
+					return nil, nil
+				case <-time.After(backoff.Next()):
+					continue
 				}
 			}
-			if cause != nil {
-				return fmt.Errorf("channel %q did not become ready: %s: %w", channel.Name, detail, cause)
-			}
-			return fmt.Errorf("channel %q did not become ready: %s", channel.Name, detail)
 		}
-		for {
-			if processes != nil {
-				if err := processes.startupFailure(assignment); err != nil {
-					return err
-				}
-			}
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
-			if err != nil {
-				return fmt.Errorf("create health request for channel %q: %w", channel.Name, err)
-			}
-			authorizeAgentRequest(request, channel, assignment)
-			response, err := client.Do(request)
-			if err == nil {
-				io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-				response.Body.Close()
-				if response.StatusCode >= 200 && response.StatusCode < 400 {
-					break
-				}
-				lastFailure = fmt.Sprintf("last health response was HTTP %d", response.StatusCode)
-			} else {
-				// Do not retain response bodies or a URL-bearing transport error.
-				// Either may contain Project credentials.
-				lastFailure = "health connection failed"
-			}
-			select {
-			case <-ctx.Done():
-				return readinessFailure(ctx.Err())
-			case <-time.After(250 * time.Millisecond):
-			}
+		control, err := dialControl(ctx, assignment, "child", token)
+		if err == nil {
+			backoff.Reset()
+			return control, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case processErr := <-fatal:
+			return nil, processErr
+		case <-time.After(backoff.Next()):
 		}
 	}
-	return nil
 }
 
 func (runtime *childRuntime) readLoop(ctx context.Context, control *controlConnection) error {
 	for {
 		var message Message
-		if err := control.read(&message); err != nil {
+		if err := control.Read(&message); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -285,7 +236,11 @@ func (runtime *childRuntime) readLoop(ctx context.Context, control *controlConne
 			runtime.startHTTPRequest(ctx, message)
 		case "websocket-open":
 			if message.Channel == "language" {
-				runtime.languages.attach(message)
+				if message.AppAuthorization != "" {
+					runtime.sendError(message.StreamID, "invalid App authorization")
+				} else {
+					runtime.languages.Attach(message)
+				}
 			} else {
 				go runtime.openWebSocket(ctx, message)
 			}
@@ -311,7 +266,7 @@ func (runtime *childRuntime) setControl(control *controlConnection) {
 
 func (runtime *childRuntime) send(message Message) error {
 	if (message.Type == "terminal-state" || message.Type == "command-state") && runtime.commands != nil {
-		count := runtime.commands.activeCount()
+		count := runtime.commands.ActiveCount()
 		message.CommandCount = &count
 	}
 	runtime.controlLock.RLock()
@@ -320,576 +275,9 @@ func (runtime *childRuntime) send(message Message) error {
 	if control == nil {
 		return errors.New("Factory control connection is unavailable")
 	}
-	return control.write(message)
-}
-
-func (runtime *childRuntime) handleOperation(message Message) {
-	response := Message{
-		Type:        "operation-response",
-		OperationID: message.OperationID,
-		Action:      message.Action,
-		Process:     message.Process,
-		TerminalID:  message.TerminalID,
-	}
-	if message.OperationID == "" {
-		response.Error = "operation identity is required"
-	} else if strings.HasPrefix(message.Action, "process-") {
-		response.Error = errorText(runtime.processes.action(message.Process, message.Action))
-	} else if message.Action == "terminal-close" {
-		response.Error = errorText(runtime.terminals.close(message.TerminalID))
-	} else if strings.HasPrefix(message.Action, "file-") && runtime.files != nil && runtime.processes != nil && runtime.processes.development {
-		var input ContainerFileRequest
-		var value any
-		err := json.Unmarshal([]byte(message.Data), &input)
-		if err == nil {
-			switch message.Action {
-			case "file-context":
-				context := map[string]any{"workspaceFolder": runtime.assignment.WorkspaceFolder, "userID": os.Geteuid()}
-				if runtime.assignment.CheckoutFolder != "" {
-					context["checkoutFolder"] = runtime.assignment.CheckoutFolder
-				}
-				value = context
-			case "file-stat":
-				value, err = runtime.files.stat(input)
-			case "file-read":
-				value, err = runtime.files.read(input)
-			case "file-list":
-				value, err = runtime.files.list(input)
-			case "file-mkdir", "file-delete", "file-rename":
-				value, err = runtime.files.mutate(message.Action, input)
-			case "file-upload-begin":
-				value, err = runtime.files.beginUpload(input)
-			case "file-upload-chunk":
-				value, err = runtime.files.upload(input)
-			case "file-upload-commit":
-				value, err = runtime.files.commitUpload(input)
-			case "file-download-begin":
-				value, err = runtime.files.beginDownload(input)
-			case "file-download-chunk":
-				value, err = runtime.files.download(input)
-			case "file-release":
-				err = runtime.files.release(input)
-				value = map[string]bool{"released": err == nil}
-			case "file-transfer-status":
-				value, err = runtime.files.status(input)
-			default:
-				err = errors.New("unsupported container file operation")
-			}
-		}
-		response.Error = errorText(err)
-		if err == nil {
-			data, encodeErr := json.Marshal(value)
-			response.Error = errorText(encodeErr)
-			response.Data = string(data)
-		}
-	} else if strings.HasPrefix(message.Action, "pty-") && runtime.processes != nil && runtime.processes.development && runtime.terminals != nil {
-		var view CommandView
-		var err error
-		switch message.Action {
-		case "pty-open":
-			var input CommandRequest
-			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
-				view, err = runtime.terminals.openCommand(input)
-			}
-		case "pty-read", "pty-close":
-			var input CommandRead
-			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
-				if message.Action == "pty-read" {
-					view, err = runtime.terminals.readCommand(input)
-				} else {
-					view, err = runtime.terminals.closeCommand(input)
-				}
-			}
-		case "pty-input", "pty-resize":
-			var input terminalCommandInput
-			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
-				view, err = runtime.terminals.inputCommand(input, message.Action == "pty-resize")
-			}
-		default:
-			err = errors.New("unsupported PTY operation")
-		}
-		response.Error = errorText(err)
-		if err == nil {
-			data, encodeErr := json.Marshal(view)
-			response.Error = errorText(encodeErr)
-			response.Data = string(data)
-		}
-	} else if strings.HasPrefix(message.Action, "command-") && runtime.processes != nil && runtime.processes.development && runtime.commands != nil {
-		var view CommandView
-		var err error
-		if message.Action == "command-start" {
-			var input CommandRequest
-			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
-				view, err = runtime.commands.start(input)
-			}
-		} else {
-			var input CommandRead
-			if err = json.Unmarshal([]byte(message.Data), &input); err == nil {
-				switch message.Action {
-				case "command-read":
-					view, err = runtime.commands.read(input)
-				case "command-cancel":
-					view, err = runtime.commands.cancel(input.ID)
-				default:
-					err = errors.New("unsupported command operation")
-				}
-			}
-		}
-		response.Error = errorText(err)
-		if err == nil {
-			data, encodeErr := json.Marshal(view)
-			response.Error = errorText(encodeErr)
-			response.Data = string(data)
-		}
-	} else {
-		response.Error = "unsupported child operation"
-	}
-	_ = runtime.send(response)
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-func (runtime *childRuntime) startHTTPRequest(ctx context.Context, message Message) {
-	if message.StreamID == "" {
-		return
-	}
-	requestContext, cancel := context.WithCancel(ctx)
-	channel, declared := runtime.assignment.channel(message.Channel)
-	path, pathError := url.ParseRequestURI(message.Path)
-	// Native Inbox, retained-message and session reads establish recovery/Stop
-	// facts. They must observe prior mutations; live log subscriptions must not
-	// hold the admission queue for their lifetime.
-	recoveryRead := message.Method == http.MethodGet && pathError == nil &&
-		(strings.HasPrefix(path.Path, "/api/session/") || path.Path == "/api/session") &&
-		!strings.HasSuffix(path.Path, "/log")
-	mutation := declared && channel.Kind == "agent" && message.Method != http.MethodGet && message.Method != http.MethodHead
-	ordered := mutation || (declared && channel.Kind == "agent" && recoveryRead)
-	if ordered {
-		cancel()
-		// Bound observation, not model execution. A mutation timeout before
-		// headers is unknown admission and blocks later ordered requests.
-		requestContext, cancel = context.WithTimeout(ctx, orderedRequestTimeout)
-	}
-	runtime.streamLock.Lock()
-	if runtime.httpCancels == nil {
-		runtime.httpCancels = make(map[string]context.CancelFunc)
-	}
-	if _, exists := runtime.httpCancels[message.StreamID]; exists {
-		runtime.streamLock.Unlock()
-		cancel()
-		runtime.sendError(message.StreamID, "stream already exists")
-		return
-	}
-	runtime.httpCancels[message.StreamID] = cancel
-	if mutation {
-		if runtime.agentMutations == nil {
-			runtime.agentMutations = make(map[string]bool)
-		}
-		runtime.agentMutations[message.StreamID] = true
-	}
-	runtime.streamLock.Unlock()
-	execute := func() {
-		defer func() {
-			cancel()
-			runtime.streamLock.Lock()
-			delete(runtime.httpCancels, message.StreamID)
-			delete(runtime.agentMutations, message.StreamID)
-			runtime.streamLock.Unlock()
-		}()
-		if ordered && runtime.agentUncertain {
-			runtime.sendError(message.StreamID, "Agent request outcome is uncertain; runtime recovery is required")
-			return
-		}
-		uncertain := runtime.handleHTTPRequest(requestContext, message)
-		if mutation && uncertain {
-			runtime.agentUncertain = true
-		}
-	}
-	if !ordered {
-		go execute()
-		return
-	}
-	// Enqueue synchronously in control-frame order. A Stop must not overtake
-	// the durable admission of a previously forwarded OpenCode prompt.
-	select {
-	case runtime.agentRequests <- execute:
-	default:
-		cancel()
-		runtime.streamLock.Lock()
-		delete(runtime.httpCancels, message.StreamID)
-		delete(runtime.agentMutations, message.StreamID)
-		runtime.streamLock.Unlock()
-		runtime.sendError(message.StreamID, "Agent request queue is full")
-	}
-}
-
-func (runtime *childRuntime) forwardAgentRequests(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case execute := <-runtime.agentRequests:
-			execute()
-		}
-	}
-}
-
-// Only loss before response headers leaves upstream admission unknown. All
-// pinned OpenCode mutation handlers complete their durable operation before
-// responding. Stream delivery failure does not undo that admission.
-func (runtime *childRuntime) handleHTTPRequest(ctx context.Context, message Message) bool {
-	if message.StreamID == "" {
-		return false
-	}
-	channel, ok := runtime.assignment.channel(message.Channel)
-	if !ok {
-		runtime.sendError(message.StreamID, "unknown channel")
-		return false
-	}
-	requestURL, err := channelURL(channel, message.Path, false)
-	if err != nil {
-		runtime.sendError(message.StreamID, err.Error())
-		return false
-	}
-	body, err := base64.StdEncoding.DecodeString(message.Data)
-	if err != nil || len(body) > maxMessageBytes {
-		runtime.sendError(message.StreamID, "invalid request body")
-		return false
-	}
-	request, err := http.NewRequestWithContext(ctx, message.Method, requestURL, bytes.NewReader(body))
-	if err != nil {
-		runtime.sendError(message.StreamID, "invalid request")
-		return false
-	}
-	copyRequestHeaders(request.Header, message.Headers)
-	if channel.Kind == "app" {
-		host, err := appProxyHost(channel, message.Headers)
-		if err != nil {
-			runtime.sendError(message.StreamID, err.Error())
-			return false
-		}
-		if host != "" {
-			request.Host = host
-		}
-		// Factory has authenticated this App request and removed all Factory
-		// credentials. App cookies remain scoped to their runtime path/origin.
-		if cookie := message.Headers["cookie"]; cookie != "" {
-			request.Header.Set("Cookie", cookie)
-		}
-	}
-	authorizeAgentRequest(request, channel, runtime.assignment)
-	if channel.Kind == "ide" && validTheiaConnectionToken(message.TheiaConnectionToken) {
-		request.AddCookie(&http.Cookie{Name: "theia-connection-token", Value: message.TheiaConnectionToken})
-	}
-	response, err := runtime.httpClient.Do(request)
-	if err != nil {
-		runtime.sendError(message.StreamID, "channel request failed")
-		return true
-	}
-	defer response.Body.Close()
-	if err := runtime.send(Message{
-		Type:     "http-response",
-		StreamID: message.StreamID,
-		Status:   response.StatusCode,
-		Headers:  flattenHeaders(response.Header),
-	}); err != nil {
-		return false
-	}
-	// Native subscriptions have no lifetime byte limit. Each frame is still
-	// bounded and synchronously forwarded; Factory cancels slow readers at its
-	// bounded receive buffer. Ordinary responses retain their total byte limit.
-	parts := strings.Split(request.URL.Path, "/")
-	followingLog := len(parts) == 5 && parts[1] == "api" && parts[2] == "session" &&
-		parts[3] != "" && parts[4] == "log" && request.URL.Query().Get("follow") == "true"
-	nativeStream := channel.Kind == "agent" && message.Method == http.MethodGet &&
-		response.StatusCode == http.StatusOK &&
-		strings.EqualFold(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]), "text/event-stream") &&
-		(request.URL.Path == "/api/event" || followingLog)
-	var reader io.Reader = response.Body
-	if !nativeStream {
-		reader = io.LimitReader(response.Body, maxResponseBytes+1)
-	}
-	buffer := make([]byte, 32<<10)
-	total := 0
-	for {
-		count, readErr := reader.Read(buffer)
-		if count > 0 {
-			if !nativeStream {
-				total += count
-				if total > maxResponseBytes {
-					runtime.sendError(message.StreamID, "channel response exceeded limit")
-					return false
-				}
-			}
-			if err := runtime.send(Message{
-				Type:     "stream-data",
-				StreamID: message.StreamID,
-				Data:     base64.StdEncoding.EncodeToString(buffer[:count]),
-			}); err != nil {
-				return false
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			runtime.sendError(message.StreamID, "read channel response")
-			return false
-		}
-	}
-	_ = runtime.send(Message{Type: "stream-end", StreamID: message.StreamID})
-	return false
-}
-
-// Only the declared Agent loopback channel receives the assignment's generation capability.
-// Browser and App headers can neither choose nor override OpenCode server credentials.
-func authorizeAgentRequest(request *http.Request, channel Channel, assignment Assignment) {
-	if channel.Kind != "agent" {
-		return
-	}
-	for _, process := range assignment.Processes {
-		if process.Name != channel.Name {
-			continue
-		}
-		if password := process.Env["OPENCODE_PASSWORD"]; password != "" {
-			request.SetBasicAuth("opencode", password)
-		}
-		return
-	}
-}
-
-func (runtime *childRuntime) openWebSocket(ctx context.Context, message Message) {
-	if message.StreamID == "" {
-		return
-	}
-	if message.Channel == "terminal" {
-		runtime.terminals.attach(message)
-		return
-	}
-	channel, ok := runtime.assignment.channel(message.Channel)
-	if !ok {
-		runtime.sendError(message.StreamID, "unknown channel")
-		return
-	}
-	target, err := channelURL(channel, message.Path, true)
-	if err != nil {
-		runtime.sendError(message.StreamID, err.Error())
-		return
-	}
-	headers := http.Header{}
-	for name, value := range message.Headers {
-		if allowedRequestHeader(name) {
-			headers.Set(name, value)
-		}
-	}
-	if channel.Kind == "app" {
-		host, err := appProxyHost(channel, message.Headers)
-		if err != nil {
-			runtime.sendError(message.StreamID, err.Error())
-			return
-		}
-		if host != "" {
-			headers.Set("Host", host)
-		}
-		if cookie := message.Headers["cookie"]; cookie != "" {
-			headers.Set("Cookie", cookie)
-		}
-	}
-	if channel.Kind == "ide" && validTheiaConnectionToken(message.TheiaConnectionToken) {
-		headers.Add("Cookie", "theia-connection-token="+message.TheiaConnectionToken)
-	}
-	dialer := websocket.Dialer{HandshakeTimeout: controlHandshakeTimeout}
-	if message.Protocol != "" {
-		dialer.Subprotocols = []string{message.Protocol}
-	}
-	connection, response, err := dialer.DialContext(ctx, target, headers)
-	if response != nil && response.Body != nil {
-		defer response.Body.Close()
-	}
-	if err != nil {
-		runtime.sendError(message.StreamID, "channel WebSocket failed")
-		return
-	}
-	connection.SetReadLimit(maxMessageBytes)
-	runtime.streamLock.Lock()
-	if _, exists := runtime.streams[message.StreamID]; exists {
-		runtime.streamLock.Unlock()
-		connection.Close()
-		runtime.sendError(message.StreamID, "stream already exists")
-		return
-	}
-	runtime.streams[message.StreamID] = connection
-	runtime.streamLock.Unlock()
-	if err := runtime.send(Message{Type: "websocket-ready", StreamID: message.StreamID, Protocol: connection.Subprotocol()}); err != nil {
-		runtime.closeStream(message.StreamID)
-		return
-	}
-	for {
-		messageType, data, err := connection.ReadMessage()
-		if err != nil {
-			break
-		}
-		if len(data) > maxMessageBytes {
-			break
-		}
-		if err := runtime.send(Message{
-			Type:        "websocket-message",
-			StreamID:    message.StreamID,
-			MessageType: messageType,
-			Data:        base64.StdEncoding.EncodeToString(data),
-		}); err != nil {
-			break
-		}
-	}
-	runtime.closeStream(message.StreamID)
-	_ = runtime.send(Message{Type: "stream-close", StreamID: message.StreamID})
-}
-
-func (runtime *childRuntime) writeWebSocket(message Message) {
-	if runtime.languages != nil {
-		if language, err := runtime.languages.write(message); language {
-			if err != nil {
-				runtime.sendError(message.StreamID, err.Error())
-				runtime.languages.close(message.StreamID)
-			}
-			return
-		}
-	}
-	if terminal, err := runtime.terminals.write(message); terminal {
-		if err != nil {
-			runtime.sendError(message.StreamID, err.Error())
-		}
-		return
-	}
-	data, err := base64.StdEncoding.DecodeString(message.Data)
-	if err != nil || len(data) > maxMessageBytes || (message.MessageType != websocket.TextMessage && message.MessageType != websocket.BinaryMessage) {
-		runtime.sendError(message.StreamID, "invalid WebSocket message")
-		return
-	}
-	runtime.streamLock.Lock()
-	connection := runtime.streams[message.StreamID]
-	runtime.streamLock.Unlock()
-	if connection == nil {
-		runtime.sendError(message.StreamID, "unknown stream")
-		return
-	}
-	if err := connection.WriteMessage(message.MessageType, data); err != nil {
-		runtime.closeStream(message.StreamID)
-	}
-}
-
-func (runtime *childRuntime) closeStream(streamID string) {
-	if runtime.languages != nil && runtime.languages.close(streamID) {
-		return
-	}
-	if runtime.terminals != nil && runtime.terminals.detach(streamID) {
-		return
-	}
-	runtime.streamLock.Lock()
-	connection := runtime.streams[streamID]
-	cancel := runtime.httpCancels[streamID]
-	if runtime.agentMutations[streamID] {
-		// OpenCode admission is uninterruptible. Keep observing its response
-		// even after the Factory HTTP consumer detaches, or Stop could pass it.
-		// Ordered reads have no external effect and must release this queue
-		// when their consumer times out or disconnects.
-		cancel = nil
-	}
-	delete(runtime.streams, streamID)
-	runtime.streamLock.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if connection != nil {
-		connection.Close()
-	}
-}
-
-func (runtime *childRuntime) disconnectStreams() {
-	runtime.streamLock.Lock()
-	streams := runtime.streams
-	cancels := make([]context.CancelFunc, 0, len(runtime.httpCancels))
-	for streamID, cancel := range runtime.httpCancels {
-		if !runtime.agentMutations[streamID] {
-			cancels = append(cancels, cancel)
-		}
-	}
-	runtime.streams = make(map[string]*websocket.Conn)
-	runtime.streamLock.Unlock()
-	for _, cancel := range cancels {
-		cancel()
-	}
-	for _, connection := range streams {
-		connection.Close()
-	}
-	runtime.terminals.detachAll()
-	if runtime.languages != nil {
-		runtime.languages.closeAll()
-	}
+	return control.Write(message)
 }
 
 func (runtime *childRuntime) sendError(streamID string, message string) {
 	_ = runtime.send(Message{Type: "stream-error", StreamID: streamID, Error: message})
-}
-
-func channelURL(channel Channel, path string, websocketTarget bool) (string, error) {
-	if channel.Kind == "ide" || validateTarget(channel.Target) != nil {
-		return "", errors.New("channel has no HTTP endpoint")
-	}
-	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
-		return "", errors.New("invalid channel path")
-	}
-	reference, err := url.Parse(path)
-	if err != nil || reference.IsAbs() || reference.Host != "" {
-		return "", errors.New("invalid channel path")
-	}
-	base, _ := url.Parse(channel.Target)
-	base.Path = reference.Path
-	base.RawPath = reference.RawPath
-	base.RawQuery = reference.RawQuery
-	if websocketTarget {
-		base.Scheme = "ws"
-	}
-	return base.String(), nil
-}
-
-func copyRequestHeaders(destination http.Header, source map[string]string) {
-	for name, value := range source {
-		if allowedRequestHeader(name) {
-			destination.Set(name, value)
-		}
-	}
-}
-
-func allowedRequestHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "authorization", "cookie", "connection", "host", "proxy-authorization", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions", "upgrade":
-		return false
-	default:
-		return true
-	}
-}
-
-func validTheiaConnectionToken(token string) bool {
-	if token == "" || len(token) > 256 {
-		return false
-	}
-	for _, character := range token {
-		if (character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			character == '.' || character == '_' || character == '~' || character == '-' {
-			continue
-		}
-		return false
-	}
-	return true
 }

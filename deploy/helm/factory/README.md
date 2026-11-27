@@ -10,17 +10,30 @@ the live ARM product path from packaging, source-launcher and other architecture
 
 - Linux control-plane nodes, arm64 or amd64. Execution workers must match the selected
   Linux arm64 or amd64 identity for the pinned
-  gVisor ROOTFS profile. Install the official Substrate API, durable native object storage and the
+  pinned gVisor profile. Install the official Substrate API, durable native object storage and the
   exact SandboxConfig/WorkerPool described in [the native profile](../../substrate/README.md).
 - Native API serving trust through the live `servicedns.podcert.ate.dev/identity` ClusterTrustBundle.
-  The cluster must support that projection and the application's 600-second audience-bound token.
+  The cluster must support that projection, the application's 600-second audience-bound token,
+  and Substrate's `podidentity.podcert.ate.dev/identity` Pod certificate signer.
+  The native Router must allow the Factory Pod's exact SPIFFE identity, normally
+  `spiffe://cluster.local/ns/NAMESPACE/sa/SERVICEACCOUNT`. Use this chart's actual
+  Namespace and generated ServiceAccount; do not allow Project/Workspace identities.
+  This is operator-owned native Router configuration, not a Factory API or a chart
+  mutation of Substrate. Follow the
+  [exact-identity commissioning procedure](../../substrate/README.md#commission-the-factory-router-identity)
+  before accepting Router-dependent work.
 - A dynamic RWO StorageClass with POSIX permissions and ordinary atomic file operations. Set
   `storageClass` explicitly if the cluster has no suitable default. Bootstrap performs an exactly
   owned write/read check as UID 1000; it does not assume a worker's old host UID mapping.
 - A digest-pinned Factory image containing the bridge, Source service and exact artifact bundle,
   and a digest-pinned native Actor image selected in the installation configuration. Publish those
-  images where the cluster and Actor-private Docker can pull them. Node image-pull trust remains
+  images where the cluster and native workers can pull them. Node image-pull trust remains
   an operator prerequisite, not a privileged installer DaemonSet.
+  Private Project images also require operator commissioning of the pinned upstream worker's
+  image-credential provider before Start. Factory supplies no custom credential provider or
+  per-Project registry settings. Missing pull authority or trust surfaces as a native failure,
+  never an anonymous fallback or substitution of a public image. Follow the
+  [native image contract](../../substrate/README.md#project-images-and-native-preparation).
   For a private registry CA, `registryCASecret` supplies a public `ca.crt` to new native
   environments, including browser-image downloads. It adds neither credentials nor egress access.
 - Factory and Forgejo public TLS origins and reachable DNS. Native Git
@@ -35,10 +48,56 @@ patch/delete, Kubernetes RBAC administration, wildcard, bind, escalate or impers
 Native Actor lifecycle uses the scoped Substrate API. Actor/Project code receives neither the
 Factory ServiceAccount nor a host Docker socket.
 
+The Factory Pod alone receives the rotating Router client certificate/key bundle at
+`/run/factory/substrate-control/credential-bundle.pem`. The native Browser runs in its own
+Actor and receives neither that identity nor Project Source/model credentials. Browser
+templates and Actors use the existing Attempt's Atespace; Factory persists their original
+UIDs and confirms their deletion independently of the Parent. Their finite Actor limits
+also count against the existing compute allowance.
+In-cluster Router transport defaults to `wss://atenet-router.ate-system.svc`, with serving
+trust from `/run/factory/substrate-control/ca.pem`. An explicitly configured external
+source-development transport may set `FACTORY_SUBSTRATE_ROUTER_URL`,
+`FACTORY_SUBSTRATE_ROUTER_CA_FILE` and `FACTORY_SUBSTRATE_ROUTER_CREDENTIAL_FILE`;
+hostname verification and mTLS stay required.
+Kubelet rotates both projections; keep the whole-volume read-only mount, not a `subPath`
+or a copied certificate. The Router client's SPIFFE identity is distinct from the API
+Editor's audience-bound token and the separately rotated global Owner token. Never borrow
+`ate-system/atenet-client` credentials or mount the Factory identity in any Actor.
+
 Substrate v1.0.0 requires a separate global Owner credential for Atespace creation. Put its
 short-lived token in the provisioner Secret and rotate it before expiry. Actor calls use the
 application's projected Editor identity. The provisioner credential is not passed to an Actor,
 an editor backend or the Helm preflight. Its holder is still a trusted native global Owner.
+
+### Native Starter images
+
+The complete release artifact bundle includes prepared `starter-work` and `starter-postgres`
+images. Startup selects their catalog for the configured native workers, independently of the
+control-plane host. Helm does not build images or substitute upstream root images.
+
+To deliberately override these installation defaults, set `starterImages.platform` to the
+selected native worker platform (`linux/arm64` or `linux/amd64`), and set
+`starterImages.development` and `starterImages.postgres` to immutable `@sha256` image references.
+The recipes live under `templates/starter-app/.factory/images/`. An incomplete artifact bundle or
+an override for the wrong platform is rejected, never repaired with another image.
+
+The chart passes the catalog as `FACTORY_STARTER_IMAGES`. Source development uses the same
+environment variable containing a JSON object with `platform`, `development` and `postgres`.
+Without an override, source publication builds these recipes for the configured workers and
+retains their immutable references in the same artifact generation. Startup and disposable
+fixture preparation consume that generation without rebuilding it.
+
+Imported Projects supply their own immutable Work/service image digests in the approved
+ActorTemplate. Their normal OCI workflow builds and publishes those images outside Factory;
+Helm installation and Project Environment saves do not build or publish them.
+Environment settings contain only variables, with separate Runtime and Verification grants.
+Application secrets and private-package tokens belong there, not native image-pull credentials
+or build-time grants.
+
+New native owners default to a finite reservation of 1,500m CPU and 3,072 MiB for the whole Actor,
+including its Work and service containers. The installation's native `resources` selection can
+override it. Factory freezes that selection before creation; changing defaults never resizes or
+reinterprets an existing Actor. Projects still need workload-specific sizing and WorkerPool capacity.
 
 ## Hardening
 
@@ -159,6 +218,20 @@ creating it again. Do not label Project execution or editor namespaces. This gra
 network reachability, not native authority; the separate Owner/Editor credentials
 and verified serving TLS are still required.
 
+Commission the exact Router identity from the rendered Factory Deployment's
+`serviceAccountName` and this selected Namespace. For release `factory` in Namespace
+`factory`, it is `spiffe://cluster.local/ns/factory/sa/factory`, with API Editor principal
+`user:system:serviceaccount:factory:factory`. For other releases, inspect the render:
+the generated name is truncated to 40 characters with a trailing hyphen removed.
+A Router allowing only `spiffe://cluster.local/ns/ate-system/sa/atenet-client` does not
+admit Factory merely because it has the correct certificate and API grants.
+The [native operator procedure](../../substrate/README.md#commission-the-factory-router-identity)
+uses the official repeated allowlist flag to append only that exact identity while preserving
+all existing clients. It provides an offline UID/resourceVersion-guarded JSON Patch plan;
+only the native operator applies it and owns the rollout/live gate. Keep the complete list
+in the official installer's configuration across regeneration. No wildcard, trust change,
+Actor mount or Factory template change is needed.
+
 Configure the operator's Ingress controller to route HTTPS, not just load a certificate.
 With Traefik, enable [TLS on the HTTPS entrypoint](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/),
 or supply its TLS router annotations through `ingress.annotations`. A certificate Secret
@@ -217,12 +290,22 @@ the installation's private API origin. Both identities stay fixed for that contr
 The Project must still name the configured Forge owner and one repository. Other hosts, ports,
 URL credentials, query strings, fragments and nested repository paths are refused before branch
 operations. Native Git continues to use the admitted public TLS destination.
+Registration also requires the technical Project slug to match its managed repository name.
+The display name remains free-form. A different repository name is rejected before Project,
+membership or setup work is persisted, so it cannot poison later Forge access reconciliation.
+Registration confirms the configured branch through the Factory Forgejo connection: it must be
+the repository's actual default branch, not an alternate checkout. A mismatch or unconfirmed
+lookup refuses Project/setup writes. The remote read holds no account-policy lock; authorization
+is rechecked before persistence.
 
 `helm test` is read-only. It observes the exact SandboxConfig, original WorkerPool, suitable Ready
 worker of the selected architecture, selected StorageClass and the release Namespace's
 native API admission label. It creates no Actor, namespace, privileged probe or claim,
 and receives no provisioner credential. A pass does not prove synchronized assets, an actual Actor
-assignment, TLS/egress enforcement, Starter startup, Verification or Delivery. Run the explicit
+assignment, Router allowlist admission or credential rotation, TLS/egress enforcement,
+Starter startup, Verification or Delivery. Router commissioning still needs the actual Factory
+Pod's native client/Actor handshake and negative-admission check; local profile and chart tests
+are not that live evidence. Run the explicit
 native live lanes for those gates; controller fixtures are not their substitute.
 The dedicated preflight ServiceAccount and read-only RBAC are normal release
 resources, retained for the test Job and removed with the release. Only the Job
@@ -606,11 +689,26 @@ verifying its immutable bindings and Source/Writer safeguards. A native-safe ind
 and complete restore proof remain unqualified. The read-only backup archive checker above remains
 available.
 
-Factory backups contain product intent and independently retained Source/objects. They do not
-include the separate official Substrate control-plane database or its native ROOTFS snapshot
-store. Back up those upstream-owned resources through Substrate's own supported operations, with
-matching immutable Actor/snapshot identities. No Factory memory-restore or compatibility layer is
-provided.
+Factory backups contain product intent, Git/history, objects and Factory state. An independent
+initial checkout can be present in that state, but after first admission the Workspace's current
+canonical files belong to its retained native Actor. An old initial checkout or Source object
+is not a backup of newer Actor files. Ordinary Pause does not export or transfer those files.
+
+These sets do not include the separate official Substrate control-plane database or its native
+snapshot store. The operator must also back up and rehearse those upstream-owned stores, roles,
+trust and immutable Actor/ActorTemplate/snapshot identities before claiming recovery of admitted
+Workspaces. Use ordinary PostgreSQL and the configured object-store's backup operations; do not
+invent replacement Actors or rewrite Factory bindings to point at them. Include every file
+referenced by each completed snapshot manifest, not only its URI or a node-local cache. In the
+upstream kind profile, `gs://ate-snapshots/` is backed by the configured local RustFS S3 service;
+the URI scheme alone does not identify the storage provider. No Factory memory-restore,
+cross-store transaction or compatibility layer is provided.
+
+Where the commissioned native profile binds Kubernetes identities, retain or recover its
+SandboxConfig, original WorkerPool and Node UIDs and Kubernetes trust as well. Recreating the
+same resource names is not recovery of Factory's admitted placement. A rehearsal must prove
+physical API/routing isolation and authorization before enabling workers or Factory recovery.
+Restored resource metadata alone does not prove volume, workload or Actor process/RAM recovery.
 
 ### Restore
 
@@ -1154,22 +1252,26 @@ source-development installation are not part of this chart.
 
 ## Operating Factory
 
-Normal authenticated Workspace commands own Start, Pause and Stop. Reading or saving Source does
+Normal authenticated Workspace commands own Start/Continue and durable Pause. Reading or saving Source does
 not start inference. Initial IDE Source access creates only its Source Workspace and pinned Git
 checkout, without an Actor or Project execution. Its durable initialization identity and publication
 confirmation prevent a missing retained tree from being silently cloned again. First Start freezes
-the latest saved files and imports them into the first actual native Actor before Docker starts;
-this Source export is not a Substrate ROOTFS snapshot.
-Paused compute permits editing only after completed durable ROOTFS and
-independent Source handoff. Stop requires independent Source and exact-UID native Delete; an
-unconfirmed pause or lost Delete response is not a successful Stop. A subsequent explicit Start
-selects a new immutable generation only after cleanup and the latest confirmed Source export.
-Resume and Pause dispatch facts are immutable for the original Actor and preceding ROOTFS
+the latest saved files and imports them into the first actual native Actor before Project entry;
+this Source export is not a Substrate snapshot.
+After that first admission, the same native Actor remains canonical Source owner. Pause requires
+its confirmed durable native snapshot, not another Source export or writer handoff.
+Factory prefers MEMORY and supports native ROOTFS cold continuation; a preference or snapshot label
+alone does not prove process continuity. Current file access may resume the original Actor without
+starting inference or waiting for App health. Native cold entry validates the private import identity
+and retains the current checkout rather than reimporting its initial seed.
+Routine halt does not call native Delete. Destructive removal is a separate explicit operation;
+isolated Verification, Browser and Staging resources retain their own exact-UID cleanup.
+Resume and Pause dispatch facts are immutable for the original Actor and preceding native
 checkpoint. A lost reply while the Actor still shows its preceding state does not authorize
 another dispatch. A `SUSPENDING` Actor with the original dispatched intent and exact next
 snapshot may continue Substrate's idempotent Suspend workflow. Substrate reuses that snapshot;
 Factory neither clears dispatch facts nor requests a new capture. Only an independently observed
-`SUSPENDED` Actor with that exact completed durable snapshot permits Source handoff or the next
+`SUSPENDED` Actor with that exact completed durable snapshot permits the next
 deliberate Resume.
 
 For active Coding, Compute Stop must first confirm the existing Agent Stop, including queued
@@ -1185,25 +1287,30 @@ a previously completed input after normal idle Pause and a subsequent explicit
 Coding follow-up. Running or queued-input variants, historical failed Stops and
 the full amd64 journey remain unqualified; package checks do not extend that scope.
 
-An upgrade can retain an unconfirmed Coding Stop only after re-observing its original
-suspended Actor, exact completed durable ROOTFS, native template and recorded independent Source handoff
-under the Workspace lock. The maintenance Job uses the existing Editor identity for these reads;
-it has no provisioner credential, signing key or state volume. Busy Workspaces, changed or missing
-identities, unresolved lifecycle dispatches and existing Stop workers still refuse the upgrade.
-The hook does not check live Source-process health. This does not confirm Stop,
-cancel queued input or resume compute. The original Stop remains pending for the normal
-controller after startup.
+An upgrade can retain an unconfirmed Coding Stop after re-observing the original Actor and
+immutable template under the Workspace lock. An admitted canonical Actor-owned Source stays in
+that Actor: a recorded ready Actor must still be RUNNING; a paused Actor needs its exact completed
+durable native snapshot. The hook does not require exporting canonical Source or pausing compute
+just to replace the control plane. Already independent Source still requires its exact durable
+snapshot and handoff proof.
 
-Native prebuild, Verification, Staging replacement and publication use the existing product owners,
+The maintenance Job uses the existing Editor identity for these reads; it has no provisioner
+credential, CA signing key or state volume. Busy Workspaces, changed or missing identities,
+unresolved lifecycle dispatches and existing Stop workers still refuse the upgrade. The hook
+does not check live Source-process health or establish quiescence. It neither confirms Stop,
+cancels queued input nor resumes compute. The original Stop barrier remains for normal
+controller reconciliation after startup; new execution is not authorized by retention.
+
+Native Verification, Staging replacement and publication use the existing product owners,
 original revision/environment/job intents and Substrate operations. Verification and independent
 review name the exact commit. Delivery still requires its deliberate human approval or the explicit
-eligible Project delegation. No worker reserve, warmed-memory restore, Terraform, generic runtime
-provider or private native fork is involved.
+eligible Project delegation. No worker reserve, Factory-owned memory-restore controller,
+Terraform, generic runtime provider or private native fork is involved.
 
 Changes to native trust, profile, runtime identity or egress cannot rebind an existing Workspace.
 New image/resource defaults affect fresh owners only; old Actor/template/source identities remain
 fixed. Missing or uncertain observations remain distinct from success. Actor-level budgets are the
-current enforcement boundary; per-inner-container cgroup limits and process continuity are not
+current enforcement boundary; per-Project-container cgroup limits and process continuity are not
 promised.
 A node reboot does not invalidate an acknowledged WorkerPool reservation. Admission still requires
 the original node and pool UIDs, profile, image, reserved budget and current readiness. Unsubmitted
@@ -1219,14 +1326,17 @@ The application packages the official gRPC adapter and Source service. The norma
 Browser tools and independent developer IDE remain exact immutable artifacts. Source is embedded
 in the Factory and Actor images, not published as a separate role. The
 native Actor image is built through [the Substrate image recipe](../../substrate/Runtime.Dockerfile),
-using the pinned rootless bootstrap and Factory tools. Native workers own Actor-private Docker and
-snapshots. Do not use the old runtime-host launcher or Factorybox image as an Actor substitute.
+using the exact immutable Factory tools image. Native workers start the Project containers
+directly and own Actor snapshots; there is no nested Docker or rootless bootstrap image.
+Do not use the old runtime-host launcher or Factorybox image as an Actor substitute.
 
-The distribution workflow builds and signs `substrate-bootstrap` and `substrate-runtime` natively on
-amd64 and arm64, using exact same-commit, same-architecture tool/bootstrap digests. It combines the
+The distribution workflow builds and signs `substrate-runtime` natively on
+amd64 and arm64, using exact same-commit, same-architecture tools digests. It combines the
 Actor manifests only after both package checks. Both control-plane architectures embed
-the same complete four-role artifact catalog: `runtime-host`, `browser-tools`, `developer-ide`
-and `substrate-runtime`. `workloadImage` in the operator's configuration must
+the same complete six-role artifact catalog: `runtime-host`, `browser-tools`, `developer-ide`,
+`substrate-runtime`, `starter-work` and `starter-postgres`. Prepared Starter recipes follow the
+same native architecture/revision publication and manifest ownership; their actual Actor
+qualification is separate from those packaging checks. `workloadImage` in the operator's configuration must
 match its `substrate-runtime` reference; startup refuses a mismatch before installation actions.
 The released chart carries `runtime-artifacts.json`, also supplied as
 `factory-runtime-artifacts-<version>.json`. Chart packaging no longer supplies per-architecture
@@ -1240,7 +1350,7 @@ nonsecret `image-pins.json` owns shared data-service image pins for development,
 checks. Released charts carry that file and render without the source repository.
 
 The Actor package check is networkless and checks architecture, executable versions and packaged
-bootstrap files. It does not start private Docker or a native Actor and is not lifecycle proof.
+tools. It does not start a native Actor and is not lifecycle proof.
 The `release:clean-room` check accepts only the native chart contract and explicit fresh native
 inputs. It validates runtime/TLS inputs and renders the chart before creating an installation
 Namespace. CPU and memory headroom use scheduler reservations, including resizing and
@@ -1351,7 +1461,7 @@ still unqualified and may refuse even without a Project, because capacity admiss
 own WorkerPools. Cleanup requires the saved original Namespace UID and context; an unknown create
 outcome or replacement is never adopted. Do not remove PVCs or reset another installation to
 make this check pass. `--with-sandbox` adds limited Project/Ticket/Wiki browser checks, not the
-complete approved Ticket journey or native Starter, prebuild, Verification and Delivery proofs.
+complete approved Ticket journey or native Starter, Verification and Delivery proofs.
 
 The clean-room backup check uses a local PostgreSQL 16 executable when available. Its automatic
 Docker reader uses the installed chart's exact PostgreSQL image, no network and a read-only copy
@@ -1366,6 +1476,6 @@ TLS/egress checks, concrete commands and the scope of existing evidence. Install
 configuration, normal Workspace/Source commands and isolated product owners have controlled
 regression coverage. Native product acceptance is separate from `helm test` and the clean-room
 command's control-plane receipt. Use the profile's qualification scope for the live Starter,
-Workspace, prebuild, exact-commit Verification/review, Delivery, Staging and publication coverage.
+Workspace, exact-commit Verification/review, Delivery, Staging and publication coverage.
 Neither that scope nor an ARM run qualifies an independent disaster restore, joined-node
 recovery, the source launcher or a full amd64 product journey.

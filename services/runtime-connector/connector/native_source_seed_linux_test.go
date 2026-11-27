@@ -46,6 +46,12 @@ func TestSubstrateSourceRestoreAcceptsTruthfulPreActorSeed(t *testing.T) {
 	if err := validateSourceRestoreLease(reply, reply.Checkpoint.WorkspaceID, reply.ActorUID, 0); err == nil {
 		t.Fatal("seed restore accepted an absent assignment generation")
 	}
+	wire := sourceSeedRestoreJSON()
+	wire["retained"] = false
+	reply = decodeSourceRestoreTest(t, wire)
+	if err := validateSourceRestoreLease(reply, reply.Checkpoint.WorkspaceID, reply.ActorUID, 1); err != nil {
+		t.Fatal("explicit initial import discriminant changed the seed protocol:", err)
+	}
 }
 
 func TestSubstrateSourceRestoreRejectsAmbiguousMissingAndDifferentSeedProvenance(t *testing.T) {
@@ -78,6 +84,7 @@ func TestSubstrateSourceRestoreRejectsAmbiguousMissingAndDifferentSeedProvenance
 			w["checkpointSeedID"], c["seedID"] = strings.Repeat("a", 36), strings.Repeat("a", 36)
 		},
 		"no-provenance": func(w, c map[string]any) { delete(c, "seedID"); w["checkpointSeedID"] = nil },
+		"retained-seed": func(w, c map[string]any) { w["retained"] = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			wire := sourceSeedRestoreJSON()

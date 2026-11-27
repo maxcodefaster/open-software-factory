@@ -10,9 +10,9 @@ test("native idle records Pause under the Workspace lock and never converts snap
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
     // A native snapshot ordinal is not a Factorybox lifecycle-record limit.
-    await f.database.client`UPDATE factory.substrate_binding SET
+    await f.database.client`UPDATE factory.runtime_attempt SET
       observation=jsonb_set(observation,'{status,lastAssignedGeneration}','99'::jsonb)
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      WHERE id=${f.attemptID}`;
     let pauses = 0;
     idle = createIdleCompute(
       f.database,
@@ -39,8 +39,8 @@ test("native idle records Pause under the Workspace lock and never converts snap
     expect(source?.["owner_user_id"]).toBe(f.userID);
     expect(
       (
-        await f.database.client`SELECT deleted_at FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID}`
+        await f.database.client`SELECT deleted_at FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`
       )[0]?.["deleted_at"],
     ).toBeNull();
   } finally {

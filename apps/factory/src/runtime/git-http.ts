@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { factorySigningSecret } from "../../../../packages/auth/src/signing-secret";
-import { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
-import { runEnvironmentCommand } from "../../../../packages/runtime-kubernetes/src/command";
+import { factorySigningSecret } from "#auth/signing-secret";
+import { createForgejoClient } from "#forge/forge";
+import { boundForgeRepositoryFromURL } from "#forge/repository";
+import { runEnvironmentCommand } from "#runtime-kubernetes/command";
 
 const sourceRoot = "/tmp/open-software-factory-runtime-sources";
 

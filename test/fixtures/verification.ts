@@ -1,4 +1,4 @@
-import type { VerificationReceipt } from "../../packages/conversation-domain/src/verification";
+import type { VerificationReceipt } from "#conversation-domain/verification";
 
 export function verificationReceipt(
   commit: string,

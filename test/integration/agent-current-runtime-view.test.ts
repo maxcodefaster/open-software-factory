@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createDatabase } from "#db/client";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
@@ -13,8 +15,6 @@ import {
   insertContextIn,
 } from "../../apps/factory/src/conversations/api";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
-import { createDatabase } from "../../packages/db/src/client";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
@@ -97,14 +97,11 @@ async function successor(owned: Owned, previousState: "stopped" | "failed") {
     await sql`UPDATE factory.runtime_attempt SET state=${previousState} WHERE id=${owned.attemptID}`;
     // Controlled, uncreated native records only. No Actor or runtime controller runs.
     await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,
-      revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent)
       SELECT ${attemptID},project_id,change_id,workspace_id,generation+1,revision,'create-intended',
-        parent_connector_token_hash,child_connector_token_hash,now(),created_by
+        parent_connector_token_hash,now(),created_by,
+        ${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},binding_intent
       FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
-    await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      SELECT ${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},
-        ${`runtime-${attemptID.replaceAll("-", "")}`},intent
-      FROM factory.substrate_binding WHERE runtime_attempt_id=${owned.attemptID}`;
     await freezeRuntimeEnvironment(sql, attemptID);
     await sql`UPDATE factory.change SET runtime_attempt_id=${attemptID} WHERE id=${owned.changeID}`;
   });
@@ -113,11 +110,10 @@ async function successor(owned: Owned, previousState: "stopped" | "failed") {
 
 async function savedState(owned: Owned) {
   return owned.database.client`SELECT row_to_json(change) AS change,row_to_json(session) AS session,
-    row_to_json(attempt) AS attempt,row_to_json(binding) AS binding,row_to_json(turn) AS turn,
+    row_to_json(attempt) AS attempt,row_to_json(turn) AS turn,
     row_to_json(writer) AS writer
     FROM factory.change change JOIN factory.change_agent_session session ON session.change_id=change.id
     JOIN factory.runtime_attempt attempt ON attempt.change_id=change.id
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
     JOIN factory.agent_turn turn ON turn.change_id=change.id
     JOIN factory.change_writer writer ON writer.change_id=change.id
     WHERE change.id=${owned.changeID} ORDER BY attempt.generation`;
@@ -341,7 +337,8 @@ test("missing or corrupt current Coding archive stays unavailable without changi
     const turnID = await saveCompletedTranscript(owned, objects);
     const before = await savedState(owned);
     const [saved] = await owned.database.client<{ key: string }[]>`
-      SELECT manifest_key AS key FROM factory.session_archive WHERE turn_id=${turnID}`;
+      SELECT payload->>'manifestKey' AS key FROM factory.operation
+      WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${turnID}`;
     if (!saved) throw Error("Owned current checkpoint pointer is missing");
     const manifest = objects.blobs.get(saved.key);
     if (!manifest) throw Error("Owned current checkpoint bytes are missing");
@@ -524,6 +521,15 @@ test("a ready same-Workspace successor keeps only confirmed history readable wit
       expect(attemptID).toBe(current.attemptID);
       expect(channel).toBe("agent");
       expect(request.method).toBe("GET");
+      if (new URL(request.url).pathname === "/api/location")
+        return Response.json({
+          directory: "/workspace/project",
+          project: {
+            id: "owned-controlled-project",
+            directory: "/workspace/project",
+            canonical: "/workspace/project",
+          },
+        });
       expect(new URL(request.url).pathname).toBe(`/api/session/${owned.sessionID}/message`);
       return Response.json({
         data: [
@@ -550,7 +556,7 @@ test("a ready same-Workspace successor keeps only confirmed history readable wit
       messagesAvailable: true,
       messages: [expect.objectContaining({ text: "Saved implementation output" })],
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([`GET /api/session/${owned.sessionID}/message`, "GET /api/location"]);
     expect(await savedState(owned)).toEqual(before);
     await owned.database.client`UPDATE factory.change_agent_session
       SET native_session_confirmed_at=NULL WHERE change_id=${owned.changeID}`;

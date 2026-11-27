@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
@@ -8,7 +8,7 @@ import {
   runtimeAttempt,
   ticket,
   verification as verificationRecord,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 

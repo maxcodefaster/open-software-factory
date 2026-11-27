@@ -1,10 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
+import { createDatabase, drizzleTransaction } from "#db/client";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDeliveryCoordination } from "../../apps/factory/src/delivery/coordination";
 import { createChangeIntegration } from "../../apps/factory/src/delivery/integration";
 import { substrateWorkspaceGrantIn } from "../../apps/factory/src/runtime/substrate-grant";
-import { createDatabase, drizzleTransaction } from "../../packages/db/src/client";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import {
@@ -232,10 +232,8 @@ async function databaseFixture() {
     );
     // Controlled stopped/deleted native facts only, never live resource ownership.
     await database.client`UPDATE factory.runtime_attempt SET state='stopped',
-      stop_intended_at=now(),stopped_at=now() WHERE id=${f.attemptID}`;
-    await database.client`UPDATE factory.substrate_binding SET actor_uid=${crypto.randomUUID()},
-      create_attempted_at=now(),delete_intended_at=now(),deleted_at=now()
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      stop_intended_at=now(),actor_uid=${crypto.randomUUID()},
+      create_attempted_at=now(),delete_intended_at=now(),deleted_at=now() WHERE id=${f.attemptID}`;
     expect(await createDeliveryCoordination(database).claim(f.projectID, f.changeID)).toBe(true);
     let frames = 0;
     f.hub.parentOperation = async () => {
@@ -310,9 +308,8 @@ test.each(["takeover", "coding"] as const)(
         commandId: crypto.randomUUID(),
         text: "Continue the retained work",
       };
-      const before = await f.database.client`SELECT attempt.*,binding.*
-        FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-          ON binding.runtime_attempt_id=attempt.id WHERE attempt.id=${f.attemptID}`;
+      const before = await f.database.client`SELECT attempt.*
+        FROM factory.runtime_attempt attempt WHERE attempt.id=${f.attemptID}`;
       const integration = f.integration(async () => {
         await expect(admission.admit(f.changeID, f.userID, next)).rejects.toThrow(
           "Wait for the current commit operation",
@@ -328,9 +325,8 @@ test.each(["takeover", "coding"] as const)(
       expect(failed?.failure).toBe(failed?.error);
       expect(f.frames()).toBe(0);
       expect(
-        await f.database.client`SELECT attempt.*,binding.*
-        FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-          ON binding.runtime_attempt_id=attempt.id WHERE attempt.id=${f.attemptID}`,
+        await f.database.client`SELECT attempt.*
+        FROM factory.runtime_attempt attempt WHERE attempt.id=${f.attemptID}`,
       ).toEqual(before);
       // Reconciliation does not replay the failed operation or start more compute.
       expect(await integration.reconcile(f.changeID, main)).toBe(false);

@@ -160,8 +160,8 @@ test("a Product Contributor manages members without receiving code authority", a
     );
     expect(teammate.ok).toBe(true);
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`members-${projectID}`},'Team workspace','https://example.invalid/members.git','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`members-${projectID}`},'Team workspace','https://example.invalid/members.git','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectID},${userID},'product-contributor',true,${userID})`;
     const login = await command("/api/auth/sign-in/email", { email, password });

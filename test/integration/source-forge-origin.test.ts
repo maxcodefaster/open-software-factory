@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createForgejoClient } from "#forge/forge";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createProjectService } from "../../apps/factory/src/projects/service";
@@ -9,6 +10,7 @@ test("Project public Forge source is admitted and read through its private API w
   const database = host.connect();
   const userID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
+  const registrationSlug = `public-${projectID}`;
   const revision = "a".repeat(40);
   const publicURL = "https://git.owned-source.invalid";
   const calls: string[] = [];
@@ -21,6 +23,14 @@ test("Project public Forge source is admitted and read through its private API w
       expect(request.headers.get("authorization")).toBe("Bearer owned-source-reader-token");
       const url = new URL(request.url);
       calls.push(url.pathname);
+      if (url.pathname === `/api/v1/repos/owned/${registrationSlug}`)
+        return Response.json({
+          name: registrationSlug,
+          owner: { login: "owned" },
+          default_branch: "main",
+        });
+      if (url.pathname === `/api/v1/repos/owned/${registrationSlug}/branches/main`)
+        return Response.json({ name: "main", commit: { id: revision } });
       if (url.pathname === "/api/v1/repos/owned/app/branches/main")
         return Response.json({ name: "main", commit: { id: revision } });
       expect(url.pathname).toBe("/api/v1/repos/owned/app/contents/.factory/system.json");
@@ -58,13 +68,13 @@ test("Project public Forge source is admitted and read through its private API w
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Owned source reader',${`${userID}@factory.invalid`})`;
     await database.client`INSERT INTO factory.project(
-      id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`source-${projectID}`},'Owned source',
-        ${`${publicURL}/owned/app.git`},'main','.devcontainer/devcontainer.json',${userID})`;
+        ${`${publicURL}/owned/app.git`},'main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${userID},'product-contributor',${userID})`;
-    await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-      VALUES(${projectID},'configuration','ready',${crypto.randomUUID()})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+      VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${projectID},${`projects.setup_readiness:${projectID}:configuration`},'ready',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${userID},now())`;
     const previews = createProjectAppPreviews(database, () => {
       throw Error("Source discovery cannot require or commission a Connector");
     });
@@ -134,30 +144,41 @@ test("Project public Forge source is admitted and read through its private API w
       VALUES(${administrator},'Owned registration authority',${`${administrator}@factory.invalid`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${administrator})`;
     let registrations = 0;
+    const registrationForge = createForgejoClient({
+      apiURL: configuration.FACTORY_FORGEJO_API_URL,
+      token: configuration.FACTORY_FORGEJO_TOKEN,
+    });
     const projects = createProjectService({
       database,
       localRepositoryOrigin: forge.url.origin,
       publicRepositoryOrigin: publicURL,
       forgeOwner: "owned",
+      readDefaultBranch: async (repository) =>
+        (await registrationForge.getDefaultBranch(repository)).name,
       onRegistered: async () => {
         registrations++;
       },
     });
     const registration = {
       name: "Owned public source",
-      slug: `public-${projectID}`,
-      repositoryUrl: `${publicURL}/owned/registered.git`,
+      slug: registrationSlug,
+      repositoryUrl: `${publicURL}/owned/${registrationSlug}.git`,
       defaultBranch: "main",
-      devcontainerPath: ".devcontainer/devcontainer.json",
+      actorTemplatePath: ".factory/actor-template.json",
     };
     await expect(projects.register(userID, registration)).rejects.toMatchObject({
       code: "forbidden",
     });
     expect(registrations).toBe(0);
+    expect(calls).toHaveLength(2);
     expect(await projects.register(administrator, registration)).toMatchObject({
       repositoryUrl: registration.repositoryUrl,
     });
     expect(registrations).toBe(1);
+    expect(calls.slice(2)).toEqual([
+      `/api/v1/repos/owned/${registrationSlug}`,
+      `/api/v1/repos/owned/${registrationSlug}/branches/main`,
+    ]);
     await expect(
       projects.register(administrator, {
         ...registration,
@@ -166,6 +187,7 @@ test("Project public Forge source is admitted and read through its private API w
       }),
     ).rejects.toMatchObject({ code: "invalid" });
     expect(registrations).toBe(1);
+    expect(calls).toHaveLength(4);
     expect(
       await database.client`SELECT id FROM factory.runtime_attempt
       WHERE project_id=${projectID}`,
@@ -175,8 +197,8 @@ test("Project public Forge source is admitted and read through its private API w
       WHERE project_id=${projectID}`,
     ).toHaveLength(0);
     expect(
-      await database.client`SELECT project_id FROM factory.staging_preview
-      WHERE project_id=${projectID}`,
+      await database.client`SELECT scope_id AS project_id FROM factory.operation
+      WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${projectID}`,
     ).toHaveLength(0);
   } finally {
     await knowledge?.close();

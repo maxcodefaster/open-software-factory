@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import type { ModelConnectionView } from "#conversation-domain/model-connection";
+import { modelSettingsView } from "#conversation-domain/model-settings";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import type { ModelConnectionView } from "../../packages/conversation-domain/src/model-connection";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 import { test } from "../fixtures/browser-test";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
@@ -294,11 +294,8 @@ test("model permissions save with exact version and retain the draft on conflict
   });
   const settings = await openFactoryModels(page);
   await settings.getByText("Model override permissions", { exact: true }).click();
-  const planning = settings
-    .locator(".model-policy")
-    .filter({ has: page.locator("summary").filter({ hasText: /^Planning permissions$/ }) })
-    .last();
-  await planning.locator("summary").click();
+  await expect(settings.locator(".model-policy details")).toHaveCount(0);
+  const planning = settings.getByRole("group", { name: "Planning permissions", exact: true });
   const override = planning.getByLabel("Allow Project and personal overrides");
   await override.uncheck();
   await settings.getByRole("button", { name: "Save permissions" }).click();

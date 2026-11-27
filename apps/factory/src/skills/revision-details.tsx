@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
-import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
-import { MarkdownReader } from "../markdown-reader";
+import type { SkillRevision } from "#conversation-domain/skills";
+import { MarkdownReader } from "../editor/markdown-reader";
 
 type RevisionDetailsProps = {
   revision: SkillRevision;

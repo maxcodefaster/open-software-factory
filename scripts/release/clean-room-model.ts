@@ -2,7 +2,7 @@
 import {
   kubernetesPodRequestedResources,
   kubernetesResourceQuantity,
-} from "../../packages/runtime-kubernetes/src/worker-resource-admission";
+} from "#runtime-kubernetes/worker-resource-admission";
 import type { NativeCleanRoomValues } from "./clean-room-native";
 
 export const ownerLabel = "factory.dev/clean-room-owner";

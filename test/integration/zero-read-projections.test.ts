@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
+import { zeroQueries, zeroSchema } from "#zero-schema";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("read markers are atomic, content-free, scoped to current membership and private audiences", async () => {
@@ -18,8 +18,8 @@ test("read markers are atomic, content-free, scoped to current membership and pr
     for (const id of [user, colleague, contributor])
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned read proof',${`${id}@read.test`})`;
     for (const id of [project, foreign])
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${id},${`reads-${id}`},'Read proof','https://example.invalid/read.git','main','.devcontainer/devcontainer.json',${user})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${id},${`reads-${id}`},'Read proof','https://example.invalid/read.git','main','.factory/actor-template.json',${user})`;
     for (const [id, role] of [
       [user, "developer"],
       [colleague, "developer"],
@@ -74,7 +74,9 @@ test("read markers are atomic, content-free, scoped to current membership and pr
     expect(await read(colleague, project, true)).toEqual([]);
     expect(await read(user, ticket, false, foreign)).toEqual([]);
     await database.client`DELETE FROM factory.read_version WHERE scope='inbox'`;
-    await database.client`INSERT INTO factory.ticket_follow(ticket_id,user_id,following) VALUES(${ticket},${user},true)`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'tickets.follow','ticket',${ticket},${`tickets.follow:${ticket}:${user}`},'following',
+        ${JSON.stringify({ ticketId: ticket, userId: user, following: true })}::text::jsonb)`;
     const personalInbox = (userId: string) =>
       zero.run(
         zeroQueries.readVersions.list.fn({
@@ -118,8 +120,8 @@ test("bounded planning reads retain history search and subscribe to only the sel
   const leadingZero = "00000100-0000-4000-8000-000000000000";
   try {
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${user},'Owned bounded proof',${`${user}@read.test`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`reads-${project}`},'Read proof','https://example.invalid/read.git','main','.devcontainer/devcontainer.json',${user})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`reads-${project}`},'Read proof','https://example.invalid/read.git','main','.factory/actor-template.json',${user})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${user},'developer',${user})`;
     for (let index = 0; index < 53; index++)

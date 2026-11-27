@@ -1,5 +1,19 @@
 {{- $_ := required "substrate.workspaceConfigurationSecret is required: Factory has only native Substrate execution" .Values.substrate.workspaceConfigurationSecret }}
 {{- $_ := required "substrate.provisionerTokenSecret is required for native Workspace provisioning" .Values.substrate.provisionerTokenSecret }}
+{{- with .Values.starterImages }}
+{{- if not (and (kindIs "map" .) (eq (len .) 3)) }}
+{{- fail "starterImages requires exactly platform, development and postgres" }}
+{{- end }}
+{{- if not (has .platform (list "linux/arm64" "linux/amd64")) }}
+{{- fail "starterImages.platform must select linux/arm64 or linux/amd64" }}
+{{- end }}
+{{- range $key := list "development" "postgres" }}
+{{- $image := required (printf "starterImages.%s requires a published image" $key) (get $.Values.starterImages $key) }}
+{{- if not (regexMatch "^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$" $image) }}
+{{- fail (printf "starterImages.%s requires an immutable @sha256 image" $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -39,6 +53,9 @@ data:
   FACTORY_FORGEJO_OWNER: "factory-mutation"
   FACTORY_FORGEJO_POD: "{{ include "factory.name" . }}-forgejo-0"
   FACTORY_HELM_RELEASE: {{ .Release.Name | quote }}
+  {{- with .Values.starterImages }}
+  FACTORY_STARTER_IMAGES: {{ toJson . | quote }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

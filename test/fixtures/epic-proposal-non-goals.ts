@@ -1,4 +1,4 @@
-import { epicProposalInput } from "../../packages/conversation-domain/src/epic-proposal";
+import { epicProposalInput } from "#conversation-domain/epic-proposal";
 
 export const epicNonGoalsKey = "epic-proposal:isolated-user:non-goals";
 export const correctedHomeCriterion = 'Home displays exactly "Welcome back to Factory."';

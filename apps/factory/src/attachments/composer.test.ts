@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  attachmentIDs,
-  attachmentMarkdown,
-} from "../../../../packages/conversation-domain/src/attachments";
+import { attachmentIDs, attachmentMarkdown } from "#conversation-domain/attachments";
 import {
   readAttachmentContent,
   restoreAttachmentContent,

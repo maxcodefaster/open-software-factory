@@ -43,6 +43,7 @@ type File struct {
 type Source struct {
 	root        *os.File
 	archiveRoot *os.File
+	bundleReads bundleDirectoryReads
 	life        sync.RWMutex
 	writes      sync.Mutex
 	closed      chan struct{}

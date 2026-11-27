@@ -1,15 +1,12 @@
 import type { z } from "zod";
-import type { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
+import type { libraryCoverInput } from "#conversation-domain/library-covers";
 import {
   type skillChoiceInput,
   type skillLibrarySaveInput,
   skillLibraryView,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import {
-  type SkillRole,
-  skillInvocationViewInput,
-} from "../../../../packages/conversation-domain/src/skills";
-import { type createAccessController } from "../access/api";
+} from "#conversation-domain/skill-library";
+import { type SkillRole, skillInvocationViewInput } from "#conversation-domain/skills";
+import type { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { repositorySkillImportInput, skillImportInput, skillShareInput } from "./commands";
 import type { createSkillController } from "./controller";

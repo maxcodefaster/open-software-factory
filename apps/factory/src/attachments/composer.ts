@@ -1,4 +1,4 @@
-import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
+import { attachmentIDs } from "#conversation-domain/attachments";
 import { readableMentions, serializeMentions } from "./mention-text";
 
 // Markdown remains the persisted format. The prose field and file controls edit

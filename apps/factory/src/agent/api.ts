@@ -1,1 +1,1 @@
-export { type createAgentController } from "./controller";
+export type { createAgentController } from "./controller";

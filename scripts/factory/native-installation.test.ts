@@ -1,21 +1,22 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { nativeInstallationFixture } from "../../test/fixtures/native-installation";
+import upstream from "../../upstream.json";
+import { runtimeArtifactNames, runtimeArtifactsSchema } from "./artifacts";
 import {
+  requireNativeBrowserImage,
   requireNativeForgeOrigin,
   requireNativeInstallation,
   requireNativeRuntimeArtifact,
-  requireNativeBrowserImage,
+  requireNativeStarterImages,
 } from "./native-installation";
-import { runtimeArtifactNames, runtimeArtifactsSchema } from "./artifacts";
-import upstream from "../../upstream.json";
 
 test("browser worker and image check the same pinned MCP package-bin launcher and version", async () => {
   const [worker, runtime, recipe] = await Promise.all([
-    Bun.file("services/runtime-connector/connector/browser_worker.go").text(),
-    Bun.file("services/runtime-connector/connector/browser_runtime.go").text(),
+    Bun.file("services/runtime-connector/internal/browser/browser_worker.go").text(),
+    Bun.file("services/runtime-connector/internal/browser/native_browser_worker.go").text(),
     Bun.file("deploy/browser-tools/Dockerfile").text(),
   ]);
   expect(worker).toContain(`const browserMCPVersion = "${upstream.chromeDevToolsMcp.version}"`);
@@ -38,6 +39,38 @@ test("startup accepts an observed official ARM runtime without substituting its 
     expect(requireNativeInstallation({ FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION: file })).toEqual(
       config,
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Starter fixture setup selects the native worker platform and never fabricates published images", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-native-starter-installation-"));
+  const file = join(directory, "configuration.json");
+  const config = nativeInstallationFixture();
+  for (const attribute of config.runtime.version.attributes)
+    if (attribute.key === "architecture") attribute.value = "arm64";
+  const images = {
+    platform: "linux/arm64" as const,
+    development: `registry.example/starter-work@sha256:${"a".repeat(64)}`,
+    postgres: `registry.example/starter-postgres@sha256:${"b".repeat(64)}`,
+  };
+  const env = { FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION: file };
+  try {
+    await writeFile(file, JSON.stringify(config));
+    expect(() => requireNativeStarterImages(env)).toThrow("Publish the native Starter");
+    expect(
+      requireNativeStarterImages({ ...env, FACTORY_STARTER_IMAGES: JSON.stringify(images) }),
+    ).toEqual(images);
+    expect(() =>
+      requireNativeStarterImages({
+        ...env,
+        FACTORY_STARTER_IMAGES: JSON.stringify({ ...images, platform: "linux/amd64" }),
+      }),
+    ).toThrow("selected native runtime");
+    expect(() =>
+      requireNativeStarterImages({ ...env, FACTORY_STARTER_IMAGES: "not-json-private-sentinel" }),
+    ).toThrow("must contain the published native image catalog");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

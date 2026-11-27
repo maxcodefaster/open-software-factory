@@ -3,8 +3,8 @@ import {
   type ModelConnectionMetadata,
   type ModelProvider,
   modelProvider,
-} from "../../../../packages/conversation-domain/src/model-connection";
-import { modelIdInput } from "../../../../packages/conversation-domain/src/model-settings";
+} from "#conversation-domain/model-connection";
+import { modelIdInput } from "#conversation-domain/model-settings";
 import { CommandError } from "../command-error";
 import type { ResolvedModelConnection } from "./inference-contracts";
 

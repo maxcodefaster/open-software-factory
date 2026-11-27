@@ -1,12 +1,12 @@
 import type { z } from "zod";
-import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
+import { libraryCoverInput } from "#conversation-domain/library-covers";
 import {
   mcpChoiceInput,
   mcpConnectInput,
   mcpLibraryView,
   mcpReviewInput,
   mcpSaveInput,
-} from "../../../../packages/conversation-domain/src/mcp-library";
+} from "#conversation-domain/mcp-library";
 import { CommandError } from "../command-error";
 import { mcpGrantInput, mcpSharingInput } from "./commands";
 import type { createMCPConnections } from "./connections";

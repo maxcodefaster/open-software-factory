@@ -1,5 +1,5 @@
 import { agentActivityStream } from "../../apps/factory/src/agent/activity-stream";
-import { type AgentView } from "../../apps/factory/src/agent/contracts";
+import type { AgentView } from "../../apps/factory/src/agent/contracts";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 
 // A controlled native observation source. The browser still goes through the

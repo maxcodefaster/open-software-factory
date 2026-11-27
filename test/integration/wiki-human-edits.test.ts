@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import type { WikiPageSnapshot } from "#knowledge-domain/generation";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { editKnowledgeIn } from "../../apps/factory/src/knowledge/edit";
 import { publishWikiPackage } from "../../apps/factory/src/knowledge/publication";
-import type { WikiPageSnapshot } from "../../packages/knowledge-domain/src/generation";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test.each([
@@ -26,8 +26,8 @@ test.each([
     try {
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Wiki owner',${`${userID}@factory.invalid`})`;
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${outsiderID},'Unrelated author',${`${outsiderID}@factory.invalid`})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${`human-wiki-${projectID}`},'Human Wiki fixture','https://forge.invalid/owned/wiki.git','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`human-wiki-${projectID}`},'Human Wiki fixture','https://forge.invalid/owned/wiki.git','main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${userID},'developer',${userID})`;
       await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
@@ -46,8 +46,9 @@ test.each([
         const generationID = crypto.randomUUID();
         const attemptID = crypto.randomUUID();
         const sha = String(index + 1).repeat(40);
-        await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,attempt_id)
-          VALUES(${generationID},${projectID},${sha},'running',${userID},${attemptID})`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+          VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${projectID}`},'running',${userID},
+            ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: sha, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: attemptID, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
         const pages = await database.client<WikiPageSnapshot[]>`
           SELECT id,slug,title,current_body AS body,version::int AS version,
             current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
@@ -146,15 +147,16 @@ test("Wiki publication waits on the Project lock and rejects a concurrent manual
   try {
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Wiki author',${`${userID}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`lock-${projectID}`},'Publication lock','https://forge.invalid/owned/wiki.git',
-        'main','.devcontainer/devcontainer.json',${userID})`;
+        'main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${userID},'developer',${userID})`;
     await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
       VALUES(${pageID},${projectID},'guide','Guide','Previous guide.','Previous guide.',${"a".repeat(40)},${userID})`;
-    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,attempt_id)
-      VALUES(${generationID},${projectID},${"b".repeat(40)},'running',${userID},${attemptID})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+      VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${projectID}`},'running',${userID},
+        ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: "b".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: attemptID, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     const pages = await database.client<WikiPageSnapshot[]>`
       SELECT id,slug,title,current_body AS body,version::integer AS version,
         current_revision_id AS "revisionId",parent_id AS "parentId",state,citations
@@ -216,7 +218,7 @@ test("Wiki publication waits on the Project lock and rejects a concurrent manual
       SELECT kind,body FROM factory.knowledge_revision WHERE page_id=${pageID}`;
     expect(revision).toEqual({ kind: "human", body: "Manual product framing." });
     const [generation] = await database.client<{ state: string; count: number | null }[]>`
-      SELECT state,page_count AS count FROM factory.knowledge_generation WHERE id=${generationID}`;
+      SELECT state,(payload->>'pageCount')::int AS count FROM factory.operation WHERE id=${generationID} AND kind='knowledge.generation'`;
     expect(generation).toEqual({ state: "running", count: null });
     let inferences = 0;
     knowledge = createKnowledgeController(database, undefined, async () => {

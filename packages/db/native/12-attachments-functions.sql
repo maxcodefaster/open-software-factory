@@ -47,12 +47,14 @@ BEGIN
     reference_kind := 'conversation'; target := NEW.conversation_id; content := NEW.body;
   ELSE
     SELECT c.project_id INTO project FROM factory.review_feedback f
-      JOIN factory.change c ON c.id=f.change_id WHERE f.id=NEW.feedback_id;
-    actor := NEW.author_id; reference_kind := 'feedback'; target := NEW.id; content := NEW.body;
+      JOIN factory.change c ON c.id=f.change_id WHERE f.id=(NEW.scope_id)::uuid;
+    actor := NEW.actor_id; reference_kind := 'feedback'; target := NEW.id; content := NEW.payload->>'body';
   END IF;
   PERFORM factory.bind_attachment_references(project,actor,reference_kind,target,content,shared);
   IF TG_TABLE_NAME='ticket' THEN
-    DELETE FROM factory.attachment_draft WHERE id=NEW.id AND owner_id=NEW.created_by AND project_id=NEW.project_id;
+    DELETE FROM factory.operation WHERE kind='attachments.draft' AND scope_type='attachment'
+      AND idempotency_key='attachments.draft:' || NEW.id::text || ':' || NEW.created_by::text
+      AND payload->>'projectId'=NEW.project_id::text;
   END IF;
   RETURN NEW;
 END $$;

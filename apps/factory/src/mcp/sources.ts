@@ -1,9 +1,9 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { mcpObservation } from "../../../../packages/db/src/schema";
-import { type createBuildBrowserController } from "../agent/browser-api";
+import { attachmentURL } from "#conversation-domain/attachments";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { auditEvent } from "#db/schema";
+import type { createBuildBrowserController } from "../agent/browser-api";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { createAttachmentTools } from "../attachments/tools-api";
 import { CommandError } from "../command-error";
@@ -125,15 +125,20 @@ export function createMCPSourceEndpoint(
             authorized.ownerToken,
             async (sql) => {
               await drizzleTransaction(sql)
-                .insert(mcpObservation)
+                .insert(auditEvent)
                 .values({
                   id: crypto.randomUUID(),
-                  turnId,
-                  connectionId,
-                  toolName: tool,
-                  toolDigest: digest,
-                  resultDigest: mcpDigest(result.content),
-                  isError: result.isError,
+                  kind: "mcp.observation",
+                  scopeType: "connection",
+                  scopeId: connectionId,
+                  actorId: turn.command.createdBy,
+                  payload: {
+                    turnId,
+                    toolName: tool,
+                    toolDigest: digest,
+                    resultDigest: mcpDigest(result.content),
+                    isError: result.isError,
+                  },
                 });
             },
           );

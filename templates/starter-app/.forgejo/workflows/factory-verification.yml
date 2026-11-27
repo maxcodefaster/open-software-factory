@@ -7,6 +7,8 @@ jobs:
     runs-on: factory-verification
     steps:
       - name: Confirm the assigned commit
-        run: test "$(cat /workspace/project/.git/HEAD)" = "${{ forgejo.event.pull_request.head.sha }}"
+        working-directory: ${{ env.FACTORY_CHECKOUT_ROOT }}
+        run: test "$(git rev-parse HEAD)" = "${{ forgejo.event.pull_request.head.sha }}"
       - name: Check the starter
-        run: cd /workspace/project && npm run check
+        working-directory: ${{ env.FACTORY_CHECKOUT_ROOT }}
+        run: npm run check

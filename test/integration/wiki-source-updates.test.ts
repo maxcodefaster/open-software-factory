@@ -21,6 +21,15 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
   let creates = 0,
     head = "a".repeat(40),
     reconciles = 0;
+  let imagePreparations = 0;
+  // A stale caller must not let a signed Wiki push or hook repair commission
+  // the retired image producer. This is deliberately not a controller option.
+  const retiredProducer = {
+    prepareProject: async () => {
+      imagePreparations++;
+      throw new Error("Factory has no image producer");
+    },
+  };
   const signingKey = "owned-wiki-hook-key-not-a-real-secret";
   const controller = createWikiSourceUpdates({
     database,
@@ -28,12 +37,14 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     owner: "factory",
     receiverURL: "https://factory.example",
     signingKey,
+    ...retiredProducer,
     forge: {
       listPushHooks: async () => hooks,
       createPushHook: async (_repository, targetURL) => {
         expect(
           (
-            await database.client`SELECT project_id FROM factory.wiki_source_update WHERE project_id=${projectID}`
+            await database.client`SELECT scope_id AS project_id FROM factory.operation
+              WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`
           ).length,
         ).toBe(1);
         creates++;
@@ -45,7 +56,10 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     },
     reconcile: async () => {
       reconciles++;
-      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at) VALUES(${crypto.randomUUID()},${projectID},${"a".repeat(40)},'succeeded',${userID},now())`;
+      const genID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+        VALUES(${genID},'knowledge.generation','project',${projectID},${`knowledge.generation:${genID}`},NULL,'succeeded',${userID},now(),
+          ${JSON.stringify({ id: genID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     },
   });
   function request(overrides: object = {}, signature = true) {
@@ -68,12 +82,14 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
   }
   try {
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${userID},'Owned source author',${`source-${userID}@factory.local`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`hook-${projectID}`},'Hook fixture','https://forge.example/factory/app.git','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},${`hook-${projectID}`},'Hook fixture','https://forge.example/factory/app.git','main','.factory/actor-template.json',${userID})`;
     await controller.ensure(projectID);
     await controller.ensure(projectID);
     expect(creates).toBe(1);
     const [ready] =
-      await database.client`SELECT hook_state,hook_id FROM factory.wiki_source_update WHERE project_id=${projectID}`;
+      await database.client`SELECT state AS hook_state, (payload->>'hookId')::bigint AS hook_id
+      FROM factory.operation
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     expect(ready?.["hook_state"]).toBe("ready");
     expect(Number(ready?.["hook_id"])).toBe(7);
     expect((await controller.receive(request({}, false), projectID)).status).toBe(403);
@@ -93,22 +109,32 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     // Settle receive's expendable wake before advancing the persisted retry time.
     // Otherwise drain() can join the earlier, not-yet-due read instead of this one.
     await controller.drain();
-    await database.client`UPDATE factory.wiki_source_update SET next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
+    await database.client`UPDATE factory.operation
+      SET payload=payload || jsonb_build_object('nextAttemptAt', now()-interval '1 second')
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     await controller.drain();
     expect(reconciles).toBe(1);
-    let [row] =
-      await database.client`SELECT event_version,handled_version FROM factory.wiki_source_update WHERE project_id=${projectID}`;
+    let [row] = await database.client`SELECT payload->>'eventVersion' AS event_version,
+      payload->>'handledVersion' AS handled_version
+      FROM factory.operation
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     expect(Number(row?.["event_version"])).toBe(2);
     expect(Number(row?.["handled_version"])).toBe(2);
     head = "c".repeat(40);
     await controller.receive(request(), projectID);
     await controller.drain();
-    await database.client`UPDATE factory.wiki_source_update SET next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
+    await database.client`UPDATE factory.operation
+      SET payload=payload || jsonb_build_object('nextAttemptAt', now()-interval '1 second')
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     await controller.drain();
-    [row] =
-      await database.client`SELECT event_version,handled_version FROM factory.wiki_source_update WHERE project_id=${projectID}`;
+    [row] = await database.client`SELECT payload->>'eventVersion' AS event_version,
+      payload->>'handledVersion' AS handled_version
+      FROM factory.operation
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     expect(Number(row?.["event_version"])).toBe(3);
     expect(Number(row?.["handled_version"])).toBe(2);
+    await controller.repair();
+    expect(imagePreparations).toBe(0);
   } finally {
     await controller.drain();
     await database.client.end();
@@ -148,14 +174,21 @@ test("Wiki drain retains a newer signed event while acknowledging its captured b
   try {
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Owned source author',${`${userID}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`counter-${projectID}`},'Source counter','https://forge.example/factory/app.git',
-        'main','.devcontainer/devcontainer.json',${userID})`;
+        'main','.factory/actor-template.json',${userID})`;
     await controller.ensure(projectID);
-    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
-      VALUES(${crypto.randomUUID()},${projectID},${commit},'succeeded',${userID},now())`;
-    await database.client`UPDATE factory.wiki_source_update SET event_version=9007199254740993,
-      handled_version=9007199254740992,next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
+    const genID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+      VALUES(${genID},'knowledge.generation','project',${projectID},${`knowledge.generation:${genID}`},NULL,'succeeded',${userID},now(),
+        ${JSON.stringify({ id: genID, projectId: projectID, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
+    await database.client`UPDATE factory.operation
+      SET payload=payload || jsonb_build_object(
+        'eventVersion', '9007199254740993',
+        'handledVersion', '9007199254740992',
+        'nextAttemptAt', now()-interval '1 second'
+      )
+      WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
     const first = controller.drain();
     await Promise.race([
       entered.promise,
@@ -189,8 +222,9 @@ test("Wiki drain retains a newer signed event while acknowledging its captured b
     await first;
     const read = async () => {
       const [row] = await database.client<{ event: string; handled: string }[]>`
-        SELECT event_version::text AS event,handled_version::text AS handled
-        FROM factory.wiki_source_update WHERE project_id=${projectID}`;
+        SELECT payload->>'eventVersion' AS event, payload->>'handledVersion' AS handled
+        FROM factory.operation
+        WHERE kind='knowledge.source_update' AND scope_type='project' AND scope_id=${projectID}`;
       return row;
     };
     expect(await read()).toEqual({ event: "9007199254740994", handled: "9007199254740993" });

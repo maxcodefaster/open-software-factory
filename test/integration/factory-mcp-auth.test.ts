@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createFactoryAuth } from "../../packages/auth/src/server";
-import { factoryMCPResource } from "../../packages/auth/src/mcp-registration";
+import { factoryMCPResource } from "#auth/mcp-registration";
+import { createFactoryAuth } from "#auth/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("native MCP OAuth registers a public PKCE client without changing the Forgejo identity", async () => {
@@ -68,7 +68,7 @@ test("native MCP OAuth registers a public PKCE client without changing the Forge
     });
     if (!user) throw new Error("Owned MCP user creation failed");
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`mcp-auth-${projectID}`},'Owned MCP OAuth','https://example.invalid/project.git','main','.devcontainer/devcontainer.json',${user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},${`mcp-auth-${projectID}`},'Owned MCP OAuth','https://example.invalid/project.git','main','.factory/actor-template.json',${user.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${user.id},'developer',${user.id})`;
     const login = await fetch(`${fixture.base}/api/auth/sign-in/email`, {
       method: "POST",

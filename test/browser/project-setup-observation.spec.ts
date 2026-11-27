@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { projectSetupView } from "#project-domain/setup";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { projectSetupView } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";

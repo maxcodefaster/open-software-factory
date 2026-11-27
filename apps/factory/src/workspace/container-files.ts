@@ -1,64 +1,31 @@
 import { createHmac } from "node:crypto";
-import { and, eq, isNull, ne, notInArray, sql as query } from "drizzle-orm";
+import { and, eq, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { workspaceFileOperation, workspaceFileTransfer } from "../../../../packages/db/src/schema";
+import type { createDatabase } from "#db/client";
+import { operation } from "#db/schema";
 import {
   type ContainerFileMutation,
   containerFileMutation,
   containerFilePath,
   type WorkspaceTransferInput,
-  workspaceTransferInput,
-} from "../../../../packages/workspace-domain/src/files";
-import {
-  decodeUTF8Text,
-  UTF8TextPageError,
-} from "../../../../packages/workspace-domain/src/text-page";
+} from "#workspace-domain/files";
+import { decodeUTF8Text, UTF8TextPageError } from "#workspace-domain/text-page";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
 import type { createRuntimeController } from "../runtime/api";
 import type { RuntimeHub } from "../runtime/transport-api";
 import { createWorkspaceComputeAccess } from "./compute-access";
-
-const nativeFile = z.object({
-  id: z.uuid().optional(),
-  path: z.string().optional(),
-  version: z.string().optional(),
-  bytes: z
-    .number()
-    .int()
-    .nonnegative()
-    .max(128 << 20),
-  directory: z.boolean().default(false),
-  content: z.string().max(350_000).default(""),
-  offset: z.number().int().nonnegative().default(0),
-  nextOffset: z
-    .number()
-    .int()
-    .nonnegative()
-    .max(128 << 20)
-    .default(0),
-  complete: z.boolean().default(false),
-});
-type Transfer = {
-  id: string;
-  workspaceID: string;
-  attemptID: string;
-  actorID: string;
-  direction: "upload" | "download";
-  digest: string;
-  path: string;
-  state: string;
-  result: unknown;
-  expiresAt: Date;
-};
-const chunkBytes = 256 << 10;
+import { CHUNK_BYTES, FILE_OP_KIND, nativeFileSchema } from "./container-file-transfer-state";
+import { createContainerFileTransfers } from "./container-file-transfers";
 
 export function createWorkspaceContainerFiles(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
-  runtime: Pick<ReturnType<typeof createRuntimeController>, "start" | "startPersisted" | "get">,
+  runtime: Pick<
+    ReturnType<typeof createRuntimeController>,
+    "start" | "startPersisted" | "resumeForSource" | "get"
+  >,
   signingKey: string,
 ) {
   let closing = false;
@@ -66,9 +33,10 @@ export function createWorkspaceContainerFiles(
   const ready = createWorkspaceComputeAccess(database, hub, runtime, () => closing);
   const digest = (value: unknown) =>
     createHmac("sha256", signingKey).update(JSON.stringify(value)).digest("hex");
-  async function track<T>(operation: () => Promise<T>) {
+
+  async function track<T>(run: () => Promise<T>) {
     if (closing) throw new CommandError("unavailable", "Factory is stopping");
-    const promise = operation();
+    const promise = run();
     pending.add(promise);
     try {
       return await promise;
@@ -76,11 +44,13 @@ export function createWorkspaceContainerFiles(
       pending.delete(promise);
     }
   }
+
   const authorize = (userID: string, workspaceID: string, write = false) =>
     database.client.begin(async (sql) => {
       if (write) await workspaceWriteAuthorityIn(sql, workspaceID, userID);
       else await workspaceAuthorityIn(sql, workspaceID, userID, true);
     });
+
   async function call(
     userID: string,
     workspaceID: string,
@@ -105,196 +75,21 @@ export function createWorkspaceContainerFiles(
     await authorize(userID, workspaceID);
     return JSON.parse(response) as unknown;
   }
-  async function transfer(userID: string, id: string, active = true) {
-    const [row] = await database.db
-      .select({
-        id: workspaceFileTransfer.id,
-        workspaceID: workspaceFileTransfer.workspaceId,
-        attemptID: workspaceFileTransfer.runtimeAttemptId,
-        actorID: workspaceFileTransfer.actorId,
-        direction: workspaceFileTransfer.direction,
-        digest: workspaceFileTransfer.inputDigest,
-        path: workspaceFileTransfer.path,
-        state: workspaceFileTransfer.state,
-        result: workspaceFileTransfer.result,
-        expiresAt: workspaceFileTransfer.expiresAt,
-      })
-      .from(workspaceFileTransfer)
-      .where(
-        and(
-          eq(workspaceFileTransfer.id, z.uuid().parse(id)),
-          eq(workspaceFileTransfer.actorId, userID),
-        ),
-      );
-    if (!row) throw new CommandError("not-found", "File transfer not found");
-    row.expiresAt = z.coerce.date().parse(row.expiresAt);
-    await authorize(userID, row.workspaceID, row.direction === "upload");
-    if (
-      active &&
-      (row.expiresAt.getTime() <= Date.now() || ["released", "releasing"].includes(row.state))
-    )
-      throw new CommandError(
-        "conflict",
-        "File transfer expired or was released. Its identity cannot be reused.",
-      );
-    return row;
-  }
-  function view(row: Transfer) {
-    const result = row.result ? nativeFile.parse(row.result) : undefined;
-    return {
-      transferID: row.id,
-      workspaceID: row.workspaceID,
-      attemptID: row.attemptID,
-      direction: row.direction,
-      path: row.path,
-      state: row.state,
-      expiresAt: row.expiresAt.toISOString(),
-      bytes: result?.bytes ?? null,
-      sha256: result?.version ?? null,
-      nextOffset: result?.nextOffset ?? 0,
-      chunkBytes,
-      expired: row.expiresAt.getTime() <= Date.now(),
-    };
-  }
-  async function readyTransfer(userID: string, row: Transfer) {
-    const attemptID = await ready(
-      row.workspaceID,
-      userID,
-      row.direction === "upload",
-      row.attemptID,
-    );
-    if (attemptID !== row.attemptID)
-      throw new CommandError(
-        "conflict",
-        "Transfer belongs to a different Runtime Attempt. It cannot be recreated.",
-      );
-  }
-  async function observe(row: Transfer, result: z.infer<typeof nativeFile>) {
-    if (result.id !== row.id || result.path !== row.path)
-      throw new CommandError(
-        "unavailable",
-        "Native transfer identity differs from its retained intent",
-      );
-    const { content: _content, ...compact } = result;
-    await database.db
-      .update(workspaceFileTransfer)
-      .set({
-        result: compact,
-        state: query`CASE WHEN ${workspaceFileTransfer.state} IN ('committed','releasing','released')
-          THEN ${workspaceFileTransfer.state} WHEN ${row.direction === "upload" && result.complete} THEN 'committed'
-          WHEN ${workspaceFileTransfer.commitAttemptedAt} IS NOT NULL THEN ${workspaceFileTransfer.state} ELSE 'active' END`,
-        updatedAt: query`now()`,
-      })
-      .where(eq(workspaceFileTransfer.id, row.id));
-  }
-  async function status(userID: string, id: string) {
-    const row = await transfer(userID, id, false);
-    if (
-      row.state !== "released" &&
-      row.expiresAt.getTime() > Date.now() &&
-      hub.connected(row.attemptID)
-    ) {
-      try {
-        await observe(
-          row,
-          nativeFile.parse(
-            await call(
-              userID,
-              row.workspaceID,
-              row.attemptID,
-              "file-transfer-status",
-              { id },
-              false,
-            ),
-          ),
-        );
-      } catch {
-        await authorize(userID, row.workspaceID);
-        await database.db
-          .update(workspaceFileTransfer)
-          .set({ state: "uncertain", updatedAt: query`now()` })
-          .where(
-            and(
-              eq(workspaceFileTransfer.id, id),
-              notInArray(workspaceFileTransfer.state, ["committed", "releasing", "released"]),
-            ),
-          );
-      }
-    }
-    return view(await transfer(userID, id, false));
-  }
-  async function begin(userID: string, value: WorkspaceTransferInput) {
-    const input = workspaceTransferInput.parse(value);
-    await authorize(userID, input.workspaceID, input.direction === "upload");
-    const fingerprint = digest(input);
-    const [existing] = await database.db
-      .select({ digest: workspaceFileTransfer.inputDigest, actorID: workspaceFileTransfer.actorId })
-      .from(workspaceFileTransfer)
-      .where(eq(workspaceFileTransfer.id, input.requestID));
-    if (existing) {
-      if (existing.digest !== fingerprint || existing.actorID !== userID)
-        throw new CommandError(
-          "conflict",
-          "File transfer identity already records different input",
-        );
-      return status(userID, input.requestID);
-    }
-    const attemptID = await ready(input.workspaceID, userID, input.direction === "upload");
-    const created = await database.client.begin(async (sql) => {
-      if (input.direction === "upload")
-        await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
-      else await workspaceAuthorityIn(sql, input.workspaceID, userID, true);
-      const [row] = await drizzleTransaction(sql)
-        .insert(workspaceFileTransfer)
-        .values({
-          id: input.requestID,
-          workspaceId: input.workspaceID,
-          runtimeAttemptId: attemptID,
-          actorId: userID,
-          direction: input.direction,
-          inputDigest: fingerprint,
-          path: input.path,
-          state: "preparing",
-        })
-        .onConflictDoNothing({ target: workspaceFileTransfer.id })
-        .returning({ id: workspaceFileTransfer.id });
-      return Boolean(row);
-    });
-    if (!created) return begin(userID, input);
-    const row = await transfer(userID, input.requestID);
-    try {
-      await observe(
-        row,
-        nativeFile.parse(
-          await call(
-            userID,
-            input.workspaceID,
-            attemptID,
-            `file-${input.direction}-begin`,
-            {
-              id: input.requestID,
-              path: input.path,
-              ...(input.version ? { version: input.version } : {}),
-              ...(input.direction === "upload" ? { bytes: input.bytes, sha256: input.sha256 } : {}),
-            },
-            input.direction === "upload",
-          ),
-        ),
-      );
-    } catch (cause) {
-      await database.db
-        .update(workspaceFileTransfer)
-        .set({ state: "uncertain", updatedAt: query`now()` })
-        .where(
-          and(eq(workspaceFileTransfer.id, row.id), eq(workspaceFileTransfer.state, "preparing")),
-        );
-      throw cause;
-    }
-    return view(await transfer(userID, row.id));
-  }
+
+  const transfers = createContainerFileTransfers({
+    database,
+    hub,
+    isClosing: () => closing,
+    digest,
+    authorize,
+    ready,
+    call,
+  });
+
   return {
-    begin: (userID: string, input: WorkspaceTransferInput) => track(() => begin(userID, input)),
-    status: (userID: string, id: string) => track(() => status(userID, id)),
+    begin: (userID: string, input: WorkspaceTransferInput) =>
+      track(() => transfers.begin(userID, input)),
+    status: (userID: string, id: string) => track(() => transfers.status(userID, id)),
     context: (userID: string, workspaceID: string) =>
       track(async () => {
         const attemptID = await ready(z.uuid().parse(workspaceID), userID, false);
@@ -333,7 +128,7 @@ export function createWorkspaceContainerFiles(
           .parse(input);
         const attemptID = await ready(parsed.workspaceID, userID, false);
         try {
-          const result = nativeFile.parse(
+          const result = nativeFileSchema.parse(
             await call(userID, parsed.workspaceID, attemptID, "file-read", parsed, false),
           );
           const content = Buffer.from(result.content, "base64");
@@ -383,7 +178,7 @@ export function createWorkspaceContainerFiles(
           .parse(input);
         const attemptID = await ready(parsed.workspaceID, userID, false);
         return z
-          .object({ entries: z.array(nativeFile), nextOffset: z.number().int().nullable() })
+          .object({ entries: z.array(nativeFileSchema), nextOffset: z.number().int().nullable() })
           .parse(await call(userID, parsed.workspaceID, attemptID, "file-list", parsed, false));
       }),
     mutate: (userID: string, value: ContainerFileMutation) =>
@@ -391,14 +186,15 @@ export function createWorkspaceContainerFiles(
         const input = containerFileMutation.parse(value);
         await authorize(userID, input.workspaceID, true);
         const fingerprint = digest(input);
+        const idempotencyKey = `${FILE_OP_KIND}:${input.requestID}`;
         const [existing] = await database.db
           .select({
-            digest: workspaceFileOperation.inputDigest,
-            actorID: workspaceFileOperation.actorId,
-            result: workspaceFileOperation.result,
+            digest: query<string>`${operation.payload}->>'inputDigest'`,
+            actorID: operation.createdBy,
+            result: operation.result,
           })
-          .from(workspaceFileOperation)
-          .where(eq(workspaceFileOperation.id, input.requestID));
+          .from(operation)
+          .where(eq(operation.idempotencyKey, idempotencyKey));
         if (existing) {
           if (existing.digest !== fingerprint || existing.actorID !== userID)
             throw new CommandError(
@@ -409,194 +205,48 @@ export function createWorkspaceContainerFiles(
         }
         const attemptID = await ready(input.workspaceID, userID);
         const [created] = await database.db
-          .insert(workspaceFileOperation)
+          .insert(operation)
           .values({
             id: input.requestID,
-            workspaceId: input.workspaceID,
-            runtimeAttemptId: attemptID,
-            actorId: userID,
-            action: input.action,
-            inputDigest: fingerprint,
+            kind: FILE_OP_KIND,
+            scopeType: "workspace",
+            scopeId: input.workspaceID,
+            idempotencyKey,
+            state: "pending",
+            createdBy: userID,
+            payload: {
+              runtimeAttemptId: attemptID,
+              action: input.action,
+              inputDigest: fingerprint,
+            },
           })
-          .onConflictDoNothing({ target: workspaceFileOperation.id })
-          .returning({ id: workspaceFileOperation.id });
+          .onConflictDoNothing()
+          .returning({ id: operation.id });
         if (!created)
           throw new CommandError(
             "conflict",
             "File operation already admitted. Observe it using the same request identity.",
           );
-        const result = nativeFile.parse(
+        const result = nativeFileSchema.parse(
           await call(userID, input.workspaceID, attemptID, `file-${input.action}`, input, true),
         );
         await database.db
-          .update(workspaceFileOperation)
-          .set({ result, completedAt: query`now()` })
-          .where(eq(workspaceFileOperation.id, input.requestID));
+          .update(operation)
+          .set({
+            state: "completed",
+            result,
+            completedAt: query`now()`,
+            updatedAt: query`now()`,
+          })
+          .where(and(eq(operation.id, input.requestID), eq(operation.kind, FILE_OP_KIND)));
         return result;
       }),
     upload: (userID: string, id: string, offset: number, content: Uint8Array) =>
-      track(async () => {
-        z.number()
-          .int()
-          .nonnegative()
-          .max(128 << 20)
-          .parse(offset);
-        if (content.byteLength > chunkBytes)
-          throw new CommandError("invalid", "Upload chunk exceeds 256 KiB");
-        const row = await transfer(userID, id);
-        if (row.direction !== "upload" || row.state !== "active")
-          throw new CommandError(
-            "conflict",
-            "Upload is not active. Observe its existing transfer ID.",
-          );
-        await readyTransfer(userID, row);
-        // Row locking orders concurrent chunks before commit, without creating a second native upload.
-        await database.client.begin(async (sql) => {
-          await workspaceWriteAuthorityIn(sql, row.workspaceID, userID);
-          const [current] = await sql<
-            { state: string }[]
-          >`SELECT state FROM factory.workspace_file_transfer WHERE id=${id} FOR UPDATE`;
-          if (current?.state !== "active")
-            throw new CommandError("conflict", "Upload state changed");
-          const response = await hub.childRequest(
-            row.attemptID,
-            {
-              operationId: crypto.randomUUID(),
-              action: "file-upload-chunk",
-              data: JSON.stringify({
-                id,
-                offset,
-                content: Buffer.from(content).toString("base64"),
-              }),
-            },
-            async (send) => {
-              if (closing) throw new CommandError("unavailable", "Factory is stopping");
-              send();
-            },
-          );
-          if (!response)
-            throw new CommandError("unavailable", "Upload chunk outcome is unconfirmed");
-          const result = nativeFile.parse(JSON.parse(response));
-          const { content: _content, ...compact } = result;
-          if (result.id !== id || result.path !== row.path)
-            throw new CommandError("unavailable", "Native upload identity changed");
-          await drizzleTransaction(sql)
-            .update(workspaceFileTransfer)
-            .set({ result: compact, updatedAt: query`now()` })
-            .where(eq(workspaceFileTransfer.id, id));
-        });
-        return view(await transfer(userID, id));
-      }),
-    download: (userID: string, id: string, offset: number, limit = chunkBytes) =>
-      track(async () => {
-        z.number()
-          .int()
-          .nonnegative()
-          .max(128 << 20)
-          .parse(offset);
-        z.number().int().positive().max(chunkBytes).parse(limit);
-        const row = await transfer(userID, id);
-        if (row.direction !== "download" || row.state !== "active")
-          throw new CommandError("conflict", "Download is not active");
-        await readyTransfer(userID, row);
-        const result = nativeFile.parse(
-          await call(
-            userID,
-            row.workspaceID,
-            row.attemptID,
-            "file-download-chunk",
-            { id, offset, limit },
-            false,
-          ),
-        );
-        const retained = nativeFile.parse(row.result);
-        const content = Buffer.from(result.content, "base64");
-        if (
-          result.id !== id ||
-          result.path !== row.path ||
-          result.version !== retained.version ||
-          result.bytes !== retained.bytes ||
-          result.offset !== offset ||
-          result.nextOffset !== offset + content.length ||
-          content.length > limit
-        )
-          throw new CommandError("unavailable", "Download bytes do not match the pinned transfer");
-        return {
-          content,
-          offset,
-          nextOffset: result.nextOffset,
-          complete: result.complete,
-          bytes: result.bytes,
-          sha256: result.version,
-        };
-      }),
-    commit: (userID: string, id: string) =>
-      track(async () => {
-        const row = await transfer(userID, id);
-        if (row.direction !== "upload") throw new CommandError("conflict", "Only uploads commit");
-        if (row.state === "committed") return view(row);
-        await readyTransfer(userID, row);
-        const [claimed] = await database.db
-          .update(workspaceFileTransfer)
-          .set({ state: "committing", commitAttemptedAt: query`now()`, updatedAt: query`now()` })
-          .where(
-            and(
-              eq(workspaceFileTransfer.id, id),
-              eq(workspaceFileTransfer.state, "active"),
-              isNull(workspaceFileTransfer.commitAttemptedAt),
-            ),
-          )
-          .returning({ id: workspaceFileTransfer.id });
-        if (!claimed) return status(userID, id);
-        try {
-          await observe(
-            row,
-            nativeFile.parse(
-              await call(
-                userID,
-                row.workspaceID,
-                row.attemptID,
-                "file-upload-commit",
-                { id },
-                true,
-              ),
-            ),
-          );
-        } catch (cause) {
-          await database.db
-            .update(workspaceFileTransfer)
-            .set({ state: "uncertain", updatedAt: query`now()` })
-            .where(
-              and(eq(workspaceFileTransfer.id, id), eq(workspaceFileTransfer.state, "committing")),
-            );
-          throw cause;
-        }
-        return view(await transfer(userID, id));
-      }),
-    release: (userID: string, id: string) =>
-      track(async () => {
-        const row = await transfer(userID, id, false);
-        if (row.state === "released") return view(row);
-        await database.db
-          .update(workspaceFileTransfer)
-          .set({ state: "releasing", updatedAt: query`now()` })
-          .where(
-            and(eq(workspaceFileTransfer.id, id), ne(workspaceFileTransfer.state, "released")),
-          );
-        await call(
-          userID,
-          row.workspaceID,
-          row.attemptID,
-          "file-release",
-          { id },
-          row.direction === "upload",
-        );
-        await database.db
-          .update(workspaceFileTransfer)
-          .set({ state: "released", updatedAt: query`now()` })
-          .where(eq(workspaceFileTransfer.id, id));
-        return view(await transfer(userID, id, false));
-      }),
+      track(() => transfers.upload(userID, id, offset, content)),
+    download: (userID: string, id: string, offset: number, limit = CHUNK_BYTES) =>
+      track(() => transfers.download(userID, id, offset, limit)),
+    commit: (userID: string, id: string) => track(() => transfers.commit(userID, id)),
+    release: (userID: string, id: string) => track(() => transfers.release(userID, id)),
     async close() {
       closing = true;
       await Promise.allSettled([...pending]);

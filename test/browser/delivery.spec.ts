@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { changeIdentity } from "#change-domain/change";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { ticketWorkspaceIdentity } from "#workspace-domain/workspace";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { requestFunction } from "../fixtures/server-functions";
@@ -157,10 +157,10 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
   await db.client.begin(async (transaction) => {
     await transaction`
       INSERT INTO factory.project(
-        id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+        id, slug, name, repository_url, default_branch, actor_template_path, created_by
       ) VALUES (
         ${projectID}, ${slug}, 'Delivery fixture', ${repositoryURL}, 'main',
-        '.devcontainer/devcontainer.json', ${userID}
+        '.factory/actor-template.json', ${userID}
       )
     `;
     await transaction`
@@ -190,13 +190,24 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
       )
     `;
     await transaction`
-      INSERT INTO factory.branch_create_operation(
-        id, change_id, repository_owner, repository_name, branch_name, start_sha,
-        idempotency_key, state, observed_head_sha, completed_at
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+        payload, result, created_by, completed_at
       ) VALUES (
-        ${identity.branchOperationID}, ${identity.changeID}, ${repository.owner}, ${repository.name},
-        ${identity.branchName}, ${base.headSha}, ${`change:${identity.changeID}:create-branch`},
-        'succeeded', ${base.headSha}, now()
+        ${identity.branchOperationID}, 'delivery.branch_create', 'change', ${identity.changeID},
+        ${`delivery.branch_create:change:${identity.changeID}:create-branch`}, NULL, 'succeeded',
+        ${JSON.stringify({
+          changeId: identity.changeID,
+          repositoryOwner: repository.owner,
+          repositoryName: repository.name,
+          branchName: identity.branchName,
+          startSha: base.headSha,
+          attemptCount: 1,
+          leaseGeneration: 1,
+          reconcileAfter: null,
+        })}::jsonb,
+        ${JSON.stringify({ observedHeadSha: base.headSha })}::jsonb,
+        ${userID}, now()
       )
     `;
     await transaction`
@@ -210,10 +221,10 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
     await transaction`
       INSERT INTO factory.runtime_attempt(
         id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
-        child_connector_token_hash, create_intended_at, created_by
+        create_intended_at, created_by
       ) VALUES (
         ${historicalAttempt.attemptID}, ${projectID}, ${identity.changeID},
-        ${workspace.workspaceID}, 1, ${base.headSha}, 'stopped', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${userID}
+        ${workspace.workspaceID}, 1, ${base.headSha}, 'stopped', ${"a".repeat(64)}, now(), ${userID}
       )
     `;
     await transaction`
@@ -236,9 +247,9 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
     .poll(
       async () => {
         const rows = await db.client<Array<{ state: string }>>`
-          SELECT attempt.state FROM factory.staging_preview preview
-          JOIN factory.runtime_attempt attempt ON attempt.id = preview.runtime_attempt_id
-          WHERE preview.project_id = ${projectID}
+          SELECT attempt.state FROM factory.operation preview
+          JOIN factory.runtime_attempt attempt ON attempt.id::text = preview.payload->>'runtimeAttemptId'
+          WHERE preview.kind = 'delivery.staging_preview' AND preview.scope_type = 'project' AND preview.scope_id = ${projectID}
         `;
         return rows[0]?.state;
       },
@@ -246,8 +257,8 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
     )
     .toBe("ready");
   const initialPreview = await db.client<Array<{ attemptID: string }>>`
-    SELECT runtime_attempt_id AS "attemptID" FROM factory.staging_preview
-    WHERE project_id = ${projectID}
+    SELECT payload->>'runtimeAttemptId' AS "attemptID" FROM factory.operation
+    WHERE kind = 'delivery.staging_preview' AND scope_type = 'project' AND scope_id = ${projectID}
   `;
   const initialStagingAttemptID = initialPreview[0]?.attemptID;
   if (!initialStagingAttemptID) throw new Error("Initial Staging was not recorded");
@@ -289,14 +300,21 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
             replacementState: string;
           }>
         >`
-          SELECT preview.runtime_attempt_id AS "previewAttemptID",
-            promotion.replacement_runtime_attempt_id AS "replacementAttemptID",
+          SELECT preview.payload->>'runtimeAttemptId' AS "previewAttemptID",
+            promotion.payload->>'replacementRuntimeAttemptId' AS "replacementAttemptID",
             attempt.state AS "replacementState"
-          FROM factory.promotion_operation promotion
-          JOIN factory.staging_preview preview ON preview.project_id = promotion.project_id
+          FROM factory.operation promotion
+          JOIN factory.operation preview
+            ON preview.kind = 'delivery.staging_preview'
+            AND preview.scope_type = 'project'
+            AND preview.scope_id = promotion.payload->>'projectId'
           JOIN factory.runtime_attempt attempt
-            ON attempt.id = promotion.replacement_runtime_attempt_id
-          WHERE promotion.change_id = ${identity.changeID}
+            ON attempt.id = (promotion.payload->>'replacementRuntimeAttemptId')::uuid
+          WHERE promotion.kind = 'delivery.promotion'
+            AND promotion.scope_type = 'change'
+            AND promotion.scope_id = ${identity.changeID}
+          ORDER BY (promotion.payload->>'ordinal')::int DESC
+          LIMIT 1
         `;
         const row = rows[0];
         if (!row || row.replacementState === "ready") return null;
@@ -312,11 +330,11 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
   expect((await forge.getDefaultBranch(repository)).headSha).toBe(candidateSHA);
   expect(await forge.getBranch(repository, identity.branchName)).toBeNull();
   const promoted = await db.client<Array<{ revision: string; state: string; attemptID: string }>>`
-    SELECT preview.revision, attempt.state,
-      preview.runtime_attempt_id AS "attemptID"
-    FROM factory.staging_preview preview
-    JOIN factory.runtime_attempt attempt ON attempt.id = preview.runtime_attempt_id
-    WHERE preview.project_id = ${projectID}
+    SELECT preview.payload->>'revision' AS revision, attempt.state,
+      preview.payload->>'runtimeAttemptId' AS "attemptID"
+    FROM factory.operation preview
+    JOIN factory.runtime_attempt attempt ON attempt.id::text = preview.payload->>'runtimeAttemptId'
+    WHERE preview.kind = 'delivery.staging_preview' AND preview.scope_type = 'project' AND preview.scope_id = ${projectID}
   `;
   expect(promoted[0]).toMatchObject({ revision: candidateSHA, state: "ready" });
   expect(promoted[0]?.attemptID).not.toBe(initialStagingAttemptID);

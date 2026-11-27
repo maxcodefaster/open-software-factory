@@ -1,10 +1,10 @@
 import { z } from "zod";
 import {
+  type LearningCase,
+  type LearningResult,
   learningCase,
   learningEdit,
   learningTarget,
-  type LearningCase,
-  type LearningResult,
 } from "./learning";
 
 export const comparisonRubric = "planning-text-replay/v1";

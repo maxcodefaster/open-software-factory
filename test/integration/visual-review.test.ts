@@ -1,17 +1,14 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { pendingReviewThreads, visualReviewSchema } from "#conversation-domain/visual-review";
 import { createAccessController } from "../../apps/factory/src/access/controller";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
 import { createReviewService } from "../../apps/factory/src/review/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import {
-  pendingReviewThreads,
-  visualReviewSchema,
-} from "../../packages/conversation-domain/src/visual-review";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
@@ -437,14 +434,31 @@ test("compact chapters and saved frame context use presentation time, not wall d
       { id: "first-app", kind: "app", position: 0 },
       { id: "source-check", kind: "source", position: null },
       { id: "second-app", kind: "app", position: 750 },
-    ].entries())
+    ].entries()) {
+      const startedAt = new Date(Date.UTC(2000 + index * 10, 0, 1)).toISOString();
+      const endedAt = new Date(Date.UTC(2000 + index * 10, 0, 1, 0, 0, 1)).toISOString();
       await f.database.client`
-        INSERT INTO factory.review_scenario(review_id,id,title,category,observation_kind,
-          criterion,expected,observed,status,started_at,ended_at,media_started_ms,media_session_id)
-        VALUES(${f.reviewID},${item.id},${item.id},'normal',${item.kind},1,'Expected','Observed','passed',
-          ${new Date(Date.UTC(2000 + index * 10, 0, 1)).toISOString()},
-          ${new Date(Date.UTC(2000 + index * 10, 0, 1, 0, 0, 1)).toISOString()},
-          ${item.position},${item.kind === "app" ? grant.sessionID : null})`;
+        INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at,completed_at)
+        VALUES(${crypto.randomUUID()},'review.scenario','candidate_review',${f.reviewID},
+          ${`review.scenario:${f.reviewID}:${item.id}`},'passed',
+          ${JSON.stringify({
+            reviewId: f.reviewID,
+            id: item.id,
+            title: item.id,
+            category: "normal",
+            observationKind: item.kind,
+            criterion: 1,
+            expected: "Expected",
+            observed: "Observed",
+            status: "passed",
+            startedAt,
+            endedAt,
+            mediaStartedMs: item.position,
+            mediaSessionId: item.kind === "app" ? grant.sessionID : null,
+          })}::jsonb,
+          ${startedAt}::timestamptz,${endedAt}::timestamptz,${endedAt}::timestamptz)`;
+    }
     await f.database.client`UPDATE factory.candidate_review SET evidence=${JSON.stringify([
       {
         kind: "browser",

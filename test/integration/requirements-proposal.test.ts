@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
@@ -15,6 +15,9 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
   const db = process.connect();
   try {
     const owned = await fixture(undefined, undefined, db);
+    const actorTemplatePath = "ops/native/project-actor.json";
+    await db.client`UPDATE factory.project SET actor_template_path=${actorTemplatePath}
+      WHERE id=${owned.projectID}`;
     const ticketID = crypto.randomUUID();
     const conversationID = crypto.randomUUID();
     const commandID = crypto.randomUUID();
@@ -70,7 +73,7 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
         implementationAdmitted: false,
       });
       expect(await admittedProjectContext(sql, owned.projectID, ticketID)).toMatchObject({
-        project: { id: owned.projectID, defaultBranch: "main" },
+        project: { id: owned.projectID, defaultBranch: "main", actorTemplatePath },
         relationships: [],
       });
       await expect(admittedTicketContext(sql, crypto.randomUUID(), ticketID)).rejects.toThrow(

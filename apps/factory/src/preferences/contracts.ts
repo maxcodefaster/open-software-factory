@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { desktopBackgroundKeys } from "../../../../packages/interface-domain/src/background";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 
 export const uiPreferenceSchema = z.object({
   desktopBackgroundKey: z.enum(desktopBackgroundKeys),

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { type SkillContent, skillRevisionInput } from "#conversation-domain/skills";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -8,10 +9,6 @@ import { createProjectAgentController } from "../../apps/factory/src/project-age
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import {
-  type SkillContent,
-  skillRevisionInput,
-} from "../../packages/conversation-domain/src/skills";
 import {
   fixture as buildFixture,
   buildModelID,
@@ -227,8 +224,8 @@ async function fixture(live = false) {
     const projectID = crypto.randomUUID();
     await database.client`INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userID}, 'Owned Skill Developer', ${`skills-${userID}@factory.local`}, true)`;
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`skills-${projectID.slice(0, 8)}`}, 'Owned Skill Project', 'https://example.invalid/skill.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`skills-${projectID.slice(0, 8)}`}, 'Owned Skill Project', 'https://example.invalid/skill.git', 'main', '.factory/actor-template.json', ${administrator})`;
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by) VALUES (${projectID}, ${userID}, 'developer', ${administrator})`;
     await database.client.begin((sql) => disableStarterSkillsIn(sql, userID, projectID, database));
     const cookie = await processFixture.signIn();
@@ -392,7 +389,7 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
     expect(owned.observations[0]?.tools).toContain("skill_read");
     const loaded = await owned.database.client<
       Array<{ revisionID: string }>
-    >`SELECT revision_id AS "revisionID" FROM factory.agent_turn_skill WHERE turn_id = ${turn?.id ?? null}`;
+    >`SELECT payload->>'revisionId' AS "revisionID" FROM factory.operation WHERE kind = 'coding.turn_skill' AND scope_type = 'agent_turn' AND scope_id = ${turn?.id ?? null}`;
     expect([...loaded]).toEqual([{ revisionID: id }]);
     await expect(
       Promise.resolve(
@@ -403,7 +400,7 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
     await expect(
       Promise.resolve(
         owned.database
-          .client`UPDATE factory.agent_turn_skill SET revision_id = ${crypto.randomUUID()} WHERE turn_id = ${turn?.id ?? null}`,
+          .client`UPDATE factory.operation SET payload = jsonb_set(payload, '{revisionId}', to_jsonb(${crypto.randomUUID()}::text)) WHERE kind = 'coding.turn_skill' AND scope_type = 'agent_turn' AND scope_id = ${turn?.id ?? null}`,
       ),
     ).rejects.toThrow("Loaded Skill identities are immutable");
     await expect(
@@ -521,7 +518,7 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
       .client`DELETE FROM factory.ticket_conversation WHERE id = ${conversation.id}`;
     expect(
       await owned.database
-        .client`SELECT turn_id FROM factory.agent_turn_skill WHERE turn_id = ${turn.id}`,
+        .client`SELECT scope_id FROM factory.operation WHERE kind = 'coding.turn_skill' AND scope_type = 'agent_turn' AND scope_id = ${turn.id}`,
     ).toHaveLength(0);
   } finally {
     await owned.dispose();
@@ -704,7 +701,7 @@ test("Build installs exact native packages, records actual loading and keeps the
     expect((await controller.get(owned.changeID, crypto.randomUUID())).turn).toBeUndefined();
     const loaded = await owned.database.client<
       Array<{ revisionID: string }>
-    >`SELECT revision_id AS "revisionID" FROM factory.agent_turn_skill WHERE turn_id = ${turn?.id ?? null}`;
+    >`SELECT payload->>'revisionId' AS "revisionID" FROM factory.operation WHERE kind = 'coding.turn_skill' AND scope_type = 'agent_turn' AND scope_id = ${turn?.id ?? null}`;
     expect([...loaded]).toEqual([{ revisionID }]);
     expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
     const modelID = turn?.authority.modelId;
@@ -776,7 +773,8 @@ test.skipIf(process.env["FACTORY_LIVE_SKILL_PLAN"] !== "1")(
       expect(response?.turn?.usage.outputTokens).toBeGreaterThan(0);
       const loaded = await owned.database.client<
         Array<{ revisionID: string }>
-      >`SELECT revision_id AS "revisionID" FROM factory.agent_turn_skill WHERE turn_id = ${turn?.id ?? null}`;
+      >`SELECT payload->>'revisionId' AS "revisionID" FROM factory.operation
+        WHERE kind='coding.turn_skill' AND scope_type='agent_turn' AND scope_id = ${turn?.id ?? null}`;
       expect([...loaded]).toEqual([{ revisionID }]);
       console.log(
         `Genuine Plan loaded approved Skill ${revisionID} with ${turn?.authority.modelId}; isolated database cleanup follows.`,

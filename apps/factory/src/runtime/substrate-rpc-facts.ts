@@ -1,12 +1,8 @@
-import { and, eq, isNotNull, isNull, sql as query } from "drizzle-orm";
+import { and, eq, isNull, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import { substrateActorRpc } from "../../../../packages/db/src/schema";
-import type { NativeActor } from "../../../../packages/runtime-kubernetes/src/substrate-control";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { operation as operationTable } from "#db/schema";
+import type { NativeActor } from "#runtime-kubernetes/substrate-control";
 import { CommandError } from "../command-error";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | DatabaseTransaction;
@@ -21,6 +17,10 @@ export type ActorRPC = {
   outcome: unknown;
 };
 
+function actorRPCKey(attemptID: string, action: ActorRPC["action"], originKey: string) {
+  return `runtime.actor_rpc:${attemptID}:${action}:${originKey}`;
+}
+
 export function actorRPCOrigin(checkpoint: unknown) {
   return checkpoint === null ? "initial" : z.object({ uuid: z.uuid() }).parse(checkpoint).uuid;
 }
@@ -33,21 +33,22 @@ export async function actorRPCIn(
 ) {
   const [row] = await drizzleTransaction(sql)
     .select({
-      action: query<ActorRPC["action"]>`${substrateActorRpc.action}`,
-      originKey: substrateActorRpc.originKey,
-      originCheckpoint: substrateActorRpc.originCheckpoint,
-      actorUID: substrateActorRpc.actorUid,
-      nativeVersion: substrateActorRpc.nativeVersion,
-      stopID: substrateActorRpc.stopId,
-      attempted: query<boolean>`${substrateActorRpc.attemptedAt} IS NOT NULL`,
-      outcome: substrateActorRpc.outcome,
+      action: query<ActorRPC["action"]>`${operationTable.payload}->>'action'`,
+      originKey: query<string>`${operationTable.payload}->>'originKey'`,
+      originCheckpoint: query<unknown>`NULLIF(${operationTable.payload}->'originCheckpoint', 'null'::jsonb)`,
+      actorUID: query<string>`${operationTable.payload}->>'actorUid'`,
+      nativeVersion: query<string>`${operationTable.payload}->>'nativeVersion'`,
+      stopID: query<string | null>`${operationTable.payload}->>'stopId'`,
+      attempted: query<boolean>`(${operationTable.payload}->>'attemptedAt') IS NOT NULL`,
+      outcome: query<unknown>`${operationTable.result}`,
     })
-    .from(substrateActorRpc)
+    .from(operationTable)
     .where(
       and(
-        eq(substrateActorRpc.runtimeAttemptId, attemptID),
-        eq(substrateActorRpc.action, action),
-        eq(substrateActorRpc.originKey, originKey),
+        eq(operationTable.idempotencyKey, actorRPCKey(attemptID, action, originKey)),
+        eq(operationTable.kind, "runtime.actor_rpc"),
+        eq(operationTable.scopeType, "runtime_attempt"),
+        eq(operationTable.scopeId, attemptID),
       ),
     );
   return row ?? null;
@@ -65,22 +66,26 @@ export async function intendActorRPCIn(
 ) {
   const originKey = actorRPCOrigin(checkpoint);
   await drizzleTransaction(sql)
-    .insert(substrateActorRpc)
+    .insert(operationTable)
     .values({
-      runtimeAttemptId: attemptID,
-      action,
-      originKey,
-      actorUid: actor.metadata.uid,
-      nativeVersion: actor.metadata.version,
-      originCheckpoint: checkpoint,
-      stopId: stopID ?? null,
+      id: crypto.randomUUID(),
+      kind: "runtime.actor_rpc",
+      scopeType: "runtime_attempt",
+      scopeId: attemptID,
+      idempotencyKey: actorRPCKey(attemptID, action, originKey),
+      state: "intended",
+      payload: {
+        runtimeAttemptId: attemptID,
+        action,
+        originKey,
+        actorUid: actor.metadata.uid,
+        nativeVersion: actor.metadata.version,
+        originCheckpoint: checkpoint ?? null,
+        stopId: stopID ?? null,
+      },
     })
     .onConflictDoNothing({
-      target: [
-        substrateActorRpc.runtimeAttemptId,
-        substrateActorRpc.action,
-        substrateActorRpc.originKey,
-      ],
+      target: operationTable.idempotencyKey,
     });
   const row = await actorRPCIn(sql, attemptID, action, originKey);
   if (!row || row.actorUID !== actor.metadata.uid || row.stopID !== (stopID ?? null))
@@ -90,18 +95,26 @@ export async function intendActorRPCIn(
 
 export async function dispatchActorRPCIn(sql: SQL, attemptID: string, operation: ActorRPC) {
   const result = await drizzleTransaction(sql)
-    .update(substrateActorRpc)
-    .set({ attemptedAt: query`now()` })
+    .update(operationTable)
+    .set({
+      state: "attempted",
+      payload: query`${operationTable.payload} || jsonb_build_object('attemptedAt', now())`,
+      updatedAt: query`now()`,
+    })
     .where(
       and(
-        eq(substrateActorRpc.runtimeAttemptId, attemptID),
-        eq(substrateActorRpc.action, operation.action),
-        eq(substrateActorRpc.originKey, operation.originKey),
-        eq(substrateActorRpc.actorUid, operation.actorUID),
-        isNull(substrateActorRpc.attemptedAt),
+        eq(
+          operationTable.idempotencyKey,
+          actorRPCKey(attemptID, operation.action, operation.originKey),
+        ),
+        eq(operationTable.kind, "runtime.actor_rpc"),
+        eq(operationTable.scopeType, "runtime_attempt"),
+        eq(operationTable.scopeId, attemptID),
+        query`${operationTable.payload}->>'actorUid' = ${operation.actorUID}`,
+        query`(${operationTable.payload}->>'attemptedAt') IS NULL`,
       ),
     )
-    .returning({ originKey: substrateActorRpc.originKey });
+    .returning({ originKey: query<string>`${operationTable.payload}->>'originKey'` });
   if (result.length !== 1)
     throw new CommandError(
       "unavailable",
@@ -123,16 +136,25 @@ export async function observeActorRPCIn(
     ...(checkpoint ? { checkpoint } : {}),
   };
   await drizzleTransaction(sql)
-    .update(substrateActorRpc)
-    .set({ outcome, outcomeRecordedAt: query`now()` })
+    .update(operationTable)
+    .set({
+      state: "completed",
+      result: outcome,
+      completedAt: query`now()`,
+      updatedAt: query`now()`,
+    })
     .where(
       and(
-        eq(substrateActorRpc.runtimeAttemptId, attemptID),
-        eq(substrateActorRpc.action, operation.action),
-        eq(substrateActorRpc.originKey, operation.originKey),
-        eq(substrateActorRpc.actorUid, operation.actorUID),
-        isNotNull(substrateActorRpc.attemptedAt),
-        isNull(substrateActorRpc.outcome),
+        eq(
+          operationTable.idempotencyKey,
+          actorRPCKey(attemptID, operation.action, operation.originKey),
+        ),
+        eq(operationTable.kind, "runtime.actor_rpc"),
+        eq(operationTable.scopeType, "runtime_attempt"),
+        eq(operationTable.scopeId, attemptID),
+        query`${operationTable.payload}->>'actorUid' = ${operation.actorUID}`,
+        query`(${operationTable.payload}->>'attemptedAt') IS NOT NULL`,
+        isNull(operationTable.result),
       ),
     );
 }

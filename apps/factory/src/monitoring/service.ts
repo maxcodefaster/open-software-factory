@@ -1,10 +1,6 @@
 import type { z } from "zod";
-import {
-  monitoringChange,
-  monitoringSave,
-  monitoringView,
-} from "../../../../packages/conversation-domain/src/monitoring";
-import { type createAccessController } from "../access/api";
+import { monitoringChange, monitoringSave, monitoringView } from "#conversation-domain/monitoring";
+import type { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { createMonitoringController } from "./controller";
 

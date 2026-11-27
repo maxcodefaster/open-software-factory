@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import type { EpicProposal } from "#conversation-domain/epic-proposal";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { appendTicketAuthoringIn } from "#ticket-authoring/authoring";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import {
@@ -8,9 +11,6 @@ import {
 } from "../../apps/factory/src/project-agent/epic-confirmation";
 import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { appendTicketAuthoringIn } from "../../packages/ticket-authoring/src/authoring";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
@@ -592,11 +592,6 @@ test("Epic confirmation is atomic, versioned and replayable; converts intent and
       await db.client`SELECT state,title FROM factory.ticket WHERE id=${fixtureValue(a.ticketIds[1], "a.ticketIds[1]")}`;
     expect(newTicket).toMatchObject({ state: "ready", title: "Export invoice" });
     expect(
-      (
-        await db.client`SELECT ticket_id FROM factory.requirements_entry_intent WHERE ticket_id=ANY(${a.ticketIds}::uuid[])`
-      ).length,
-    ).toBe(0);
-    expect(
       (await db.client`SELECT id FROM factory.agent_turn WHERE project_id=${owned.projectID}`)
         .length,
     ).toBe(1);
@@ -614,7 +609,7 @@ test("Epic confirmation is atomic, versioned and replayable; converts intent and
     ).rejects.toThrow("another decision");
     await expect(
       (async () => {
-        await db.client`UPDATE factory.epic_confirmation SET decision='{}' WHERE id=${input.commandId}`;
+        await db.client`UPDATE factory.audit_event SET payload='{}' WHERE id=${input.commandId} AND kind='tickets.epic_confirmation'`;
       })(),
     ).rejects.toThrow("immutable");
   } finally {
@@ -682,9 +677,6 @@ test("Epic confirmation keeps an implemented origin and its admitted scope witho
     ).toHaveLength(1);
     expect(
       await db.client`SELECT id FROM factory.agent_turn WHERE project_id=${owned.projectID}`,
-    ).toHaveLength(0);
-    expect(
-      await db.client`SELECT ticket_id FROM factory.requirements_entry_intent WHERE ticket_id=ANY(${result.ticketIds}::uuid[])`,
     ).toHaveLength(0);
     expect(
       await db.client`SELECT id FROM factory.change WHERE project_id=${owned.projectID}`,

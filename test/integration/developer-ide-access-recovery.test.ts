@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import {
   createDeveloperIDEAccess,
   developerIDEPath,

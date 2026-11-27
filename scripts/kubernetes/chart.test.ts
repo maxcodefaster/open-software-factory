@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { parse, parseAllDocuments } from "yaml";
 import imagePins from "../../deploy/helm/factory/image-pins.json";
 import upstream from "../../upstream.json";
+import { planSubstrateRouterAdmission } from "../runtime/substrate-profile";
 
 const chart = "deploy/helm/factory";
 const applicationImage = `registry.example/factory@sha256:${"a".repeat(64)}`;
@@ -50,6 +51,12 @@ type Resource = {
           command?: string[];
           args?: string[];
           env?: Array<{ name: string; value?: string }>;
+          volumeMounts?: Array<{
+            name: string;
+            mountPath: string;
+            readOnly?: boolean;
+            subPath?: string;
+          }>;
           startupProbe?: {
             exec?: { command: string[] };
             httpGet?: { path: string; port: number };
@@ -78,6 +85,7 @@ type Resource = {
         }>;
         automountServiceAccountToken?: boolean;
         serviceAccountName?: string;
+        initContainers?: Array<{ name: string; volumeMounts?: Array<{ name: string }> }>;
         volumes?: unknown[];
       };
     };
@@ -116,6 +124,50 @@ function resources() {
   })();
   return rendered;
 }
+
+test("native Starter catalog is explicit, immutable and passed unchanged rather than selected from the control-plane host", async () => {
+  const defaultConfig = (await resources()).find(
+    (resource) => resource.kind === "ConfigMap" && resource.metadata.name === "portable-config",
+  );
+  expect(defaultConfig?.data?.["FACTORY_STARTER_IMAGES"]).toBeUndefined();
+  const images = {
+    platform: "linux/arm64",
+    development: `registry.example/starter-work@sha256:${"b".repeat(64)}`,
+    postgres: `registry.example/starter-postgres@sha256:${"c".repeat(64)}`,
+  };
+  const rendered = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set-json",
+    `starterImages=${JSON.stringify(images)}`,
+  ]);
+  expect(rendered.exitCode, rendered.stderr).toBe(0);
+  const config = parseAllDocuments(rendered.stdout)
+    .map((document) => document.toJSON() as Resource)
+    .find(
+      (resource) => resource.kind === "ConfigMap" && resource.metadata.name === "portable-config",
+    );
+  expect(JSON.parse(config?.data?.["FACTORY_STARTER_IMAGES"] ?? "null")).toEqual(images);
+  for (const invalid of [
+    { ...images, development: "node:latest" },
+    { ...images, platform: "linux/riscv64" },
+    { platform: images.platform, development: images.development },
+    { ...images, support: images.postgres },
+  ]) {
+    const result = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set-json",
+      `starterImages=${JSON.stringify(invalid)}`,
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("starterImages");
+  }
+});
 
 test("maintenance resources are independently configurable without changing the upgrade fence", async () => {
   const defaultJob = (await resources()).find((resource) => resource.kind === "Job");
@@ -477,6 +529,129 @@ test("cold installation progress allows the documented twenty-minute readiness w
     1_200,
   );
 });
+
+test("only Factory receives its rotating native Router mTLS identity", async () => {
+  const all = await resources();
+  const application = all.find((resource) => resource.kind === "Deployment");
+  expect(application?.spec?.template?.spec.volumes).toContainEqual({
+    name: "substrate-control",
+    projected: {
+      defaultMode: 0o444,
+      sources: [
+        {
+          podCertificate: {
+            signerName: "podidentity.podcert.ate.dev/identity",
+            keyType: "ECDSAP256",
+            credentialBundlePath: "credential-bundle.pem",
+          },
+        },
+        {
+          serviceAccountToken: {
+            audience: "api.ate-system.svc",
+            expirationSeconds: 600,
+            path: "token",
+          },
+        },
+        {
+          clusterTrustBundle: {
+            signerName: "servicedns.podcert.ate.dev/identity",
+            labelSelector: { matchLabels: { "podcert.ate.dev/canarying": "live" } },
+            path: "ca.pem",
+          },
+        },
+      ],
+    },
+  });
+  const pod = application?.spec?.template?.spec;
+  expect(pod?.serviceAccountName).toBe("portable");
+  expect(
+    pod?.containers.find((container) => container.name === "factory")?.volumeMounts,
+  ).toContainEqual({
+    name: "substrate-control",
+    mountPath: "/run/factory/substrate-control",
+    readOnly: true,
+  });
+  // Whole-volume projections rotate. A subPath mount would freeze the leaf/CA.
+  for (const container of pod?.containers ?? [])
+    for (const mount of container.volumeMounts ?? [])
+      if (mount.name === "substrate-control") {
+        expect(container.name).toBe("factory");
+        expect(mount.subPath).toBeUndefined();
+        expect(mount.readOnly).toBe(true);
+      }
+  for (const container of pod?.initContainers ?? [])
+    expect(container.volumeMounts?.some((mount) => mount.name === "substrate-control")).not.toBe(
+      true,
+    );
+  for (const resource of all.filter((resource) => resource !== application))
+    expect(JSON.stringify(resource)).not.toContain("podidentity.podcert.ate.dev/identity");
+  expect(JSON.stringify(all)).not.toContain("atenet-client");
+  expect(all.some((resource) => resource.metadata.name === "atenet-router")).toBe(false);
+});
+
+test.each([
+  ["factory", "factory", "factory"],
+  ["team-native", "factory-prod", "team-native"],
+  [`${"x".repeat(39)}-longer`, "factory-proof", "x".repeat(39)],
+])(
+  "Router commissioning uses rendered installation identity for release %s",
+  async (release, namespace, account) => {
+    const result = await helm([
+      "template",
+      release,
+      chart,
+      "--namespace",
+      namespace,
+      ...localValues,
+    ]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const all = parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource);
+    const application = all.find((resource) => resource.kind === "Deployment");
+    const serviceAccount = application?.spec?.template?.spec.serviceAccountName;
+    expect(serviceAccount).toBe(account);
+    expect(
+      all.some(
+        (resource) =>
+          resource.kind === "ServiceAccount" && resource.metadata.name === serviceAccount,
+      ),
+    ).toBe(true);
+    if (!serviceAccount) throw new Error("Missing rendered Factory ServiceAccount");
+    const router = {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: {
+        namespace: "ate-system",
+        name: "atenet-router",
+        uid: "original-router",
+        resourceVersion: "42",
+      },
+      spec: {
+        template: {
+          spec: {
+            containers: [
+              {
+                name: "atenet-router",
+                args: [
+                  "router",
+                  "--mode=ingress",
+                  "--envoy-cert-path=/run/servicedns.podcert.ate.dev/credential-bundle.pem",
+                  "--ingress-client-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem",
+                  "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-system/sa/atenet-client",
+                ],
+              },
+            ],
+          },
+        },
+      },
+    };
+    const plan = planSubstrateRouterAdmission(router, namespace, serviceAccount);
+    expect(plan.spiffeID).toBe(`spiffe://cluster.local/ns/${namespace}/sa/${account}`);
+    expect(plan.allowedSPIFFEIDs).toEqual([
+      "spiffe://cluster.local/ns/ate-system/sa/atenet-client",
+    ]);
+    expect(plan.patch.at(-1)?.value).toBe(`--ingress-allowed-spiffe-ids=${plan.spiffeID}`);
+  },
+);
 
 test("PostgreSQL readiness allows its own connection check to finish under execution load", async () => {
   const postgres = (await resources()).find(

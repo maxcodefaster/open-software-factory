@@ -2,11 +2,13 @@ import type {
   WikiGenerationOutput,
   WikiGenerationProgress,
   WikiPageSnapshot,
-} from "../../../../packages/knowledge-domain/src/generation";
+} from "#knowledge-domain/generation";
 import type { ModelUsageSink, ResolvedModelConnection } from "../models/inference-contracts";
 
 export type WikiGenerationInput = {
   name: string;
+  // Saved Project metadata; source-only analyses can use the native standard path.
+  actorTemplatePath?: string;
   commit: string;
   modelId: string;
   connection?: ResolvedModelConnection;

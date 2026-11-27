@@ -84,14 +84,9 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	}
 }
 
-func TestActorCheckoutRequiresItsExactRootlessKitOwnership(t *testing.T) {
-	if !actorSourceIDMap("         0       1000          1\n         1     100000      65536\n") {
-		t.Fatal("normal private RootlessKit mapping rejected")
-	}
-	for _, invalid := range []string{"0 0 4294967295", "0 0 1\n1 100000 65536", "0 1000 65536", "0 1000 1\n1 200000 65536"} {
-		if actorSourceIDMap(invalid) {
-			t.Fatal("unqualified source identity accepted")
-		}
+func TestActorCheckoutRequiresItsNativeControllerIdentity(t *testing.T) {
+	if err := ValidateActorSourceIdentity(t.TempDir()); err == nil {
+		t.Fatal("ordinary test process acquired native controller authority")
 	}
 	parent := t.TempDir()
 	repository := t.TempDir()

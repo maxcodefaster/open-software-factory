@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { architectureDiagramInput } from "../../../../packages/requirement-domain/src/technical-design";
+import { architectureDiagramInput } from "#requirement-domain/technical-design";
 import {
   diagramRendererVersion,
   renderArchitectureDiagram,

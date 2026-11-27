@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { documentBlocks } from "../../apps/factory/src/document-model";
+import { documentBlocks } from "../../apps/factory/src/editor/client";
 import {
   knowledgeGenerationSchema,
   knowledgeSearchSchema,
@@ -11,7 +12,6 @@ import {
   repositoryDocumentsSchema,
 } from "../../apps/factory/src/knowledge/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -169,9 +169,9 @@ test.beforeEach(async ({ page }) => {
     },
   });
   await database.client`
-    INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+    INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
     VALUES (${projectID}, ${projectSlug}, 'Document coherence', 'https://example.invalid/documents.git',
-      'main', '.devcontainer/devcontainer.json', ${userID})
+      'main', '.factory/actor-template.json', ${userID})
   `;
   await database.client`
     INSERT INTO factory.ticket(id, project_id, title, description, state, created_by)
@@ -197,10 +197,26 @@ test.beforeEach(async ({ page }) => {
   await database.client`
     UPDATE factory.knowledge_page SET current_revision_id = ${currentRevisionID} WHERE id = ${pageID}
   `;
+  const generationID = crypto.randomUUID();
   await database.client`
-    INSERT INTO factory.knowledge_generation(id, project_id, source_commit_sha, state,
-      page_count, conflict_count, created_by, completed_at)
-    VALUES (${crypto.randomUUID()}, ${projectID}, ${commit}, 'succeeded', 1, 1, ${userID}, now())
+    INSERT INTO factory.operation(id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+      payload, created_by, completed_at)
+    VALUES (${generationID}, 'knowledge.generation', 'project', ${projectID},
+      ${`knowledge.generation:${generationID}`}, NULL, 'succeeded',
+      ${JSON.stringify({
+        id: generationID,
+        projectId: projectID,
+        sourceCommitSha: commit,
+        pageCount: 1,
+        conflictCount: 1,
+        failure: null,
+        createdBy: userID,
+        modelId: null,
+        attemptId: null,
+        modelConnectionId: null,
+        modelConnectionVersion: null,
+        progress: null,
+      })}::text::jsonb, ${userID}, now())
   `;
   await mockFactoryFunctions(page, {
     knowledge: {
@@ -1302,8 +1318,10 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
     ),
   ).toEqual({ id: implementation.commandId });
   const [waiting] = await database.client`
-    SELECT requirement_revision_id AS revision,created_by AS author,state,source_sha AS source
-    FROM factory.implementation_order WHERE command_id=${implementation.commandId}`;
+    SELECT payload->>'requirementRevisionId' AS revision, created_by AS author, state,
+      payload->>'sourceSha' AS source
+    FROM factory.operation
+    WHERE kind='tickets.implementation_order' AND id=${implementation.commandId}`;
   expect(waiting).toEqual({
     revision: second.id,
     author: userID,

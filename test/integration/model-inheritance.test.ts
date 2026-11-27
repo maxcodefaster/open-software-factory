@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import { inheritedModelSettingsView } from "#conversation-domain/model-inheritance";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import {

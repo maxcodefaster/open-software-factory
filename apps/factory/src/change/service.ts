@@ -1,32 +1,29 @@
 import { and, desc, eq, exists, gt, notExists, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { implementationInput } from "../../../../packages/change-domain/src/implementation";
-import { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import type { implementationInput } from "#change-domain/implementation";
+import { sourceCitationInput } from "#conversation-domain/conversation";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
+  auditEvent,
   authUser,
   conversationEntry,
-  implementationOrder,
+  operation,
   requirementApproval,
   requirementRevision,
   technicalDesignRevision,
   ticket,
   ticketConversation,
   ticketDocumentRevision,
-  ticketFollowUp,
-} from "../../../../packages/db/src/schema";
-import type {
-  TicketDocumentInput,
-  TicketFollowUpInput,
-} from "../../../../packages/requirement-domain/src/document";
-import type { saveTechnicalDesignInput } from "../../../../packages/requirement-domain/src/technical-design";
-import { type createAccessController } from "../access/api";
+} from "#db/schema";
+import type { TicketDocumentInput, TicketFollowUpInput } from "#requirement-domain/document";
+import type { saveTechnicalDesignInput } from "#requirement-domain/technical-design";
+import type { createAccessController } from "../access/api";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
-import { type createAgentController } from "../agent/api";
+import type { createAgentController } from "../agent/api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import { type createProjectAgentController } from "../project-agent/api";
+import type { createProjectAgentController } from "../project-agent/api";
 import { saveTechnicalDesignIn, technicalPlanningOutstandingIn } from "../technical-design/api";
 import { renderArchitectureDiagrams } from "../technical-design/diagrams";
 import { ticketDetailSchema } from "./contracts";
@@ -142,14 +139,26 @@ export function createTicketService(options: {
         .orderBy(desc(ticketDocumentRevision.ordinal));
       const [origin] = await db
         .select({ id: ticket.id, title: ticket.title })
-        .from(ticketFollowUp)
-        .innerJoin(ticket, eq(ticket.id, ticketFollowUp.sourceTicketId))
-        .where(eq(ticketFollowUp.ticketId, ticketID));
+        .from(auditEvent)
+        .innerJoin(ticket, sql`${ticket.id} = (${auditEvent.payload}->>'sourceTicketId')::uuid`)
+        .where(
+          and(
+            eq(auditEvent.kind, "tickets.follow_up"),
+            eq(auditEvent.scopeType, "ticket"),
+            eq(auditEvent.scopeId, ticketID),
+          ),
+        );
       const followUps = await db
         .select({ id: ticket.id, title: ticket.title })
-        .from(ticketFollowUp)
-        .innerJoin(ticket, eq(ticket.id, ticketFollowUp.ticketId))
-        .where(eq(ticketFollowUp.sourceTicketId, ticketID));
+        .from(auditEvent)
+        .innerJoin(ticket, sql`${ticket.id}::text = ${auditEvent.scopeId}`)
+        .where(
+          and(
+            eq(auditEvent.kind, "tickets.follow_up"),
+            eq(auditEvent.scopeType, "ticket"),
+            sql`(${auditEvent.payload}->>'sourceTicketId') = ${ticketID}`,
+          ),
+        );
       const newer = alias(conversationEntry, "newer");
       const [proposal] = await db
         .select({ id: conversationEntry.id, payload: conversationEntry.payload })
@@ -221,14 +230,20 @@ export function createTicketService(options: {
       );
       const [order] = await db
         .select({
-          commandId: implementationOrder.commandId,
-          state: implementationOrder.state,
-          reason: implementationOrder.lastError,
-          createdBy: implementationOrder.createdBy,
+          commandId: operation.id,
+          state: sql<"waiting" | "started" | "blocked" | "cancelled">`${operation.state}`,
+          reason: operation.error,
+          createdBy: operation.createdBy,
         })
-        .from(implementationOrder)
-        .where(eq(implementationOrder.ticketId, ticketID))
-        .orderBy(desc(implementationOrder.createdAt))
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, "tickets.implementation_order"),
+            eq(operation.scopeType, "ticket"),
+            eq(operation.scopeId, ticketID),
+          ),
+        )
+        .orderBy(desc(operation.createdAt))
         .limit(1);
       if (developer) await access.requireDevelopment(userID, savedTicket.projectId);
       return ticketDetailSchema.parse({
@@ -273,13 +288,15 @@ export function createTicketService(options: {
         if (!savedTicket) throw new CommandError("not-found", "Ticket not found.");
         await projectAuthorityIn(transaction, userID, savedTicket.projectID);
         const [order] = await db
-          .select({ userID: implementationOrder.createdBy })
-          .from(implementationOrder)
+          .select({ userID: operation.createdBy })
+          .from(operation)
           .where(
             and(
-              eq(implementationOrder.commandId, commandID),
-              eq(implementationOrder.ticketId, ticketID),
-              eq(implementationOrder.state, "waiting"),
+              eq(operation.id, commandID),
+              eq(operation.kind, "tickets.implementation_order"),
+              eq(operation.scopeType, "ticket"),
+              eq(operation.scopeId, ticketID),
+              eq(operation.state, "waiting"),
             ),
           )
           .for("update");
@@ -289,14 +306,17 @@ export function createTicketService(options: {
           await projectDevelopmentAuthorityIn(transaction, userID, savedTicket.projectID);
         }
         await db
-          .update(implementationOrder)
+          .update(operation)
           .set({
             state: "cancelled",
-            cancelledBy: userID,
-            cancelledAt: sql<Date>`now()`,
+            activeKey: null,
+            completedAt: sql<Date>`now()`,
+            payload: sql`${operation.payload} || jsonb_build_object('cancelledBy', ${userID}::text, 'cancelledAt', to_jsonb(now()))`,
             updatedAt: sql<Date>`now()`,
           })
-          .where(eq(implementationOrder.commandId, commandID));
+          .where(
+            and(eq(operation.id, commandID), eq(operation.kind, "tickets.implementation_order")),
+          );
       });
     },
     async saveTechnicalDesign(

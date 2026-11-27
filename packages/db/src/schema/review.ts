@@ -1,6 +1,5 @@
 import { sql } from "drizzle-orm";
 import {
-  bigint,
   boolean,
   check,
   foreignKey,
@@ -8,7 +7,6 @@ import {
   integer,
   jsonb,
   type PgTableExtraConfigValue,
-  primaryKey,
   text,
   timestamp,
   unique,
@@ -47,7 +45,6 @@ export const candidateReview = factorySchema.table(
     repairPromptedAt: timestamp("repair_prompted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
-    coverageVersion: integer("coverage_version").default(1).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
     index("candidate_review_change_idx").using("btree", table.changeId.asc().nullsLast()),
@@ -94,11 +91,6 @@ export const candidateReview = factorySchema.table(
       foreignColumns: [verification.id, verification.changeId, verification.commitSha],
       name: "candidate_review_verification_id_change_id_commit_sha_fkey",
     }),
-    foreignKey({
-      columns: [table.verificationId],
-      foreignColumns: [verification.id],
-      name: "candidate_review_verification_id_fkey",
-    }),
     unique("candidate_review_id_change_id_verification_id_commit_sha_key").on(
       table.id,
       table.changeId,
@@ -131,33 +123,6 @@ export const candidateReview = factorySchema.table(
     check(
       "candidate_review_state_check",
       sql`${table.state} = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text])`,
-    ),
-  ],
-);
-
-export const reviewFeedbackMessage = factorySchema.table(
-  "review_feedback_message",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    feedbackId: uuid("feedback_id").notNull(),
-    authorId: uuid("author_id").notNull(),
-    body: text("body").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.authorId],
-      foreignColumns: [authUser.id],
-      name: "review_feedback_message_author_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.feedbackId],
-      foreignColumns: [reviewFeedback.id],
-      name: "review_feedback_message_feedback_id_fkey",
-    }),
-    check(
-      "review_feedback_message_body_check",
-      sql`(length(${table.body}) >= 1) AND (length(${table.body}) <= 2000)`,
     ),
   ],
 );
@@ -301,103 +266,6 @@ export const reviewMedia = factorySchema.table(
     check(
       "review_media_state_check",
       sql`${table.state} = ANY (ARRAY['intended'::text, 'recording'::text, 'complete'::text, 'unavailable'::text, 'deleted'::text])`,
-    ),
-  ],
-);
-
-export const reviewFeedbackCommand = factorySchema.table(
-  "review_feedback_command",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    changeId: uuid("change_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    input: jsonb("input").notNull(),
-    feedbackId: uuid("feedback_id"),
-    turnId: uuid("turn_id"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "review_feedback_command_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "review_feedback_command_change_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.feedbackId],
-      foreignColumns: [reviewFeedback.id],
-      name: "review_feedback_command_feedback_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "review_feedback_command_turn_id_fkey",
-    }),
-    unique("review_feedback_command_turn_id_key").on(table.turnId),
-  ],
-);
-
-export const reviewScenario = factorySchema.table(
-  "review_scenario",
-  {
-    reviewId: uuid("review_id").notNull(),
-    id: text("id").notNull(),
-    title: text("title").notNull(),
-    category: text("category").$type<"normal" | "error" | "boundary">().notNull(),
-    criterion: integer("criterion").notNull(),
-    expected: text("expected").notNull(),
-    startedAt: timestamp("started_at", { withTimezone: true })
-      .default(sql`clock_timestamp()`)
-      .notNull(),
-    endedAt: timestamp("ended_at", { withTimezone: true }),
-    observed: text("observed"),
-    mediaStartedMs: bigint("media_started_ms", { mode: "number" }),
-    mediaSessionId: uuid("media_session_id"),
-    status: text("status").$type<"passed" | "failed" | "unverified">(),
-    observationKind: text("observation_kind").$type<"app" | "source">(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.mediaSessionId],
-      foreignColumns: [buildBrowserSession.id],
-      name: "review_scenario_media_session_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.reviewId],
-      foreignColumns: [candidateReview.id],
-      name: "review_scenario_review_id_fkey",
-    }),
-    primaryKey({ columns: [table.reviewId, table.id], name: "review_scenario_pkey" }),
-    check(
-      "review_scenario_category_check",
-      sql`${table.category} = ANY (ARRAY['normal'::text, 'error'::text, 'boundary'::text])`,
-    ),
-    check("review_scenario_criterion_check", sql`${table.criterion} > 0`),
-    check(
-      "review_scenario_expected_check",
-      sql`(length(${table.expected}) >= 1) AND (length(${table.expected}) <= 1000)`,
-    ),
-    check("review_scenario_id_check", sql`${table.id} ~ '^[a-z0-9-]{1,64}$'::text`),
-    check("review_scenario_media_started_ms_check", sql`${table.mediaStartedMs} >= 0`),
-    check(
-      "review_scenario_observation_kind_check",
-      sql`${table.observationKind} = ANY (ARRAY['app'::text, 'source'::text])`,
-    ),
-    check(
-      "review_scenario_observed_check",
-      sql`(length(${table.observed}) >= 1) AND (length(${table.observed}) <= 2000)`,
-    ),
-    check(
-      "review_scenario_status_check",
-      sql`${table.status} = ANY (ARRAY['passed'::text, 'failed'::text, 'unverified'::text])`,
-    ),
-    check(
-      "review_scenario_title_check",
-      sql`(length(${table.title}) >= 1) AND (length(${table.title}) <= 200)`,
     ),
   ],
 );

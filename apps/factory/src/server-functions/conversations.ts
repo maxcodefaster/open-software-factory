@@ -5,8 +5,8 @@ import {
   conversationModeCommandInput,
   interviewAnswerCommandInput,
   newConversationInput,
-} from "../../../../packages/conversation-domain/src/conversation";
-import { confirmEpicProposalInput } from "../../../../packages/conversation-domain/src/epic-proposal";
+} from "#conversation-domain/conversation";
+import { confirmEpicProposalInput } from "#conversation-domain/epic-proposal";
 import { conversationReadInput } from "../project-agent/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

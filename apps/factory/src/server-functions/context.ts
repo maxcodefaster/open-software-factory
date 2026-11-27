@@ -3,7 +3,7 @@ import type { createAccessService } from "../access/service";
 import type { createWriterService } from "../access/writer-service";
 import type { createAgentService } from "../agent/service";
 import type { createAttachmentStore } from "../attachments/store";
-import { type Bootstrap } from "../bootstrap/contracts";
+import type { Bootstrap } from "../bootstrap/contracts";
 import type { createBootstrapService } from "../bootstrap/service";
 import type { createTicketService } from "../change/service";
 import type { createDeliveryService } from "../delivery/service";

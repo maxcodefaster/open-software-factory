@@ -17,8 +17,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { connect, createServer } from "node:tls";
-import { runCommand, runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
-import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
+import { runCommand, runEnvironmentCommand } from "#runtime-kubernetes/command";
+import { serviceAccountConfiguration } from "#runtime-kubernetes/service-account";
 import { renewIngressTLS } from "./ingress-tls";
 
 const hosts = ["*.runtime.factory.example", "factory.example", "git.example"];

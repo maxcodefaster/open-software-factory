@@ -1,11 +1,10 @@
 import { eq } from "drizzle-orm";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { developmentWorkspace, runtimeAttempt } from "../../../../packages/db/src/schema";
-import { type createAccessController } from "../access/api";
+import type { createDatabase } from "#db/client";
+import { developmentWorkspace, runtimeAttempt } from "#db/schema";
+import type { createAccessController } from "../access/api";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
-import { type createProjectAppPreviews } from "../access/preview-api";
-import { workspaceAuthorityIn } from "../access/workspace";
-import { type createChangeController } from "../change/api";
+import type { createProjectAppPreviews } from "../access/preview-api";
+import type { createChangeController } from "../change/api";
 import { changeSchema, changesResponseSchema } from "../change/contracts";
 import { CommandError } from "../command-error";
 import { appPreviewsSchema, attemptsResponseSchema, runtimeAttemptSchema } from "./contracts";
@@ -69,12 +68,11 @@ export function createRuntimeService(options: {
         .select({ id: runtimeAttempt.workspaceId })
         .from(runtimeAttempt)
         .where(eq(runtimeAttempt.id, attemptID));
-      if (workspace?.id) {
-        const workspaceID = workspace.id;
-        await options.database.client.begin((sql) =>
-          workspaceAuthorityIn(sql, workspaceID, userID, true),
+      if (workspace?.id)
+        throw new CommandError(
+          "conflict",
+          "Use Pause compute for this Workspace. Stop is reserved for isolated execution.",
         );
-      }
       try {
         return attempt(await options.runtime.stop(attemptID));
       } finally {

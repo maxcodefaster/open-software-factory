@@ -23,7 +23,7 @@ const projectInput = z
       .min(1)
       .max(200)
       .refine((value) => !value.startsWith("-") && !value.includes("..")),
-    devcontainerPath: repositoryPath,
+    actorTemplatePath: repositoryPath,
   })
   .strict();
 

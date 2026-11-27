@@ -2,10 +2,7 @@ import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import type { FetchLike } from "@modelcontextprotocol/client";
-import {
-  mcpEndpoint,
-  publicMCPAddress,
-} from "../../../../packages/conversation-domain/src/mcp-library";
+import { mcpEndpoint, publicMCPAddress } from "#conversation-domain/mcp-library";
 
 export { publicMCPAddress };
 

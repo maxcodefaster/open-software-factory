@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { unknownCounters } from "#conversation-domain/usage";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
-import { unknownCounters } from "../../packages/conversation-domain/src/usage";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 test("a stopped reused Session settles its saved Stop through exact retained native evidence", async () => {

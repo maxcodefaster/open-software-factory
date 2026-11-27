@@ -1,7 +1,7 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { createAgentTurnStore } from "./turn-store";
 
 // Serialize only the frame send with Stop, approval/mode and runtime changes.
@@ -27,22 +27,21 @@ export function createAgentCommitTransport(
           Array<{ id: string; repositoryURL: string; nativeIntent: unknown }>
         >`
           SELECT operation.id,project.repository_url AS "repositoryURL",
-            binding.intent AS "nativeIntent" FROM factory.change_commit_operation operation
+            attempt.binding_intent AS "nativeIntent" FROM factory.change_commit_operation operation
           JOIN factory.change change ON change.id = operation.change_id
           JOIN factory.project project ON project.id=change.project_id
           JOIN factory.change_writer writer ON writer.change_id=change.id AND writer.state='agent' AND writer.turn_id=operation.id
           JOIN factory.change_agent_session session ON session.change_id = change.id
           JOIN factory.change_agent_turn_intent intent ON intent.turn_id = operation.id
           JOIN factory.runtime_attempt attempt ON attempt.id = operation.runtime_attempt_id
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           WHERE operation.id = ${operation.operationId} AND operation.source = 'agent'
             AND operation.runtime_attempt_id = ${attemptID} AND change.runtime_attempt_id = ${attemptID}
             AND attempt.state = 'ready' AND attempt.stop_intended_at IS NULL AND intent.runtime_attempt_id = ${attemptID}
-            AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
+            AND attempt.atespace IS NOT NULL AND attempt.delete_intended_at IS NULL AND attempt.deleted_at IS NULL
             AND session.runtime_attempt_id = ${attemptID} AND session.active_turn_id = operation.id
             AND session.opencode_session_id = intent.session_id AND session.state = 'waiting'
             AND NOT session.stop_pending AND operation.expected_parent_sha = ${operation.expectedSha ?? ""}
-            AND COALESCE(operation.merge_parent_sha,'') = ${operation["mergeParentSha"] ?? ""}
+            AND CASE WHEN operation.is_merge THEN operation.integration_base_sha ELSE '' END = ${operation["mergeParentSha"] ?? ""}
             AND operation.state = ${operation.action !== "git-push" ? "commit-intended" : "push-intended"}
             AND (${operation.action !== "git-push"} OR
               (operation.commit_sha = ${operation.commitSha ?? ""} AND operation.branch_name = ${operation.branch ?? ""}))
@@ -103,7 +102,7 @@ export function createAgentCommitTransport(
             JOIN factory.runtime_attempt current ON current.id = change.runtime_attempt_id
             WHERE operation.id = ${operation.operationId} AND operation.runtime_attempt_id = ${attemptID}
               AND operation.source = 'agent' AND operation.state = 'commit-intended' AND operation.expected_parent_sha = ${operation.expectedSha}
-              AND COALESCE(operation.merge_parent_sha,'') = ${operation.mergeParentSha ?? ""}
+              AND CASE WHEN operation.is_merge THEN operation.integration_base_sha ELSE '' END = ${operation.mergeParentSha ?? ""}
               AND session.active_turn_id = operation.id AND session.state = 'waiting' AND NOT session.stop_pending
               AND session.runtime_attempt_id = original.id AND intent.runtime_attempt_id = original.id
               AND session.opencode_session_id = intent.session_id AND original.state IN ('stopped', 'failed')

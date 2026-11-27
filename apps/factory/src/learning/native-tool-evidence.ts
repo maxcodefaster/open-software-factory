@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
-import { buildBrowserToolCatalogue } from "../../../../packages/conversation-domain/src/browser-tools";
-import { candidateReviewToolCatalogue } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
+import { buildBrowserToolCatalogue } from "#conversation-domain/browser-tools";
+import { candidateReviewToolCatalogue } from "#conversation-domain/candidate-review";
+import type { LearningCase } from "#conversation-domain/learning";
 import { readNativeSessionArchive } from "../agent/turns-api";
 import { objectDigest, type PrivateObjects } from "../storage/objects";
 
@@ -61,6 +61,8 @@ const excludedMessages = new Set([
   "idle",
 ]);
 const configurationFiles = new Set([
+  "actor-template.json",
+  "system.json",
   "package.json",
   "tsconfig.json",
   "jsconfig.json",

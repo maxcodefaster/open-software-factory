@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { createDeveloperIDEController } from "../../apps/factory/src/workspace/developer-ide-controller";
 import type {
   DeveloperIDEClient,
   DeveloperIDEObservation,
-} from "../../packages/runtime-kubernetes/src/developer-ide";
-import { DeveloperIDEIntentConflict } from "../../packages/runtime-kubernetes/src/developer-ide";
+} from "#runtime-kubernetes/developer-ide";
+import { DeveloperIDEIntentConflict } from "#runtime-kubernetes/developer-ide";
+import { createDeveloperIDEController } from "../../apps/factory/src/workspace/developer-ide-controller";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -16,7 +16,7 @@ async function fixture(maxConnections = 10, developerID = crypto.randomUUID()) {
   for (const id of [developerID, contributorID])
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Editor fixture',${`${id}@factory.invalid`})`;
   for (const id of projects) {
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${id},${`editor-${id}`},'Editor fixture','https://forge.invalid/editor.git','main','.devcontainer/devcontainer.json',${developerID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${id},${`editor-${id}`},'Editor fixture','https://forge.invalid/editor.git','main','.factory/actor-template.json',${developerID})`;
     for (const [user, role] of [
       [developerID, "developer"],
       [contributorID, "product-contributor"],
@@ -104,9 +104,10 @@ test.each(["acquire", "release"] as const)(
         failure: null,
       });
       expect(preparations).toBe(1);
-      expect(await owned.database.client`SELECT user_id FROM factory.developer_ide`).toHaveLength(
-        1,
-      );
+      expect(
+        await owned.database
+          .client`SELECT scope_id AS user_id FROM factory.operation WHERE kind='workspace.developer_ide'`,
+      ).toHaveLength(1);
     } finally {
       await editor.close();
       await owned.dispose();
@@ -209,8 +210,26 @@ test.each([false, true])(
     const { database, developerID, projectID } = owned;
     const resourceID = matchesUserID ? developerID : crypto.randomUUID();
     const image = `registry.invalid/editor@sha256:${"3".repeat(64)}`;
-    await database.client`INSERT INTO factory.developer_ide(user_id,resource_id,state,image,namespace_uid)
-    VALUES(${developerID},${resourceID},'failed',${image},'retained-namespace')`;
+    const nowIso = new Date().toISOString();
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+    VALUES(${crypto.randomUUID()},'workspace.developer_ide','user',${developerID},
+      ${`workspace.developer_ide:${developerID}`},${`workspace.developer_ide.resource:${resourceID}`},
+      'failed',${developerID},
+      ${JSON.stringify({
+        userId: developerID,
+        serviceEpoch: 1,
+        image,
+        namespaceUid: "retained-namespace",
+        podUid: null,
+        failure: null,
+        createIntendedAt: nowIso,
+        createObservedAt: null,
+        stopIntendedAt: null,
+        stoppedAt: null,
+        lastActiveAt: nowIso,
+        resourceId: resourceID,
+      })}::jsonb)`;
     const attempts: Array<{ namespace: string; resourceID: string }> = [];
     let stops = 0;
     const adapter: DeveloperIDEClient = {
@@ -258,8 +277,9 @@ test.each([false, true])(
       expect(attempts[0]?.resourceID).toBe(resourceID);
       await expect(
         (async () => {
-          await database.client`UPDATE factory.developer_ide SET resource_id=${crypto.randomUUID()}
-          WHERE user_id=${developerID}`;
+          await database.client`UPDATE factory.operation
+          SET payload=jsonb_set(payload,'{resourceId}',to_jsonb(${crypto.randomUUID()}::text))
+          WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`;
         })(),
       ).rejects.toThrow("immutable");
       await editors.stop(developerID);
@@ -270,18 +290,25 @@ test.each([false, true])(
       );
       await expect(
         (async () => {
-          await database.client`UPDATE factory.developer_ide
-          SET service_epoch=2,state='create-intended',resource_id=${crypto.randomUUID()}
-          WHERE user_id=${developerID}`;
+          await database.client`UPDATE factory.operation
+          SET state='create-intended',
+            payload=payload || jsonb_build_object('serviceEpoch',2,'resourceId',${crypto.randomUUID()}::text)
+          WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`;
         })(),
       ).rejects.toThrow("immutable");
       for (const update of [
-        () => database.client`UPDATE factory.developer_ide SET service_epoch=2,state='create-intended',
-        namespace_uid='replacement-namespace' WHERE user_id=${developerID}`,
-        () => database.client`UPDATE factory.developer_ide SET service_epoch=2,state='create-intended',
-        pod_uid='unconfirmed-pod' WHERE user_id=${developerID}`,
-        () => database.client`UPDATE factory.developer_ide SET service_epoch=3,state='create-intended'
-        WHERE user_id=${developerID}`,
+        () => database.client`UPDATE factory.operation
+        SET state='create-intended',
+          payload=payload || jsonb_build_object('serviceEpoch',2,'namespaceUid','replacement-namespace'::text)
+        WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`,
+        () => database.client`UPDATE factory.operation
+        SET state='create-intended',
+          payload=payload || jsonb_build_object('serviceEpoch',2,'podUid','unconfirmed-pod'::text)
+        WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`,
+        () => database.client`UPDATE factory.operation
+        SET state='create-intended',
+          payload=payload || jsonb_build_object('serviceEpoch',3)
+        WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`,
       ])
         await expect(Promise.resolve().then(update)).rejects.toThrow("Stop the Developer IDE");
       expect((await editors.get(developerID)).state).toBe("stopped");
@@ -295,8 +322,12 @@ test.each([false, true])(
       expect(attempts[1]?.resourceID).toBe(resourceID);
       expect(attempts[1]?.namespace).toBe(attempts[0]?.namespace);
       expect((await editors.get(developerID)).epoch).toBe(2);
-      const [retained] = await database.client`SELECT resource_id,namespace_uid,pod_uid
-      FROM factory.developer_ide WHERE user_id=${developerID}`;
+      const [retained] = await database.client`SELECT
+        payload->>'resourceId' AS resource_id,
+        payload->>'namespaceUid' AS namespace_uid,
+        payload->>'podUid' AS pod_uid
+      FROM factory.operation
+      WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`;
       expect(retained).toEqual({
         resource_id: resourceID,
         namespace_uid: "retained-namespace",
@@ -365,8 +396,28 @@ test("explicit editor retry observes a late ready Pod without replacing its reco
   const owned = await fixture();
   const { database, developerID, contributorID, projectID } = owned;
   const image = `registry.invalid/editor@sha256:${"3".repeat(64)}`;
-  await database.client`INSERT INTO factory.developer_ide(user_id,state,image,namespace_uid,pod_uid,failure)
-    VALUES(${developerID},'failed',${image},'retained-namespace','retained-pod','Editor preparation exceeded its deadline.')`;
+  const resourceID = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  const failure = "Editor preparation exceeded its deadline.";
+  await database.client`INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,active_key,state,error,created_by,payload)
+    VALUES(${crypto.randomUUID()},'workspace.developer_ide','user',${developerID},
+      ${`workspace.developer_ide:${developerID}`},${`workspace.developer_ide.resource:${resourceID}`},
+      'failed',${failure},${developerID},
+      ${JSON.stringify({
+        userId: developerID,
+        serviceEpoch: 1,
+        image,
+        namespaceUid: "retained-namespace",
+        podUid: "retained-pod",
+        failure,
+        createIntendedAt: nowIso,
+        createObservedAt: null,
+        stopIntendedAt: null,
+        stoppedAt: null,
+        lastActiveAt: nowIso,
+        resourceId: resourceID,
+      })}::jsonb)`;
   let observed = 0;
   const adapter: DeveloperIDEClient = {
     async prepare() {
@@ -425,7 +476,9 @@ test("developer editor persists intent, shares one backend across Projects and r
     async prepare(input) {
       const [intent] = await database.client<
         Array<{ epoch: string; image: string }>
-      >`SELECT service_epoch::text AS epoch,image FROM factory.developer_ide WHERE user_id=${input.identity.userID}`;
+      >`SELECT payload->>'serviceEpoch' AS epoch,payload->>'image' AS image
+        FROM factory.operation
+        WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${input.identity.userID}`;
       expect(intent?.epoch).toBe(String(input.identity.epoch));
       expect(intent?.image).toBe(input.image);
       if (live) return live;
@@ -478,18 +531,23 @@ test("developer editor persists intent, shares one backend across Projects and r
     );
     await expect(editors.get(contributorID)).rejects.toThrow("Developer access required");
     expect(
-      await database.client`SELECT user_id FROM factory.developer_ide WHERE user_id=${contributorID}`,
+      await database.client`SELECT scope_id AS user_id FROM factory.operation
+        WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${contributorID}`,
     ).toHaveLength(0);
     for (const relation of ["runtime_attempt", "agent_turn", "change", "development_workspace"])
       expect(await database.client.unsafe(`SELECT 1 FROM factory.${relation}`)).toHaveLength(0);
     await expect(
       (async () => {
-        await database.client`UPDATE factory.developer_ide SET pod_uid='replaced' WHERE user_id=${developerID}`;
+        await database.client`UPDATE factory.operation
+          SET payload=jsonb_set(payload,'{podUid}','"replaced"'::jsonb)
+          WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`;
       })(),
     ).rejects.toThrow("immutable");
     await expect(
       (async () => {
-        await database.client`UPDATE factory.developer_ide SET service_epoch=2 WHERE user_id=${developerID}`;
+        await database.client`UPDATE factory.operation
+          SET payload=jsonb_set(payload,'{serviceEpoch}','2'::jsonb)
+          WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`;
       })(),
     ).rejects.toThrow("Stop the Developer IDE");
     await editors.stop(developerID);
@@ -519,7 +577,7 @@ test("developer editor persists intent, shares one backend across Projects and r
         (
           await database.client<
             Array<{ state: string }>
-          >`SELECT state FROM factory.developer_ide WHERE user_id=${developerID}`
+          >`SELECT state FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`
         )[0]?.state,
       (state) => state === "stopped",
       "Last Developer revocation left editor running",
@@ -673,7 +731,8 @@ test("a confirmed missing editor requires explicit restart instead of recreating
     );
     expect(preparations).toBe(1);
     const [row] = await owned.database
-      .client`SELECT pod_uid,service_epoch FROM factory.developer_ide WHERE user_id=${owned.developerID}`;
+      .client`SELECT payload->>'podUid' AS pod_uid,(payload->>'serviceEpoch')::bigint AS service_epoch
+        FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${owned.developerID}`;
     expect(row?.["pod_uid"]).toBe("pod-1");
     expect(Number(row?.["service_epoch"])).toBe(1);
   } finally {
@@ -819,7 +878,7 @@ test("Stop during editor create fences its outcome; failed teardown needs an exp
         (
           await database.client<
             Array<{ state: string; failure: string | null }>
-          >`SELECT state,failure FROM factory.developer_ide WHERE user_id=${developerID}`
+          >`SELECT state,error AS failure FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${developerID}`
         )[0],
       (value) => stops === 1 && value?.state === "stop-intended" && Boolean(value.failure),
       "Stop failure not retained",
@@ -965,7 +1024,7 @@ test("opening the IDE after an upgrade replaces a running editor that has an old
     expect(stopped[0]).toContain("3".repeat(64));
     expect(next.epoch).toBe(first.epoch + 1);
     const [row] = await owned.database
-      .client`SELECT image FROM factory.developer_ide WHERE user_id=${owned.developerID}`;
+      .client`SELECT payload->>'image' AS image FROM factory.operation WHERE kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${owned.developerID}`;
     expect(row?.["image"]).toBe(upgraded);
   } finally {
     await editor.close();

@@ -1,14 +1,9 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { eq, isNotNull } from "drizzle-orm";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  attachment,
-  attachmentStorage,
-  reviewMedia,
-  substrateSource,
-} from "../../../../packages/db/src/schema";
+import { and, eq, isNotNull } from "drizzle-orm";
+import type { createDatabase } from "#db/client";
+import { attachment, operation, reviewMedia, substrateSource } from "#db/schema";
 import { sourceCheckpointObjects } from "../workspace/source-api";
 import { createPrivateObjects, objectDigest, type PrivateObjects } from "./objects";
 
@@ -28,9 +23,14 @@ export async function requireObjectStorage(
       "Retained QA media still uses the old state volume. Transfer it explicitly before switching file storage; retained files were not changed.",
     );
   const [storage] = await database.db
-    .select({ id: attachmentStorage.id })
-    .from(attachmentStorage)
-    .where(eq(attachmentStorage.singleton, true));
+    .select({ id: operation.id })
+    .from(operation)
+    .where(
+      and(
+        eq(operation.kind, "attachment.storage"),
+        eq(operation.idempotencyKey, "attachment.storage:singleton"),
+      ),
+    );
   if (!storage) throw new Error("Installation storage identity is unavailable");
   const bytes = new TextEncoder().encode(`Factory private storage ${storage.id}\n`);
   const key = `factory-storage/${storage.id}/identity`;

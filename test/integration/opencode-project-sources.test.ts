@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { connectOpenCodeSources } from "../../apps/factory/src/agent/opencode-browser";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { createMCPSourceEndpoint } from "../../apps/factory/src/mcp/sources";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { connectOpenCodeSources } from "../../apps/factory/src/agent/opencode-browser";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { fixtureValue } from "../fixtures/value";
@@ -136,7 +136,6 @@ test("native OpenCode searches and reads actual Factory Project sources without 
       },
     });
     native = await pinnedOpenCode(
-      undefined,
       undefined,
       undefined,
       `http://host.orb.internal:${provider.port}/v1`,

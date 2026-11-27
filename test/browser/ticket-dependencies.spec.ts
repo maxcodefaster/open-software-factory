@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -14,11 +14,11 @@ import {
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
-import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 import {
   queuedTicketImplementation,
   ticketRequirementsInput,
 } from "../fixtures/ticket-requirements";
+import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(90_000);
@@ -54,8 +54,8 @@ test("named prerequisites block Build and remain linked after cancellation until
     const administrator = z
       .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
       .parse(await browserBootstrap(page)).session.user.id;
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectId}, ${slug}, 'Dependency QA', 'https://example.invalid/dependency-qa.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectId}, ${slug}, 'Dependency QA', 'https://example.invalid/dependency-qa.git', 'main', '.factory/actor-template.json', ${administrator})`;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     async function createEpic(title: string, parentId: string | null = null) {
@@ -185,8 +185,8 @@ test("named prerequisites block Build and remain linked after cancellation until
       ),
     ).toEqual({ id: implementation.commandId });
     const [waiting] = await database.client`
-      SELECT state,requirement_revision_id AS revision,source_sha AS source,created_by AS author
-      FROM factory.implementation_order WHERE command_id=${implementation.commandId}`;
+      SELECT state,(payload->>'requirementRevisionId')::uuid AS revision,payload->>'sourceSha' AS source,created_by AS author
+      FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${implementation.commandId}`;
     expect(waiting).toEqual({
       state: "waiting",
       revision: implementation.revisionId,
@@ -266,12 +266,12 @@ test("named prerequisites block Build and remain linked after cancellation until
       Array<{ changes: number; orders: number; turns: number; runtimes: number }>
     >`SELECT
       (SELECT count(*)::integer FROM factory.change WHERE project_id=${projectId}) AS changes,
-      (SELECT count(*)::integer FROM factory.implementation_order WHERE project_id=${projectId}) AS orders,
+      (SELECT count(*)::integer FROM factory.operation WHERE kind='tickets.implementation_order' AND payload->>'projectId'=${projectId}) AS orders,
       (SELECT count(*)::integer FROM factory.agent_turn WHERE project_id=${projectId}) AS turns,
       (SELECT count(*)::integer FROM factory.runtime_attempt WHERE project_id=${projectId}) AS runtimes`;
     expect(work).toEqual({ changes: 0, orders: 2, turns: 0, runtimes: 0 });
     const [stillWaiting] = await database.client`
-      SELECT state FROM factory.implementation_order WHERE command_id=${secondImplementation.commandId}`;
+      SELECT state FROM factory.operation WHERE kind='tickets.implementation_order' AND id=${secondImplementation.commandId}`;
     expect(stillWaiting?.["state"]).toBe("waiting");
     await page.setViewportSize({ width: 430, height: 860 });
     await page.screenshot({
@@ -289,8 +289,8 @@ test("named prerequisites block Build and remain linked after cancellation until
       ]),
     );
     const [cancelled] = await database.client`
-      SELECT state,cancelled_by AS author FROM factory.implementation_order
-      WHERE command_id=${secondImplementation.commandId}`;
+      SELECT state,(payload->>'cancelledBy')::uuid AS author FROM factory.operation
+      WHERE kind='tickets.implementation_order' AND id=${secondImplementation.commandId}`;
     expect(cancelled).toEqual({ state: "cancelled", author: administrator });
     await prerequisites
       .getByRole("button", {

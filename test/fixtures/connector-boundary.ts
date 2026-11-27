@@ -175,8 +175,7 @@ export async function connectorBoundary(
         repositoryUrl: "https://example.invalid/owned-connector.git",
         repositoryIdentity: "owned-connector",
         revision: "main",
-        devcontainerPath: ".devcontainer/devcontainer.json",
-        composeProjectName: "owned-connector",
+        actorTemplatePath: ".factory/actor-template.json",
         controlUrl: `ws://127.0.0.1:${control.port}`,
         channels: [
           { name: "agent", kind: "agent", target: proxy.url.origin, healthPath: "/api/info" },

@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createForgejoClient } from "../../packages/forge/src/forge";
+import { createForgejoClient } from "#forge/forge";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 import {
   nativeLiveConfiguration,

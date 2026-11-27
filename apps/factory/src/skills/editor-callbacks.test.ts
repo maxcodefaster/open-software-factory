@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { SkillScope } from "../../../../packages/conversation-domain/src/skill-library";
-import * as skills from "../../../../packages/conversation-domain/src/skills";
+import type { SkillScope } from "#conversation-domain/skill-library";
+import * as skills from "#conversation-domain/skills";
 import { editorCallbacks, editorSolid as solid } from "../../../../test/fixtures/editor-callbacks";
 import { APIRequestError } from "../api-client";
 
@@ -34,7 +34,7 @@ function setup(
     expose: ["draft", "update", "attach", "save", "error", "busy", "scope", "changeScope"],
     imports: {
       "solid-js": solid,
-      "../../../../packages/conversation-domain/src/skills": skills,
+      "#conversation-domain/skills": skills,
       "../server-functions/skills": { saveSkill },
       "../server-functions/result": { serverCall: (value: unknown) => value },
       "../command-error": { plainErrorMessage: (message: string) => message },

@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { zeroQueries, zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
@@ -18,8 +18,8 @@ async function fixture() {
     await database.client`INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userId}, 'Owned Epic Developer', ${`epic-${userId}@factory.local`}, true)`;
     for (const id of [projectId, otherProjectId]) {
-      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-        VALUES (${id}, ${`epic-${id}`}, 'Owned Epic Project', 'https://example.invalid/epics.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+        VALUES (${id}, ${`epic-${id}`}, 'Owned Epic Project', 'https://example.invalid/epics.git', 'main', '.factory/actor-template.json', ${administrator})`;
     }
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
       VALUES (${projectId}, ${userId}, 'developer', ${administrator})`;

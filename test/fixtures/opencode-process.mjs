@@ -82,7 +82,6 @@ const held = new Map();
 function complete(response, coding = true, summary = false) {
   if (response.destroyed) return;
   response.writeHead(200, { "content-type": "text/event-stream" });
-  const browserTurn = process.env.FACTORY_PROCESS_BROWSER_TURN;
   const step = providerRequests;
   const call =
     nativeAttachmentID && coding && nativeBrowserPending
@@ -114,20 +113,7 @@ function complete(response, coding = true, summary = false) {
                   prompt: "Return one short answer. No tools.",
                 }),
               }
-            : browserTurn && step <= 2
-              ? {
-                  name: step === 1 ? "shell" : "read",
-                  arguments: JSON.stringify(
-                    step === 1
-                      ? {
-                          command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
-                          description: "Capture the fixed declared App screenshot",
-                          timeout: 270000,
-                        }
-                      : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
-                  ),
-                }
-              : undefined;
+            : undefined;
   if ((nativeBrowser || nativeAttachmentID) && coding && nativeBrowserPending)
     nativeBrowserPending = false;
   if (spawnChild) spawnChild = false;

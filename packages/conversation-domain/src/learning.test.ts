@@ -1,19 +1,19 @@
 import { expect, test } from "bun:test";
 import {
-  learningBatchDue,
-  learningReviewNowCommand,
-  legacyWikiCallPattern,
-  sampleLearningCase,
-  validateLearningResult,
-  learningEdit,
-  applyLearningEdit,
-} from "./learning";
-import {
   calibrationCases,
   calibrationPassed,
 } from "../../../apps/factory/src/learning/calibration";
 import { calibratedResult } from "../../../test/fixtures/learning";
 import { fixtureValue } from "../../../test/fixtures/value";
+import {
+  applyLearningEdit,
+  learningBatchDue,
+  learningEdit,
+  learningReviewNowCommand,
+  legacyWikiCallPattern,
+  sampleLearningCase,
+  validateLearningResult,
+} from "./learning";
 
 test("concrete improvements are bound to observed revisions and exact unique passages", () => {
   const target = {

@@ -1,5 +1,5 @@
-import { type ForgeRepository } from "../../packages/forge/src/contracts";
-import { type createForgejoClient } from "../../packages/forge/src/forge";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
 
 // Independent read-only acceptance of this UI-only fixture's non-goals.
 export async function verifyCodingSource(input: {

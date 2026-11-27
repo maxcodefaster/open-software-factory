@@ -1,17 +1,17 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { codingReasoningInput } from "#conversation-domain/model-settings";
+import {
+  openCodeModelConfiguration,
+  openCodeModelMetadata,
+} from "#runtime-kubernetes/opencode-model";
 import {
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
   syncOpenCodeInputGuidance,
 } from "../../apps/factory/src/agent/opencode-adapter";
 import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
-import { codingReasoningInput } from "../../packages/conversation-domain/src/model-settings";
-import {
-  openCodeModelConfiguration,
-  openCodeModelMetadata,
-} from "../../packages/runtime-kubernetes/src/opencode-model";
 import { pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
@@ -88,7 +88,6 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
     let requiredGuidanceApplied = false;
     try {
       owned = await pinnedOpenCode(
-        undefined,
         undefined,
         undefined,
         `http://host.orb.internal:${proxy.port}/v1`,

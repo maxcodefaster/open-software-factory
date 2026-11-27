@@ -1,18 +1,20 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createDatabase } from "../../packages/db/src/client";
-import { runEnvironmentCommand } from "../../packages/runtime-kubernetes/src/command";
-import {
-  kubernetesCommand,
-  kubernetesConnectionEnvironment,
-} from "../../packages/runtime-kubernetes/src/config";
-import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
+import { createDatabase } from "#db/client";
+import { runEnvironmentCommand } from "#runtime-kubernetes/command";
+import { kubernetesCommand, kubernetesConnectionEnvironment } from "#runtime-kubernetes/config";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
+import { runtimeArtifactEnvironment } from "../../scripts/factory/artifacts";
 import {
   readResetResources,
   requireResetResourcesAbsent,
 } from "../../scripts/factory/reset-resources";
 import { ownedContainerCallback } from "./container-callback";
-import { nativeLiveConfiguration, saveNativeLiveConfiguration } from "./native-live-configuration";
+import {
+  nativeLiveArtifacts,
+  nativeLiveConfiguration,
+  saveNativeLiveConfiguration,
+} from "./native-live-configuration";
 import { ownedPlanningCache } from "./planning-cache";
 import { ownedTestDatabase } from "./postgres-server";
 import { fixtureRuntime } from "./substrate";
@@ -53,7 +55,11 @@ export async function eventually<T>(
 
 // Separate database and listener. Never restart the user's Factory or recover its runtimes.
 export async function factoryProcess(
-  liveRuntime?: { runtimeHostImage: string; forgejoToken: string },
+  liveRuntime?: {
+    runtimeHostImage: string;
+    forgejoToken: string;
+    artifactDirectory?: string;
+  },
   modelOverrides?: {
     FACTORY_MODEL_IDS?: string;
     FACTORY_PROJECT_AGENT_MODEL?: string;
@@ -78,6 +84,7 @@ export async function factoryProcess(
     FACTORY_HOST?: string;
     FACTORY_GIT_IMPORT_ORIGINS?: string;
     FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION?: string;
+    FACTORY_STARTER_IMAGES?: string;
   },
   retained?: { id: string; base: string },
 ) {
@@ -100,13 +107,26 @@ export async function factoryProcess(
       modelOverrides ?? {},
     );
   }
-  const publishedArtifacts = liveRuntime
-    ? await requirePublishedRuntimeArtifacts(".factory")
-    : null;
+  const publishedArtifacts =
+    liveRuntime && commissionedNative
+      ? await nativeLiveArtifacts(
+          commissionedNative,
+          liveRuntime.runtimeHostImage,
+          liveRuntime.artifactDirectory,
+        )
+      : null;
   const publishedRuntimeImages = publishedArtifacts
     ? {
         FACTORY_BROWSER_TOOLS_IMAGE: publishedArtifacts["browser-tools"],
         FACTORY_DEVELOPER_IDE_IMAGE: publishedArtifacts["developer-ide"],
+        ...(commissionedNative
+          ? {
+              FACTORY_STARTER_IMAGES: runtimeArtifactEnvironment(
+                publishedArtifacts,
+                nativeRuntimeArchitecture(commissionedNative.runtime),
+              ).FACTORY_STARTER_IMAGES,
+            }
+          : {}),
       }
     : {};
   const container = `factory-owned-commit-process-${id}`;

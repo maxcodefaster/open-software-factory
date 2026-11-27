@@ -1,4 +1,4 @@
-import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
+import type { DesktopBackgroundKey } from "#interface-domain/background";
 
 export type DesktopBackground = {
   key: DesktopBackgroundKey;

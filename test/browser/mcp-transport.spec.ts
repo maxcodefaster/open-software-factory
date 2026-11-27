@@ -4,13 +4,10 @@ import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";
+import { mcpLibraryView, type mcpSaveInput } from "#conversation-domain/mcp-library";
+import { monitoringView } from "#conversation-domain/monitoring";
+import { skillLibraryView } from "#conversation-domain/skill-library";
 import { CommandError } from "../../apps/factory/src/command-error";
-import {
-  mcpLibraryView,
-  type mcpSaveInput,
-} from "../../packages/conversation-domain/src/mcp-library";
-import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
-import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
 import { test } from "../fixtures/browser-test";
 import { invalidateFixtureRead } from "../fixtures/read-invalidation";

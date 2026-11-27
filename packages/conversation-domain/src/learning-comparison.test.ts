@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
 import {
+  comparisonAfter,
+  comparisonBefore,
+  comparisonExample,
+} from "../../../test/fixtures/learning-comparison";
+import { fixtureValue } from "../../../test/fixtures/value";
+import type { LearningEdit, LearningResult } from "./learning";
+import {
   comparisonCases,
   comparisonPassed,
   learningComparisonPlan,
   replayableCase,
   validateReplayAnswers,
 } from "./learning-comparison";
-import {
-  comparisonExample,
-  comparisonBefore,
-  comparisonAfter,
-} from "../../../test/fixtures/learning-comparison";
-import type { LearningEdit, LearningResult } from "./learning";
-import { fixtureValue } from "../../../test/fixtures/value";
 
 const target = {
   kind: "skill",

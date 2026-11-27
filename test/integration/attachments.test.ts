@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { attachmentMarkdown } from "#conversation-domain/attachments";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
-import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import {
   type AttachmentObjects,
@@ -17,7 +18,6 @@ import { createAttachmentTools } from "../../apps/factory/src/attachments/tools"
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
 import { ownedBrowserJPEG } from "../fixtures/browser-image";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
@@ -110,8 +110,10 @@ test("native Attachment functions preserve private upload identity, draft sequen
     await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 3, ids: [id, id] }]);
     await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 2, ids: [] }]);
     const [retained] = await f.database.client<{ sequence: number; ids: string[] }[]>`
-      SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft
-      WHERE id=${draft} AND owner_id=${f.userID}`;
+      SELECT (payload->>'sequence')::bigint::float8 AS sequence,payload->'attachmentIds' AS ids
+      FROM factory.operation
+      WHERE kind='attachments.draft' AND scope_type='attachment' AND scope_id=${draft}
+        AND idempotency_key=${`attachments.draft:${draft}:${f.userID}`}`;
     expect(retained).toEqual({ sequence: 3, ids: [id] });
     expect(await native("getAttachmentUsage", [f.projectID])).toMatchObject({
       usedBytes: bytes.byteLength * 2,
@@ -299,8 +301,9 @@ test("independent Review freezes human evidence comments for its exact candidate
       .client`INSERT INTO factory.review_feedback(id,change_id,author_id,kind,commit_sha)
       VALUES(${staleFeedback},${f.changeID},${f.userID},'comment',${"a".repeat(40)})`;
     await f.database
-      .client`INSERT INTO factory.review_feedback_message(id,feedback_id,author_id,body)
-      VALUES(${crypto.randomUUID()},${staleFeedback},${f.userID},${attachmentMarkdown(stale)})`;
+      .client`INSERT INTO factory.audit_event(id,kind,scope_type,scope_id,actor_id,payload)
+      VALUES(${crypto.randomUUID()},'review.feedback_message','review_feedback',${staleFeedback},${f.userID},
+        ${JSON.stringify({ feedbackId: staleFeedback, authorId: f.userID, body: attachmentMarkdown(stale) })}::jsonb)`;
     await review.create(f.changeID, f.userID, {
       commandId: crypto.randomUUID(),
       kind: "comment",
@@ -466,9 +469,9 @@ test("feedback files and their human meaning reach only the selected correction 
         'Owned corrected candidate',${crypto.randomUUID()},'succeeded',created_by,now()
       FROM factory.change WHERE id=${f.changeID}`;
     await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
       action_run_id,created_by,state,summary,completed_at)
-      VALUES(${verificationID},${f.changeID},${commit},2,'owned-attachment-review',2,${f.userID},'succeeded','Owned exact CI',now())`;
+      VALUES(${verificationID},${f.changeID},${commit},2,2,${f.userID},'succeeded','Owned exact CI',now())`;
     await f.database
       .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
       VALUES(${reviewID},${verificationID},${f.changeID},${commit},${"a".repeat(40)},${f.userID})`;
@@ -567,8 +570,16 @@ test.each(["agent", "integration"] as const)(
             ${JSON.stringify({ kind: index === 3 ? "change-review" : "change-prompt" })}::jsonb,
             ${"a".repeat(64)},${JSON.stringify(authority)}::jsonb,'stopped',
             ${`2100-01-01T00:00:00.000${microseconds}Z`}::timestamptz)`;
-        await f.database.client`INSERT INTO factory.attachment_turn_context(turn_id,content)
-          VALUES(${id},${JSON.stringify({ sources: [{ label: `Implementation reference ${index}`, content: attachmentMarkdown(file) }] })})`;
+        const content = JSON.stringify({
+          sources: [
+            { label: `Implementation reference ${index}`, content: attachmentMarkdown(file) },
+          ],
+        });
+        await f.database.client`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload)
+          VALUES(${crypto.randomUUID()},'attachment.turn_context','agent_turn',${id},
+            ${`attachment.turn_context:${id}:admission`},'recorded',
+            ${JSON.stringify({ turnId: id, source: "admission", content })}::jsonb)`;
       }
       const producerID =
         source === "agent" ? fixtureValue(ids[0], "Exact producer") : crypto.randomUUID();
@@ -683,8 +694,10 @@ test("cumulative storage does not block concurrent uploads and cleanup retains d
     expect((await store.metadata(f.userID, retained.input.id)).state).toBe("ready");
     await store.retainDraft(f.userID, f.projectID, draft, { sequence: 3, ids: [] });
     const [cleared] = await f.database.client<{ sequence: number; ids: string[] }[]>`
-      SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft
-      WHERE id=${draft} AND owner_id=${f.userID}`;
+      SELECT (payload->>'sequence')::bigint::float8 AS sequence,payload->'attachmentIds' AS ids
+      FROM factory.operation
+      WHERE kind='attachments.draft' AND scope_type='attachment' AND scope_id=${draft}
+        AND idempotency_key=${`attachments.draft:${draft}:${f.userID}`}`;
     expect(cleared).toEqual({ sequence: 3, ids: [] });
     failDelete = true;
     await expect(store.sweep()).rejects.toThrow("uncertain deletion");

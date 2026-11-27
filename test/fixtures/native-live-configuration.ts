@@ -1,7 +1,11 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import { substrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { requireNativeForgeOrigin } from "../../scripts/factory/native-installation";
-import { nativeRuntimeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
+import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
+import {
+  requireNativeForgeOrigin,
+  requireNativeRuntimeArtifact,
+} from "../../scripts/factory/native-installation";
 
 // A new owned control plane gets its own database attribution. This does not
 // rewrite any retained installation, Actor binding or operator configuration.
@@ -29,6 +33,18 @@ export function nativeLiveConfiguration(
     throw Error("Live Factory proof requires separate native Owner and Editor credentials");
   requireNativeForgeOrigin(forge, configuration);
   return { ...configuration, database };
+}
+
+export async function nativeLiveArtifacts(
+  configuration: ReturnType<typeof nativeLiveConfiguration>,
+  runtimeHostImage: string,
+  directory = ".factory",
+) {
+  const artifacts = await requirePublishedRuntimeArtifacts(directory);
+  requireNativeRuntimeArtifact(configuration, artifacts);
+  if (runtimeHostImage !== artifacts["runtime-host"])
+    throw Error("Live Factory tools differ from the selected artifact generation");
+  return artifacts;
 }
 
 export async function saveNativeLiveConfiguration(file: string, value: unknown, retained: boolean) {

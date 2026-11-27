@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { substrateFixture } from "../fixtures/substrate";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
@@ -16,12 +16,14 @@ test("controller fixtures retain a deterministic uncreated native binding and im
     });
     expect(attemptID).toBe(runtimeIdentity(f.workspaceID, 1).attemptID);
     const [saved] = await f.database.client`
-      SELECT attempt.state,binding.atespace,binding.actor_uid,
-        binding.create_attempted_at,environment.version::float8 AS version
+      SELECT attempt.state,attempt.atespace,attempt.actor_uid,
+        attempt.create_attempted_at,(environment.payload->>'version')::float8 AS version
       FROM factory.runtime_attempt attempt
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
-      JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=attempt.id
-      WHERE attempt.id=${attemptID}`;
+      JOIN factory.operation environment ON environment.kind='runtime.environment_intent'
+        AND environment.scope_type='runtime_attempt'
+        AND environment.scope_id=attempt.id::text
+        AND environment.idempotency_key='runtime.environment_intent:' || attempt.id::text
+      WHERE attempt.id=${attemptID} AND attempt.atespace IS NOT NULL`;
     expect(saved).toMatchObject({
       state: "ready",
       atespace: `fa-${attemptID.replaceAll("-", "")}`,
@@ -31,11 +33,7 @@ test("controller fixtures retain a deterministic uncreated native binding and im
     });
     await expect(
       f.database
-        .client`UPDATE factory.substrate_binding SET intent='{}' WHERE runtime_attempt_id=${attemptID}`.execute(),
-    ).rejects.toThrow("immutable");
-    await expect(
-      f.database
-        .client`UPDATE factory.runtime_environment_intent SET version=1 WHERE runtime_attempt_id=${attemptID}`.execute(),
+        .client`UPDATE factory.runtime_attempt SET binding_intent='{}' WHERE id=${attemptID}`.execute(),
     ).rejects.toThrow("immutable");
     await expect(
       recordUncreatedWorkspaceAttempt(f.database, {

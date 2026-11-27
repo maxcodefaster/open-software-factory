@@ -2,9 +2,9 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { test } from "../fixtures/browser-test";
 import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
@@ -64,8 +64,8 @@ test("an unsafe System Contract fails before Kubernetes create", async ({ page }
     const { session } = await browserBootstrap(page);
     // Only planning fixture state is seeded. The authenticated runtime command
     // must inspect the real exact-commit Forgejo file before creating anything.
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${repository.name},'Unsafe contract fixture',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}.git`},'main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${repository.name},'Unsafe contract fixture',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}.git`},'main','.factory/actor-template.json',${session.user.id})`;
     const project = { id: projectID };
     testedProjectID = projectID;
 

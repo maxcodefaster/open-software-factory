@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
+import { requirementContentInput } from "#requirement-domain/content";
 import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
-import { markdownHTML } from "../../apps/factory/src/markdown";
+import { markdownHTML } from "../../apps/factory/src/editor/client";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { requirementContentInput } from "../../packages/requirement-domain/src/content";
 import { releaseInstallation } from "../fixtures/release-installation";
 import {
   callFactoryFunction,

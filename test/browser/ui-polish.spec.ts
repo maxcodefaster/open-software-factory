@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
+import { environmentSettingsView } from "#project-domain/environment";
+import { type ProjectSetupView, projectSetupView } from "#project-domain/setup";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
@@ -10,10 +14,6 @@ import {
   runtimeAttemptSchema,
 } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
-import { environmentSettingsView } from "../../packages/project-domain/src/environment";
-import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -33,6 +33,7 @@ const auditViewports = [desktopViewport, { width: 390, height: 844 }];
 const settingsGroups = [
   {
     scope: "project",
+    heading: "Project · UI polish",
     labels: [
       "Models",
       "Environments",
@@ -41,17 +42,17 @@ const settingsGroups = [
       "Monitoring",
       "Usage & limits",
       "People & access",
-      "Skills",
-      "MCP connections",
     ],
   },
-  { scope: "libraries", labels: ["Skills", "MCP connections"] },
+  { scope: "libraries", heading: "Libraries", labels: ["Skills", "MCP connections"] },
   {
     scope: "personal",
-    labels: ["Model overrides", "Login & security", "Skills", "MCP connections"],
+    heading: "Personal",
+    labels: ["Model overrides", "Login & security"],
   },
   {
     scope: "system",
+    heading: "Factory administration",
     labels: [
       "Models",
       "Monitoring",
@@ -59,8 +60,6 @@ const settingsGroups = [
       "Repository mirrors",
       "People & access",
       "Company sign-in",
-      "Skills",
-      "MCP connections",
     ],
   },
 ];
@@ -114,8 +113,8 @@ test.beforeEach(async ({ page }) => {
     nonGoals: [],
   });
   try {
-    await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`polish-${projectID}`}, 'UI polish', 'https://example.invalid/polish.git', 'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
+    await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`polish-${projectID}`}, 'UI polish', 'https://example.invalid/polish.git', 'main', '.factory/actor-template.json', ${session.user.id})`;
     await db.client`INSERT INTO factory.ticket(id, project_id, title, state, created_by)
       VALUES (${ticketID}, ${projectID}, ${title}, 'ready', ${session.user.id})`;
     await db.client`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
@@ -138,36 +137,28 @@ async function openSettings(page: import("@playwright/test").Page) {
   return page.getByRole("navigation", { name: "Settings navigation" });
 }
 
-test("Settings scope chooser keeps one context and direct library destinations", async ({
+test("Settings navigation shows all grouped destinations directly without a scope chooser", async ({
   page,
 }) => {
   const navigation = await openSettings(page);
-  const scope = navigation.getByRole("combobox", { name: "Settings scope" });
-  for (const group of settingsGroups) {
-    await scope.selectOption(group.scope);
-    await expect(navigation.getByRole("button")).toHaveText(group.labels);
-  }
-  await scope.selectOption("project");
+  await expect(navigation.getByRole("combobox", { name: "Settings scope" })).toHaveCount(0);
   await expect(navigation.locator(".settings-scope-hint")).toHaveCount(0);
-  await expect(navigation.getByRole("button", { name: "Skills", exact: true })).toBeVisible();
-  await expect(
-    navigation.getByRole("button", { name: "MCP connections", exact: true }),
-  ).toBeVisible();
-  await expect(scope.locator("option", { hasText: "Libraries" })).toHaveText("Libraries");
-  await scope.selectOption("libraries");
-  await scope.selectOption("project");
+  await expect(navigation.getByRole("heading", { level: 3 })).toHaveText(
+    settingsGroups.map((group) => group.heading),
+  );
+  for (const group of settingsGroups) {
+    const section = navigation.locator(`section[data-settings-scope="${group.scope}"]`);
+    await expect(section.getByRole("button")).toHaveText(group.labels);
+  }
   await page.screenshot({ path: `${evidence}/compact-settings-1440.png` });
   await resize(page, { width: 390, height: 844 });
   await page.getByRole("button", { name: /choose settings page$/i }).click();
-  await expect(scope).toBeVisible();
-  await expect(navigation.getByRole("button")).toHaveCount(9);
+  await expect(navigation.getByRole("button")).toHaveCount(
+    settingsGroups.reduce((total, group) => total + group.labels.length, 0),
+  );
   await page.screenshot({ path: `${evidence}/compact-settings-390.png` });
-  await scope.focus();
-  await scope.selectOption("system");
-  await expect(navigation).toBeHidden();
-  await page.getByRole("button", { name: /choose settings page$/i }).click();
-  await expect(scope).toHaveValue("system");
   await navigation.getByRole("button", { name: "Company sign-in", exact: true }).click();
+  await expect(navigation).toBeHidden();
   await expect(page.getByRole("region", { name: "Company sign-in", exact: true })).toBeVisible();
   await page.screenshot({ path: `${evidence}/compact-settings-scope-change-390.png` });
 });
@@ -210,8 +201,10 @@ test("visual sweep keeps Project membership separate from Factory account action
     .soft(page.getByRole("region", { name: "Managed accounts" }))
     .toHaveCount(0, { timeout: 1500 });
   await page.screenshot({ path: `${evidence}/sweep-project-access.png` });
-  await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption("system");
-  await navigation.getByRole("button", { name: "People & access", exact: true }).click();
+  await navigation
+    .locator('section[data-settings-scope="system"]')
+    .getByRole("button", { name: "People & access", exact: true })
+    .click();
   const accounts = page.getByRole("region", { name: "Managed accounts" });
   await expect(accounts).toBeVisible();
   const opener = accounts.getByRole("button", {
@@ -268,7 +261,6 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
         return environmentSettingsView.parse({
           environment,
           variables: [],
-          registries: [],
           version: 0,
           canManage: true,
           storeConfigured: true,
@@ -298,8 +290,10 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
     { scope: "system", category: "Company sign-in" },
   ]) {
     await resize(page, desktopViewport);
-    await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption(scope);
-    await navigation.getByRole("button", { name: category, exact: true }).click();
+    await navigation
+      .locator(`section[data-settings-scope="${scope}"]`)
+      .getByRole("button", { name: category, exact: true })
+      .click();
     for (const viewport of auditViewports) {
       await resize(page, viewport);
       const form = page.locator(".settings-content form:visible").last();
@@ -398,13 +392,11 @@ for (const group of settingsGroups) {
     // Each scope owns its fixture and the existing timeout. All categories and
     // both viewports remain checked without one cumulative screenshot budget.
     await resize(page, desktopViewport);
-    const scope = navigation.getByRole("combobox", { name: "Settings scope" });
-    await scope.focus();
-    await scope.selectOption(group.scope);
-    await expect(navigation.getByRole("button")).toHaveText(group.labels);
+    const section = navigation.locator(`section[data-settings-scope="${group.scope}"]`);
+    await expect(section.getByRole("button")).toHaveText(group.labels);
     for (const label of group.labels) {
       await resize(page, desktopViewport);
-      await navigation.getByRole("button", { name: label, exact: true }).click();
+      await section.getByRole("button", { name: label, exact: true }).click();
       await expect(
         page.locator(".settings-content p:visible").filter({ hasText: /^Loading .*…$/ }),
       ).toHaveCount(0);

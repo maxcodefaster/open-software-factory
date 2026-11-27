@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
+import { knowledgeEditInput } from "#knowledge-domain/knowledge";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

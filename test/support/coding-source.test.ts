@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
+import type { createForgejoClient } from "#forge/forge";
 import { verifyCodingSource } from "../fixtures/coding-source";
 
 const preserved = [

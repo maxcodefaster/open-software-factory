@@ -10,15 +10,6 @@ export const agentTurnState = factorySchema.enum("agent_turn_state", [
   "uncertain",
 ]);
 
-export const branchOperationState = factorySchema.enum("branch_operation_state", [
-  "pending",
-  "executing",
-  "ambiguous",
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
-
 export const changeAgentState = factorySchema.enum("change_agent_state", [
   "starting",
   "working",
@@ -31,7 +22,6 @@ export const changeAgentState = factorySchema.enum("change_agent_state", [
 export const changeCommitSource = factorySchema.enum("change_commit_source", [
   "agent",
   "integration",
-  "repository-document",
   "workspace",
 ]);
 
@@ -84,15 +74,7 @@ export const workspaceKind = factorySchema.enum("development_workspace_kind", [
 export const isolatedRuntimeKind = factorySchema.enum("isolated_runtime_kind", [
   "staging",
   "verification",
-  "prebuild",
   "publication",
-]);
-
-export const knowledgeGenerationState = factorySchema.enum("knowledge_generation_state", [
-  "pending",
-  "running",
-  "succeeded",
-  "failed",
 ]);
 
 export const knowledgePageState = factorySchema.enum("knowledge_page_state", [
@@ -104,30 +86,6 @@ export const knowledgeRevisionKind = factorySchema.enum("knowledge_revision_kind
   "generated",
   "human",
   "proposed",
-]);
-
-export const mergeOperationState = factorySchema.enum("merge_operation_state", [
-  "pending",
-  "executing",
-  "ambiguous",
-  "succeeded",
-  "failed",
-]);
-
-export const promotionOperationState = factorySchema.enum("promotion_operation_state", [
-  "pending",
-  "starting",
-  "switching",
-  "succeeded",
-  "failed",
-]);
-
-export const pullRequestOperationState = factorySchema.enum("pull_request_operation_state", [
-  "pending",
-  "executing",
-  "ambiguous",
-  "succeeded",
-  "failed",
 ]);
 
 export const runtimeAttemptState = factorySchema.enum("runtime_attempt_state", [

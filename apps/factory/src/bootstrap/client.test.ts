@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { browserBootstrap } from "./browser-origin";
-import { type Bootstrap } from "./contracts";
+import type { Bootstrap } from "./contracts";
 
 test("only development rewrites planning transport locally, without rewriting the native function wire format", () => {
   const input: Bootstrap = {

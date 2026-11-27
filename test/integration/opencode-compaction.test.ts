@@ -32,7 +32,6 @@ test("native automatic summary compaction retains Factory policy and resumes the
     undefined,
     undefined,
     undefined,
-    undefined,
     nativeSkillManifest([required]),
     {
       modelID: buildModelID,

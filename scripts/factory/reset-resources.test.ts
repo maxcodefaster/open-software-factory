@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { nativeInstallationFixture } from "../../test/fixtures/native-installation";
-import { requireResetResourcesAbsent, type ResetResources } from "./reset-resources";
+import { type ResetResources, requireResetResourcesAbsent } from "./reset-resources";
 
 const connection = nativeInstallationFixture().connection;
 const resources: ResetResources = {

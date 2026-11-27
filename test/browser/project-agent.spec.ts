@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { requestFunction } from "../fixtures/server-functions";
@@ -45,10 +45,10 @@ test.beforeEach(async () => {
   projectSlug = `conversation-${projectID.slice(0, 8)}`;
   await database.client`
     INSERT INTO factory.project(
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+      id, slug, name, repository_url, default_branch, actor_template_path, created_by
     ) VALUES (
       ${projectID}, ${projectSlug}, 'Conversation fixture', ${repositoryURL}, 'main',
-      '.devcontainer/devcontainer.json', ${userID}
+      '.factory/actor-template.json', ${userID}
     )
   `;
   await database.client`

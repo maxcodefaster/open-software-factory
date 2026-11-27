@@ -1,7 +1,7 @@
 import { eq, sql as query } from "drizzle-orm";
-import { verificationDiagnosisInput } from "../../../../packages/conversation-domain/src/verification";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { executionPolicyCommand, verification } from "../../../../packages/db/src/schema";
+import { verificationDiagnosisInput } from "#conversation-domain/verification";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { auditEvent, verification } from "#db/schema";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { submittedCandidate } from "../agent/candidate-api";
@@ -22,15 +22,16 @@ export async function retryVerificationBootstrap(
     const writer = await lockChangeWriterIn(sql, changeID);
     await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
     const scope = `checks-bootstrap-retry:${changeID}`;
+    const dedupeKey = `usage.policy_command:${commandID}`;
     const input = { changeID, verificationID, runtimeAttemptID };
     const [replay] = await db
       .select({
-        scope: executionPolicyCommand.scope,
-        actor: executionPolicyCommand.actorId,
-        input: query<typeof input>`${executionPolicyCommand.input}`,
+        scope: auditEvent.scopeId,
+        actor: auditEvent.actorId,
+        input: query<typeof input>`${auditEvent.payload}->'input'`,
       })
-      .from(executionPolicyCommand)
-      .where(eq(executionPolicyCommand.commandId, commandID));
+      .from(auditEvent)
+      .where(eq(auditEvent.dedupeKey, dedupeKey));
     if (replay) {
       if (
         replay.scope !== scope ||
@@ -68,8 +69,7 @@ export async function retryVerificationBootstrap(
         AND verification.state='failed' AND verification.runtime_attempt_id=${runtimeAttemptID}
         AND verification.runner_id IS NULL AND verification.action_run_id IS NOT NULL
         AND verification.repair_prompted_at IS NULL AND verification.completed_at IS NOT NULL
-        AND EXISTS(SELECT 1 FROM factory.substrate_binding binding
-          WHERE binding.runtime_attempt_id=attempt.id AND binding.deleted_at IS NOT NULL)
+        AND attempt.deleted_at IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id
           AND kind='thread' AND state<>'resolved')
       FOR UPDATE OF verification`;
@@ -89,19 +89,28 @@ export async function retryVerificationBootstrap(
       );
     // Keep the failed outcome and its exact Runtime identity with the explicit
     // decision before releasing the Verification's pending bootstrap reference.
-    await db.insert(executionPolicyCommand).values({
-      commandId: commandID,
-      scope,
+    const result = {
+      verificationID,
+      runtimeAttemptID,
+      actionRunID: candidate.actionRunID,
+      state: "failed",
+      summary: candidate.summary,
+      diagnosis: diagnosis.data,
+      completedAt: candidate.completedAt,
+    };
+    await db.insert(auditEvent).values({
+      id: commandID,
+      kind: "usage.policy_command",
+      scopeType: "execution_policy",
+      scopeId: scope,
       actorId: userID,
-      input,
-      result: {
-        verificationID,
-        runtimeAttemptID,
-        actionRunID: candidate.actionRunID,
-        state: "failed",
-        summary: candidate.summary,
-        diagnosis: diagnosis.data,
-        completedAt: candidate.completedAt,
+      dedupeKey,
+      payload: {
+        commandId: commandID,
+        scope,
+        actorId: userID,
+        input,
+        result,
       },
     });
     await db

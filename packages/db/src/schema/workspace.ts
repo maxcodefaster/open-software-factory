@@ -5,8 +5,6 @@ import {
   check,
   customType,
   foreignKey,
-  index,
-  jsonb,
   type PgTableExtraConfigValue,
   primaryKey,
   text,
@@ -15,92 +13,14 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { DeveloperIDEState } from "../../../workspace-domain/src/developer-ide";
 import { authUser } from "./auth";
-import { change, changeCommitOperation } from "./delivery";
+import { change } from "./delivery";
 import { workspaceKind } from "./enums";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
-import { runtimeAttempt } from "./runtime";
 import { ticket } from "./tickets";
 
 const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
-
-export const workspaceSubmission = factorySchema.table(
-  "workspace_submission",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    writerEpoch: bigint("writer_epoch", { mode: "number" }).notNull(),
-    remoteHead: text("remote_head").notNull(),
-    repositoryUrl: text("repository_url").notNull(),
-    prepareAttemptedAt: timestamp("prepare_attempted_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_submission_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.id],
-      foreignColumns: [changeCommitOperation.id],
-      name: "workspace_submission_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_submission_workspace_id_fkey",
-    }),
-    check(
-      "workspace_submission_repository_url_check",
-      sql`${table.repositoryUrl} ~ '^https://[^/@?#]+/[^/?#]+/[^/?#]+$'::text`,
-    ),
-    check(
-      "workspace_submission_remote_head_check",
-      sql`${table.remoteHead} ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text`,
-    ),
-    check("workspace_submission_writer_epoch_check", sql`${table.writerEpoch} > 0`),
-  ],
-);
-
-export const developerIde = factorySchema.table(
-  "developer_ide",
-  {
-    userId: uuid("user_id").primaryKey().notNull(),
-    serviceEpoch: bigint("service_epoch", { mode: "number" }).default(1).notNull(),
-    state: text("state").$type<DeveloperIDEState>().notNull(),
-    image: text("image").notNull(),
-    namespaceUid: text("namespace_uid"),
-    podUid: text("pod_uid"),
-    failure: text("failure"),
-    createIntendedAt: timestamp("create_intended_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-    createObservedAt: timestamp("create_observed_at", { withTimezone: true }),
-    stopIntendedAt: timestamp("stop_intended_at", { withTimezone: true }),
-    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
-    lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    resourceId: uuid("resource_id").defaultRandom().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [authUser.id],
-      name: "developer_ide_user_id_fkey",
-    }),
-    unique("developer_ide_resource_id_unique").on(table.resourceId),
-    check("developer_ide_image_check", sql`${table.image} ~ '@sha256:[0-9a-f]{64}$'::text`),
-    check("developer_ide_service_epoch_check", sql`${table.serviceEpoch} > 0`),
-    check(
-      "developer_ide_state_check",
-      sql`${table.state} = ANY (ARRAY['create-intended'::text, 'preparing'::text, 'ready'::text, 'failed'::text, 'stop-intended'::text, 'stopped'::text])`,
-    ),
-  ],
-);
 
 export const developmentWorkspace = factorySchema.table(
   "development_workspace",
@@ -125,11 +45,6 @@ export const developmentWorkspace = factorySchema.table(
     uniqueIndex("development_workspace_one_personal_per_user_project")
       .using("btree", table.projectId.asc().nullsLast(), table.ownerUserId.asc().nullsLast())
       .where(sql`(${table.kind} = 'personal'::development_workspace_kind)`),
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "development_workspace_change_id_fkey",
-    }),
     foreignKey({
       columns: [table.changeId, table.projectId],
       foreignColumns: [change.id, change.projectId],
@@ -156,11 +71,6 @@ export const developmentWorkspace = factorySchema.table(
       name: "development_workspace_project_id_fkey",
     }),
     foreignKey({
-      columns: [table.ticketId],
-      foreignColumns: [ticket.id],
-      name: "development_workspace_ticket_id_fkey",
-    }),
-    foreignKey({
       columns: [table.ticketId, table.projectId],
       foreignColumns: [ticket.id, ticket.projectId],
       name: "development_workspace_ticket_id_project_id_fkey",
@@ -178,403 +88,6 @@ export const developmentWorkspace = factorySchema.table(
     check(
       "development_workspace_source_revision_check",
       sql`${table.sourceRevision} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-  ],
-);
-
-export const personalGitOperation = factorySchema.table(
-  "personal_git_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    userId: uuid("user_id").notNull(),
-    action: text("action").$type<"commit" | "fetch" | "pull">().notNull(),
-    expectedHead: text("expected_head").notNull(),
-    branch: text("branch").notNull(),
-    message: text("message").notNull(),
-    state: text("state")
-      .$type<"intended" | "attempted" | "succeeded" | "failed" | "uncertain">()
-      .default("intended")
-      .notNull(),
-    result: jsonb("result"),
-    failure: text("failure"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    attemptedAt: timestamp("attempted_at", { withTimezone: true }),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    index("personal_git_operation_workspace").using(
-      "btree",
-      table.workspaceId.asc().nullsLast(),
-      table.createdAt.asc().nullsLast(),
-    ),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "personal_git_operation_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId, table.workspaceId],
-      foreignColumns: [runtimeAttempt.id, runtimeAttempt.workspaceId],
-      name: "personal_git_operation_runtime_attempt_id_workspace_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [authUser.id],
-      name: "personal_git_operation_user_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "personal_git_operation_workspace_id_fkey",
-    }),
-    check(
-      "personal_git_operation_action_check",
-      sql`${table.action} = ANY (ARRAY['commit'::text, 'fetch'::text, 'pull'::text])`,
-    ),
-    check(
-      "personal_git_operation_branch_check",
-      sql`(length(${table.branch}) >= 1) AND (length(${table.branch}) <= 200)`,
-    ),
-    check(
-      "personal_git_operation_check",
-      sql`(${table.state} = ANY (ARRAY['succeeded'::text, 'failed'::text])) = (${table.completedAt} IS NOT NULL)`,
-    ),
-    check(
-      "personal_git_operation_check1",
-      sql`(${table.state} <> 'succeeded'::text) OR ((${table.result} IS NOT NULL) AND (jsonb_typeof(${table.result}) = 'object'::text))`,
-    ),
-    check(
-      "personal_git_operation_expected_head_check",
-      sql`${table.expectedHead} ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'::text`,
-    ),
-    check("personal_git_operation_message_check", sql`length(${table.message}) <= 240`),
-    check(
-      "personal_git_operation_state_check",
-      sql`${table.state} = ANY (ARRAY['intended'::text, 'attempted'::text, 'succeeded'::text, 'failed'::text, 'uncertain'::text])`,
-    ),
-  ],
-);
-
-export const sharedDocumentResolution = factorySchema.table(
-  "shared_document_resolution",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    path: text("path").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    choice: text("choice").$type<"keep-shared" | "use-saved">().notNull(),
-    documentRevision: text("document_revision").notNull(),
-    diskVersion: text("disk_version").notNull(),
-    result: jsonb("result").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "shared_document_resolution_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "shared_document_resolution_workspace_id_fkey",
-    }),
-    check(
-      "shared_document_resolution_choice_check",
-      sql`${table.choice} = ANY (ARRAY['keep-shared'::text, 'use-saved'::text])`,
-    ),
-  ],
-);
-
-export const workspaceCollaborationDecision = factorySchema.table(
-  "workspace_collaboration_decision",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_collaboration_decision_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_collaboration_decision_workspace_id_fkey",
-    }),
-  ],
-);
-
-export const workspaceCommand = factorySchema.table(
-  "workspace_command",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    kind: text("kind").$type<"shell" | "terminal">().default("shell").notNull(),
-    inputDigest: text("input_digest").notNull(),
-    state: text("state")
-      .$type<
-        | "start-intended"
-        | "dispatching"
-        | "starting"
-        | "running"
-        | "exited"
-        | "cancelled"
-        | "failed"
-        | "uncertain"
-        | "interrupted"
-      >()
-      .default("start-intended")
-      .notNull(),
-    dispatchAttemptedAt: timestamp("dispatch_attempted_at", { withTimezone: true }),
-    result: jsonb("result").default({}).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    index("workspace_command_runtime_idx").using(
-      "btree",
-      table.runtimeAttemptId.asc().nullsLast(),
-      table.state.asc().nullsLast(),
-    ),
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_command_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "workspace_command_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_command_workspace_id_fkey",
-    }),
-    check(
-      "workspace_command_input_digest_check",
-      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
-    ),
-    check(
-      "workspace_command_kind_check",
-      sql`${table.kind} = ANY (ARRAY['shell'::text, 'terminal'::text])`,
-    ),
-    check(
-      "workspace_command_state_check",
-      sql`${table.state} = ANY (ARRAY['start-intended'::text, 'dispatching'::text, 'starting'::text, 'running'::text, 'exited'::text, 'cancelled'::text, 'failed'::text, 'uncertain'::text, 'interrupted'::text])`,
-    ),
-  ],
-);
-
-export const workspaceFileOperation = factorySchema.table(
-  "workspace_file_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    action: text("action").$type<"mkdir" | "delete" | "rename">().notNull(),
-    inputDigest: text("input_digest").notNull(),
-    result: jsonb("result"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_file_operation_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "workspace_file_operation_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_file_operation_workspace_id_fkey",
-    }),
-    check(
-      "workspace_file_operation_action_check",
-      sql`${table.action} = ANY (ARRAY['mkdir'::text, 'delete'::text, 'rename'::text])`,
-    ),
-    check(
-      "workspace_file_operation_input_digest_check",
-      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
-    ),
-  ],
-);
-
-export const workspaceFileTransfer = factorySchema.table(
-  "workspace_file_transfer",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    direction: text("direction").$type<"upload" | "download">().notNull(),
-    inputDigest: text("input_digest").notNull(),
-    path: text("path").notNull(),
-    state: text("state")
-      .$type<
-        "preparing" | "active" | "committing" | "committed" | "releasing" | "released" | "uncertain"
-      >()
-      .notNull(),
-    result: jsonb("result"),
-    commitAttemptedAt: timestamp("commit_attempted_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true })
-      .default(sql`(now() + '00:30:00'::interval)`)
-      .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    index("workspace_file_transfer_runtime_idx").using(
-      "btree",
-      table.runtimeAttemptId.asc().nullsLast(),
-    ),
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_file_transfer_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "workspace_file_transfer_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_file_transfer_workspace_id_fkey",
-    }),
-    check(
-      "workspace_file_transfer_direction_check",
-      sql`${table.direction} = ANY (ARRAY['upload'::text, 'download'::text])`,
-    ),
-    check(
-      "workspace_file_transfer_input_digest_check",
-      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
-    ),
-    check(
-      "workspace_file_transfer_state_check",
-      sql`${table.state} = ANY (ARRAY['preparing'::text, 'active'::text, 'committing'::text, 'committed'::text, 'releasing'::text, 'released'::text, 'uncertain'::text])`,
-    ),
-  ],
-);
-
-export const workspaceLifecycleCommand = factorySchema.table(
-  "workspace_lifecycle_command",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id"),
-    actorId: uuid("actor_id").notNull(),
-    action: text("action").$type<"start" | "pause" | "stop">().notNull(),
-    dispatchAttemptedAt: timestamp("dispatch_attempted_at", { withTimezone: true }),
-    result: jsonb("result"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_lifecycle_command_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "workspace_lifecycle_command_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_lifecycle_command_workspace_id_fkey",
-    }),
-    check(
-      "workspace_lifecycle_command_action_check",
-      sql`${table.action} = ANY (ARRAY['start'::text, 'pause'::text, 'stop'::text])`,
-    ),
-  ],
-);
-
-export const workspaceShareDecision = factorySchema.table(
-  "workspace_share_decision",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
-    userId: uuid("user_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    permission: text("permission").$type<"observe" | "collaborate">(),
-    expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
-    result: jsonb("result").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    accessReconciledAt: timestamp("access_reconciled_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_share_decision_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [authUser.id],
-      name: "workspace_share_decision_user_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [developmentWorkspace.id],
-      name: "workspace_share_decision_workspace_id_fkey",
-    }),
-    check("workspace_share_decision_expected_version_check", sql`${table.expectedVersion} >= 0`),
-    check(
-      "workspace_share_decision_permission_check",
-      sql`${table.permission} = ANY (ARRAY['observe'::text, 'collaborate'::text])`,
-    ),
-  ],
-);
-
-export const workspaceTerminalOperation = factorySchema.table(
-  "workspace_terminal_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    commandId: uuid("command_id").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    action: text("action").$type<"input" | "resize">().notNull(),
-    inputDigest: text("input_digest").notNull(),
-    result: jsonb("result"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "workspace_terminal_operation_actor_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.commandId],
-      foreignColumns: [workspaceCommand.id],
-      name: "workspace_terminal_operation_command_id_fkey",
-    }),
-    check(
-      "workspace_terminal_operation_action_check",
-      sql`${table.action} = ANY (ARRAY['input'::text, 'resize'::text])`,
-    ),
-    check(
-      "workspace_terminal_operation_input_digest_check",
-      sql`${table.inputDigest} ~ '^[0-9a-f]{64}$'::text`,
     ),
   ],
 );
@@ -622,8 +135,10 @@ export const workspaceSharedDocument = factorySchema.table(
     path: text("path").notNull(),
     yState: bytea("y_state").notNull(),
     diskVersion: text("disk_version").notNull(),
-    dirty: boolean("dirty").default(false).notNull(),
-    conflict: boolean("conflict").default(false).notNull(),
+    syncState: text("sync_state")
+      .$type<"clean" | "dirty" | "conflict">()
+      .default("clean")
+      .notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
@@ -636,6 +151,10 @@ export const workspaceSharedDocument = factorySchema.table(
       columns: [table.workspaceId, table.path],
       name: "workspace_shared_document_pkey",
     }),
+    check(
+      "workspace_shared_document_sync_state_check",
+      sql`${table.syncState} = ANY (ARRAY['clean'::text, 'dirty'::text, 'conflict'::text])`,
+    ),
     check("workspace_shared_document_y_state_check", sql`octet_length(${table.yState}) <= 8388608`),
   ],
 );

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { modelSettingsView } from "#conversation-domain/model-settings";
+import { runtimeModelToken } from "#runtime-domain/identity";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { maximumHTTPRequestBytes } from "../../apps/factory/src/http";
@@ -6,8 +8,6 @@ import { createModelSettingsController } from "../../apps/factory/src/models/con
 import { createModelRelay } from "../../apps/factory/src/models/relay";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
-import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import {

@@ -19,7 +19,7 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ include "factory.name" . }}
       automountServiceAccountToken: false
-      # Only the existing Editor identity is projected, for exact native pause
+      # Only the existing Editor identity is projected, for exact native Actor
       # observations. There is no provisioner token, CA signing key or state PVC.
       securityContext:
         runAsUser: 1000

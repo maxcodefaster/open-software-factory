@@ -1,12 +1,9 @@
-import { and, asc, eq, isNull, not } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, not } from "drizzle-orm";
 import { z } from "zod";
-import { usageRate } from "../../../../packages/conversation-domain/src/usage";
-import {
-  currentComputeView,
-  usageSettingsView,
-} from "../../../../packages/conversation-domain/src/usage-view";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { runtimeAttempt, substrateBinding } from "../../../../packages/db/src/schema";
+import { usageRate } from "#conversation-domain/usage";
+import { currentComputeView, usageSettingsView } from "#conversation-domain/usage-view";
+import type { createDatabase } from "#db/client";
+import { runtimeAttempt } from "#db/schema";
 import { createAccessController } from "../access/api";
 import { createContractRates } from "./contract-rates";
 import { createUsagePolicy } from "./policy";
@@ -46,11 +43,11 @@ export function createUsageService(database: ReturnType<typeof createDatabase>) 
           kind: runtimeAttempt.isolatedKind,
         })
         .from(runtimeAttempt)
-        .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
         .where(
           and(
-            isNull(substrateBinding.deletedAt),
-            not(substrateBinding.createRejected),
+            isNotNull(runtimeAttempt.atespace),
+            isNull(runtimeAttempt.deletedAt),
+            not(runtimeAttempt.createRejected),
             projectID === null ? undefined : eq(runtimeAttempt.projectId, projectID),
           ),
         )

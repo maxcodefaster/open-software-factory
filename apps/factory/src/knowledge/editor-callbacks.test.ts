@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { withoutRepeatedTitle } from "../../../../packages/knowledge-domain/src/document-merge";
+import { withoutRepeatedTitle } from "#knowledge-domain/document-merge";
 import { editorCallbacks, editorSolid as solid } from "../../../../test/fixtures/editor-callbacks";
 import type { KnowledgePage, KnowledgeRevision, KnowledgeSave } from "./contracts";
 import * as drafts from "./draft";
@@ -22,7 +22,7 @@ function setup(options: {
   const storage = new Map<string, string>();
   const store = new Map<string, drafts.KnowledgeDraft>();
   const component = editorCallbacks<Callbacks>({
-    path: `${import.meta.dir}/../knowledge-workspace.tsx`,
+    path: `${import.meta.dir}/knowledge-workspace.tsx`,
     component: "KnowledgeWorkspace",
     expose: [
       "draft",
@@ -36,25 +36,18 @@ function setup(options: {
     ],
     imports: {
       "solid-js": solid,
-      "../../../packages/knowledge-domain/src/document-merge": { withoutRepeatedTitle },
-      "./knowledge/draft": drafts,
-      "./ui/workspace-navigation": { createWorkspaceNavigation: () => ({}) },
-      "./command-error": { plainErrorMessage: (message: string) => message },
+      "#knowledge-domain/document-merge": { withoutRepeatedTitle },
+      "./draft": drafts,
+      "../ui/workspace-navigation": { createWorkspaceNavigation: () => ({}) },
+      "../command-error": { plainErrorMessage: (message: string) => message },
     },
     stubs: [
-      "./icon",
-      "./knowledge/navigation-resize",
-      "./knowledge/page-organization",
-      "./knowledge/page-tree",
-      "./knowledge/source-link",
-      "./knowledge/wiki-search",
-      "./markdown-editor",
-      "./markdown-reader",
-      "./popover-keyboard",
-      "./ui/feedback",
-      "./ui/workspace-actions",
-      "./version-history",
-      "./wiki-progress",
+      "./navigation-resize",
+      "./page-tree",
+      "./wiki-search",
+      "./workspace-document",
+      "./workspace-generation",
+      "./workspace-history",
     ],
     storage: {
       getItem: (key) => storage.get(key) ?? null,

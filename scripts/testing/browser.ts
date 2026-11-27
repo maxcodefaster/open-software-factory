@@ -127,9 +127,9 @@ async function ownedHost(environment: Environment, signal?: AbortSignal): Promis
       signal?.throwIfAborted();
       const projectID = crypto.randomUUID();
       await database.client`INSERT INTO factory.project
-        (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        (id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectID},'factory-starter','factory-starter',
-          'https://example.invalid/owned-browser.git','main','.devcontainer/devcontainer.json',
+          'https://example.invalid/owned-browser.git','main','.factory/actor-template.json',
           ${administrator.id})`;
       signal?.throwIfAborted();
       await database.client`INSERT INTO factory.project_membership

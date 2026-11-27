@@ -1,4 +1,4 @@
-import type { LearningView } from "../../../../packages/conversation-domain/src/learning";
+import type { LearningView } from "#conversation-domain/learning";
 
 export type LearningFlowRecord = {
   id: string;

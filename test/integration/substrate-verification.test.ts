@@ -1,24 +1,94 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
+import { readRepositoryFileAtRevision } from "../../apps/factory/src/runtime/git-http";
 import {
   substrateVerificationPrincipalIn,
   substrateVerificationSourceIn,
 } from "../../apps/factory/src/runtime/substrate-verification-grant";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import { nativeProjectDefinition, nativeProjectTemplate } from "../fixtures/native-project";
 import { substrateFixture } from "../fixtures/substrate";
 
 test("native Verification continues initial capacity rejection on its exact-job Actor, never canonical Source or legacy capacity", async () => {
   const f = await substrateFixture("a".repeat(40), "ticket");
   const directory = await mkdtemp(join(tmpdir(), "native-verification-"));
+  const repo = join(directory, "repository");
+  await Bun.$`git init -b main ${repo}`.quiet();
+  await mkdir(join(repo, ".factory"));
+  await writeFile(join(repo, nativeProjectTemplate.path), nativeProjectTemplate.content);
+  await Bun.$`git -C ${repo} add .`.quiet();
+  await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
+  const revision = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim();
+  const distinctContent = `${nativeProjectTemplate.content}\n`;
+  const distinctTemplate = {
+    ...nativeProjectTemplate,
+    content: distinctContent,
+    sha256: createHash("sha256").update(distinctContent).digest("hex"),
+  };
+  await writeFile(join(repo, nativeProjectTemplate.path), distinctContent);
+  await Bun.$`git -C ${repo} add .`.quiet();
+  await Bun.$`git -C ${repo} -c user.name=Owned -c user.email=owned@example.invalid commit -m distinct`.quiet();
+  const distinctRevision = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim();
+  const readProject = async (requestedRevision: string) => {
+    expect([revision, distinctRevision]).toContain(requestedRevision);
+    const content = await readRepositoryFileAtRevision(
+      `file://${repo}`,
+      requestedRevision,
+      nativeProjectTemplate.path,
+    );
+    return {
+      systemContract: null,
+      actorTemplate: {
+        path: nativeProjectTemplate.path,
+        content,
+        sha256: createHash("sha256").update(content).digest("hex"),
+      },
+    };
+  };
+  // Exact committed contents and authoritative App-contract absence only;
+  // neither a remote Forge nor canonical Source is part of this controller test.
+  const forge = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      expect(request.method).toBe("GET");
+      const prefix = "/api/v1/repos/owned/native-verification/";
+      expect(url.pathname.startsWith(prefix)).toBe(true);
+      const path = url.pathname.slice(prefix.length);
+      const tree = path.startsWith("git/trees/");
+      const requestedRevision = tree
+        ? path.slice("git/trees/".length)
+        : (url.searchParams.get("ref") ?? "");
+      expect([revision, distinctRevision]).toContain(requestedRevision);
+      if (path === "contents/.factory/system.json") return new Response(null, { status: 404 });
+      expect(tree || path === `contents/${nativeProjectTemplate.path}`).toBe(true);
+      const sha = (
+        await Bun.$`git -C ${repo} rev-parse ${`${requestedRevision}:${nativeProjectTemplate.path}`}`.text()
+      ).trim();
+      if (tree)
+        return Response.json({
+          tree: [{ path: nativeProjectTemplate.path, type: "blob", sha }],
+        });
+      const project = await readProject(requestedRevision);
+      return Response.json({
+        content: Buffer.from(project.actorTemplate.content).toString("base64"),
+        encoding: "base64",
+        sha,
+      });
+    },
+  });
+  const repository = `${forge.url.origin}/owned/native-verification.git`;
   const ca = join(directory, "ca.pem");
   await writeFile(ca, "-----BEGIN CERTIFICATE-----\nowned-test\n-----END CERTIFICATE-----\n");
   const registryCA =
@@ -32,7 +102,7 @@ test("native Verification continues initial capacity rejection on its exact-job 
     registryCA: process.env["FACTORY_REGISTRY_CA_FILE"],
   };
   process.env["FACTORY_REGISTRY_CA_FILE"] = registryCAFile;
-  process.env["FACTORY_FORGEJO_API_URL"] = "http://forgejo.cluster.svc:3000/api/v1/";
+  process.env["FACTORY_FORGEJO_API_URL"] = `${forge.url.origin}/api/v1/`;
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
   process.env["FACTORY_FORGEJO_OWNER"] = "owned";
   let verificationID = crypto.randomUUID();
@@ -90,7 +160,10 @@ test("native Verification continues initial capacity rejection on its exact-job 
     if (method.startsWith("Create")) {
       creates.set(kind, (creates.get(kind) ?? 0) + 1);
       const [saved] = await f.database
-        .client`SELECT atespace_attempted_at,policy_attempted_at,template_attempted_at FROM factory.substrate_verification WHERE verification_id=${verificationID} AND runtime_attempt_id=${provisioningAttemptID}`;
+        .client`SELECT resources#>>'{atespace,attemptedAt}' AS atespace_attempted_at,
+          resources#>>'{policy,attemptedAt}' AS policy_attempted_at,
+          resources#>>'{template,attemptedAt}' AS template_attempted_at
+        FROM factory.substrate_provision WHERE owner_id=${verificationID} AND kind='verification' AND runtime_attempt_id=${provisioningAttemptID}`;
       if (["Atespace", "AtespaceAccessPolicy", "ActorTemplate"].includes(kind))
         expect(
           saved?.[
@@ -103,13 +176,12 @@ test("native Verification continues initial capacity rejection on its exact-job 
         ).not.toBeNull();
       else if (kind === "Actor") {
         const [binding] = await f.database
-          .client`SELECT binding.create_attempted_at,attempt.workspace_id,attempt.change_id,
+          .client`SELECT attempt.create_attempted_at,attempt.workspace_id,attempt.change_id,
             attempt.verification_id,attempt.isolated_kind,verification.runtime_attempt_id,
             verification.state,attempt.revision=verification.commit_sha AS exact_commit
-          FROM factory.substrate_binding binding
-          JOIN factory.runtime_attempt attempt ON attempt.id=binding.runtime_attempt_id
+          FROM factory.runtime_attempt attempt
           JOIN factory.verification verification ON verification.id=attempt.verification_id
-          WHERE binding.runtime_attempt_id=${provisioningAttemptID}`;
+          WHERE attempt.id=${provisioningAttemptID} AND attempt.atespace IS NOT NULL`;
         expect(binding?.["create_attempted_at"]).not.toBeNull();
         expect(binding).toMatchObject({
           workspace_id: null,
@@ -238,10 +310,6 @@ test("native Verification continues initial capacity rejection on its exact-job 
       attempts: [
         ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${f.attemptID}`),
       ],
-      bindings: [
-        ...(await f.database
-          .client`SELECT * FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`),
-      ],
       sources: [
         ...(await f.database
           .client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
@@ -257,14 +325,14 @@ test("native Verification continues initial capacity rejection on its exact-job 
       id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
       commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
       SELECT ${submittedID},id,runtime_attempt_id,1,branch_name,base_sha,
-        ${"d".repeat(40)},${"d".repeat(40)},'Owned submitted Verification candidate',
+        ${revision},${revision},'Owned submitted Verification candidate',
         ${`owned-verification:${submittedID}`},'succeeded',created_by,now()
       FROM factory.change WHERE id=${f.changeID}`;
     await f.database
-      .client`UPDATE factory.project SET repository_url='http://forgejo.cluster.svc:3000/owned/native-verification.git' WHERE id=${f.projectID}`;
+      .client`UPDATE factory.project SET repository_url=${repository} WHERE id=${f.projectID}`;
     await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,runner_uuid,runner_token,runner_job_handle,created_by)
-      VALUES(${verificationID},${f.changeID},${"d".repeat(40)},1,1,'owned-native-verification',${crypto.randomUUID()},'owned-private-runner-token','owned-exact-job',${f.userID})`;
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,runner_token,runner_job_handle,created_by)
+      VALUES(${verificationID},${f.changeID},${revision},1,1,${crypto.randomUUID()},'owned-private-runner-token','owned-exact-job',${f.userID})`;
     for (const query of [
       f.database
         .client`UPDATE factory.verification SET runner_job_handle='foreign-job' WHERE id=${verificationID}`,
@@ -272,7 +340,7 @@ test("native Verification continues initial capacity rejection on its exact-job 
         .client`UPDATE factory.verification SET runner_job_handle=NULL WHERE id=${verificationID}`,
       f.database.client`UPDATE factory.verification SET action_run_id=2 WHERE id=${verificationID}`,
       f.database
-        .client`UPDATE factory.verification SET commit_sha=${"e".repeat(40)} WHERE id=${verificationID}`,
+        .client`UPDATE factory.verification SET commit_sha=${distinctRevision} WHERE id=${verificationID}`,
     ])
       await expect(Promise.resolve(query)).rejects.toThrow("native job binding is immutable");
     const workspaces = await f.database.client`SELECT * FROM factory.development_workspace`;
@@ -291,9 +359,17 @@ test("native Verification continues initial capacity rejection on its exact-job 
       "no worker has room for the actor",
     );
     const [originalResume] = await f.database.client`
-      SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
-        intended_at::text,attempted_at::text,outcome
-      FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${attemptID} AND action='resume'`;
+      SELECT payload->>'actorUid' AS actor_uid,
+        payload->>'nativeVersion' AS native_version,
+        payload->>'originKey' AS origin_key,
+        NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+        payload->>'stopId' AS stop_id,
+        created_at::text AS intended_at,
+        payload->>'attemptedAt' AS attempted_at,
+        result AS outcome
+      FROM factory.operation
+      WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+        AND scope_id=${attemptID} AND payload->>'action'='resume'`;
     expect(originalResume).toMatchObject({
       native_version: "1",
       origin_key: "initial",
@@ -303,7 +379,9 @@ test("native Verification continues initial capacity rejection on its exact-job 
     });
     const capacityWait = [
       ...(await f.database.client<{ reason: string }[]>`
-        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+        SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+          AND scope_id=${attemptID}`),
     ];
     // The pinned native workflow rejected assignment before advancing the Actor.
     // A current exact-job commission continues that same idempotent native Resume,
@@ -318,12 +396,22 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect(capacityWait).toEqual([{ reason: "compute-capacity" }]);
     expect([
       ...(await f.database.client<{ reason: string }[]>`
-        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+        SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+          AND scope_id=${attemptID}`),
     ]).toEqual([]);
     const [completedResume] = await f.database.client`
-      SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
-        intended_at::text,attempted_at::text,outcome
-      FROM factory.substrate_actor_rpc WHERE runtime_attempt_id=${attemptID} AND action='resume'`;
+      SELECT payload->>'actorUid' AS actor_uid,
+        payload->>'nativeVersion' AS native_version,
+        payload->>'originKey' AS origin_key,
+        NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+        payload->>'stopId' AS stop_id,
+        created_at::text AS intended_at,
+        payload->>'attemptedAt' AS attempted_at,
+        result AS outcome
+      FROM factory.operation
+      WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+        AND scope_id=${attemptID} AND payload->>'action'='resume'`;
     expect(completedResume).toEqual({
       ...originalResume,
       outcome: {
@@ -335,7 +423,7 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect(started).toMatchObject({
       id: attemptID,
       state: "starting",
-      revision: "d".repeat(40),
+      revision,
       workspaceId: null,
       changeId: null,
     });
@@ -366,7 +454,6 @@ test("native Verification continues initial capacity rejection on its exact-job 
     );
     expect(retainedOwnerCalls).toBe(0);
     objects.set("AtespaceAccessPolicy", policy);
-    const repository = "http://forgejo.cluster.svc:3000/owned/native-verification.git";
     const readSource = () =>
       f.database.client.begin((sql) => substrateVerificationSourceIn(sql, attemptID));
     expect(await readSource()).toBe(repository);
@@ -376,7 +463,7 @@ test("native Verification continues initial capacity rejection on its exact-job 
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     expect(await readSource()).toBe(repository);
     await f.database
-      .client`UPDATE factory.project SET repository_url='http://forgejo.cluster.svc:3000/owned/other.git' WHERE id=${f.projectID}`;
+      .client`UPDATE factory.project SET repository_url=${`${forge.url.origin}/owned/other.git`} WHERE id=${f.projectID}`;
     await expect(readSource()).rejects.toThrow("Verification Source grant required");
     await f.database
       .client`UPDATE factory.project SET repository_url=${repository} WHERE id=${f.projectID}`;
@@ -396,15 +483,24 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect([
       ...(await f.database.client`SELECT to_regclass('factory.factorybox_worker') AS worker`),
     ]).toEqual([{ worker: null }]);
-    const [environment] = await f.database.client`SELECT environment,version::int AS version
-      FROM factory.runtime_environment_intent WHERE runtime_attempt_id=${attemptID}`;
+    const [environment] = await f.database.client`
+      SELECT payload->>'environment' AS environment,(payload->>'version')::int AS version
+      FROM factory.operation
+      WHERE kind='runtime.environment_intent' AND scope_type='runtime_attempt'
+        AND scope_id=${attemptID}
+        AND idempotency_key=${`runtime.environment_intent:${attemptID}`}`;
     expect(environment).toEqual({ environment: "development", version: 0 });
     const template = objects.get("ActorTemplate") as { containers: { env: { value: string }[] }[] };
     const bootstrap = JSON.parse(template.containers[0]?.env[0]?.value ?? "null");
     const factoryCA = await Bun.file(configuration.factoryCAFile).text();
     expect(bootstrap.factoryCA).toBe(`${factoryCA.trimEnd()}\n${registryCA}`);
     expect(bootstrap.sourceHandoff).toBe(false);
-    expect(bootstrap.assignment.revision).toBe("d".repeat(40));
+    expect(bootstrap.assignment.revision).toBe(revision);
+    expect(bootstrap.assignment.actorTemplatePath).toBe(nativeProjectTemplate.path);
+    expect(bootstrap.projectTemplate).toEqual({
+      path: nativeProjectTemplate.path,
+      sha256: nativeProjectTemplate.sha256,
+    });
     expect(bootstrap.assignment.channels.map((channel: { kind: string }) => channel.kind)).toEqual([
       "verification",
     ]);
@@ -413,7 +509,9 @@ test("native Verification continues initial capacity rejection on its exact-job 
       "url: https://git.native.test",
     );
     const [persisted] = await f.database
-      .client`SELECT intent,template FROM factory.substrate_verification WHERE verification_id=${verificationID}`;
+      .client`SELECT intent,resources->'template'->'value' AS template FROM factory.substrate_provision WHERE owner_id=${verificationID} AND kind='verification'`;
+    expect(persisted?.["intent"].revision).toBe(revision);
+    expect(persisted?.["intent"].projectTemplate).toEqual(nativeProjectTemplate);
     expect(JSON.stringify(persisted)).not.toContain("owned-private-runner-token");
     expect(JSON.stringify(persisted)).not.toContain("parentToken");
     f.hub.ready = () => true;
@@ -443,11 +541,11 @@ test("native Verification continues initial capacity rejection on its exact-job 
     await expect(
       Promise.resolve(
         f.database
-          .client`DELETE FROM factory.substrate_verification WHERE verification_id=${verificationID}`,
+          .client`DELETE FROM factory.substrate_provision WHERE owner_id=${verificationID} AND kind='verification'`,
       ),
     ).rejects.toThrow("cannot be reused");
     const [originalProvision] = await f.database
-      .client`SELECT * FROM factory.substrate_verification WHERE runtime_attempt_id=${attemptID}`;
+      .client`SELECT * FROM factory.substrate_provision WHERE runtime_attempt_id=${attemptID}`;
     if (!originalProvision) throw new Error("Original native provisioning history is missing");
     expect((await runtime.stop(attemptID))?.state).toBe("stopped");
     await expect(
@@ -464,11 +562,18 @@ test("native Verification continues initial capacity rejection on its exact-job 
       "inputs differ",
     );
     expect(creates.get("Actor")).toBe(1);
+    const retryCommandID = crypto.randomUUID();
+    const retryScope = `checks-bootstrap-retry:${f.changeID}`;
     await f.database
-      .client`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
-      VALUES(${crypto.randomUUID()},${`checks-bootstrap-retry:${f.changeID}`},${f.userID},
-        ${JSON.stringify({ changeID: f.changeID, verificationID, runtimeAttemptID: attemptID })}::jsonb,
-        ${JSON.stringify({ verificationID, runtimeAttemptID: attemptID, state: "failed" })}::jsonb)`;
+      .client`INSERT INTO factory.audit_event(id,kind,scope_type,scope_id,dedupe_key,actor_id,payload)
+      VALUES(${retryCommandID},'usage.policy_command','execution_policy',${retryScope},${`usage.policy_command:${retryCommandID}`},${f.userID},
+        ${JSON.stringify({
+          commandId: retryCommandID,
+          scope: retryScope,
+          actorId: f.userID,
+          input: { changeID: f.changeID, verificationID, runtimeAttemptID: attemptID },
+          result: { verificationID, runtimeAttemptID: attemptID, state: "failed" },
+        })}::jsonb)`;
     const successorID = runtimeIdentity(verificationID, 2).attemptID;
     provisioningAttemptID = successorID;
     lose = "CreateActorTemplate";
@@ -480,28 +585,32 @@ test("native Verification continues initial capacity rejection on its exact-job 
       id: successorID,
       state: "starting",
       generation: "2",
-      revision: "d".repeat(40),
+      revision,
       workspaceId: null,
     });
     expect(creates.get("Actor")).toBe(2);
     expect(creates.get("Atespace")).toBe(2);
     expect(creates.get("ActorTemplate")).toBe(2);
     expect(resumes).toBe(2);
-    expect(spaces.get(`fa-${successorID.replaceAll("-", "")}`)?.get("ActorTemplate")).toMatchObject(
-      {
-        containers: [{ image: `registry.test/native@sha256:${"b".repeat(64)}` }],
-        resources: { limits: { cpuMillicores: "3000", memoryBytes: "6442450944" } },
-      },
-    );
+    const successorTemplate = spaces
+      .get(`fa-${successorID.replaceAll("-", "")}`)
+      ?.get("ActorTemplate") as { containers: { name: string; image: string }[] };
+    expect(successorTemplate).toMatchObject({
+      resources: { limits: { cpuMillicores: "3000", memoryBytes: "6442450944" } },
+    });
+    expect(successorTemplate.containers.map(({ name, image }) => ({ name, image }))).toEqual([
+      { name: "factory-control", image: `registry.test/native@sha256:${"b".repeat(64)}` },
+      ...nativeProjectDefinition.containers.map(({ name, image }) => ({ name, image })),
+    ]);
     expect([
       ...(await f.database
-        .client`SELECT * FROM factory.substrate_verification WHERE runtime_attempt_id=${attemptID}`),
+        .client`SELECT * FROM factory.substrate_provision WHERE runtime_attempt_id=${attemptID}`),
     ]).toEqual([originalProvision]);
     expect(
       (
         await f.database.client<
           { generation: number }[]
-        >`SELECT generation::int AS generation FROM factory.substrate_verification WHERE verification_id=${verificationID} ORDER BY generation`
+        >`SELECT generation::int AS generation FROM factory.substrate_provision WHERE owner_id=${verificationID} AND kind='verification' ORDER BY generation`
       ).map((row) => row.generation),
     ).toEqual([1, 2]);
     expect((await runtime.get(attemptID))?.state).toBe("stopped");
@@ -509,8 +618,8 @@ test("native Verification continues initial capacity rejection on its exact-job 
     expect(creates.get("Actor")).toBe(2);
     await expect(
       Promise.resolve(f.database
-        .client`INSERT INTO factory.substrate_verification(verification_id,runtime_attempt_id,generation,intent)
-      SELECT verification_id,${runtimeIdentity(verificationID, 3).attemptID},3,intent FROM factory.substrate_verification
+        .client`INSERT INTO factory.substrate_provision(owner_id,kind,runtime_attempt_id,generation,intent)
+      SELECT owner_id,'verification',${runtimeIdentity(verificationID, 3).attemptID},3,intent FROM factory.substrate_provision
       WHERE runtime_attempt_id=${successorID}`),
     ).rejects.toThrow("requires exact cleanup");
     expect(await f.database.client`SELECT * FROM factory.development_workspace`).toEqual(
@@ -529,27 +638,33 @@ test("native Verification continues initial capacity rejection on its exact-job 
     const completedVerificationID = verificationID;
     const retainedGenerations = [
       ...(await f.database
-        .client`SELECT * FROM factory.substrate_verification WHERE verification_id=${completedVerificationID} ORDER BY generation`),
+        .client`SELECT * FROM factory.substrate_provision WHERE owner_id=${completedVerificationID} AND kind='verification' ORDER BY generation`),
     ];
     verificationID = crypto.randomUUID();
     provisioningAttemptID = runtimeIdentity(verificationID, 1).attemptID;
     await f.database
-      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,runner_token,runner_job_handle,created_by)
-      VALUES(${verificationID},${f.changeID},${"e".repeat(40)},2,'owned-distinct-job',102,${crypto.randomUUID()},'owned-distinct-runner-token','owned-distinct-job',${f.userID})`;
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,runner_token,runner_job_handle,created_by)
+      VALUES(${verificationID},${f.changeID},${distinctRevision},2,102,${crypto.randomUUID()},'owned-distinct-runner-token','owned-distinct-job',${f.userID})`;
     runtime = controller(configuration);
     expect((await runtime.startVerification(verificationID, f.userID))?.id).toBe(
       provisioningAttemptID,
     );
     expect((await runtime.get(provisioningAttemptID))?.generation).toBe("1");
+    const [distinctProvision] = await f.database
+      .client`SELECT intent FROM factory.substrate_provision WHERE runtime_attempt_id=${provisioningAttemptID}`;
+    expect(distinctProvision?.["intent"].revision).toBe(distinctRevision);
+    expect(distinctProvision?.["intent"].projectTemplate).toEqual(distinctTemplate);
+    expect(distinctTemplate.sha256).not.toBe(nativeProjectTemplate.sha256);
     expect(creates.get("Actor")).toBe(3);
     expect([
       ...(await f.database
-        .client`SELECT * FROM factory.substrate_verification WHERE verification_id=${completedVerificationID} ORDER BY generation`),
+        .client`SELECT * FROM factory.substrate_provision WHERE owner_id=${completedVerificationID} AND kind='verification' ORDER BY generation`),
     ]).toEqual(retainedGenerations);
     expect((await runtime.stop(provisioningAttemptID))?.state).toBe("stopped");
     expect(await codingState()).toEqual(retainedCoding);
     expect(codingActor.status.state).toBe("ACTOR_STATE_RUNNING");
   } finally {
+    await forge.stop(true);
     f.hub.revoke(attemptID);
     f.hub.revoke(provisioningAttemptID);
     if (previous.api === undefined) delete process.env["FACTORY_FORGEJO_API_URL"];

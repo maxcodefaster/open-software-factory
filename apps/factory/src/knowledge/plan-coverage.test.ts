@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
+import type { WikiPageSnapshot } from "#knowledge-domain/generation";
 import { generateWiki, wikiPlanReviewSchema } from "./generation-workflow";
 
 // Live generation 5bd8b45f-001f-4203-87ca-c6d643d49320, 2026-11-15.

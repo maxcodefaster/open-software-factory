@@ -1,4 +1,5 @@
-import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
+import type { CodingReasoning } from "#conversation-domain/model-settings";
+import { nativeToolShell } from "./native-tool";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 
 export interface RuntimeAgentConfiguration {
@@ -13,24 +14,25 @@ export interface RuntimeAgentConfiguration {
   readonly browserToken: string;
 }
 
-// The pinned OpenCode process inside the Substrate-owned Dev Container.
-export function runtimeAgentProcess(agent: RuntimeAgentConfiguration, generation: number) {
+// The pinned OpenCode process inside the native Work container.
+export function runtimeAgentProcess(agent: RuntimeAgentConfiguration) {
   return {
     name: "agent",
     command: [
       "sh",
       "-c",
-      'umask 077; git_dir=$(git rev-parse --absolute-git-dir) || exit; export OPENCODE_DB="$git_dir/factory-opencode.db"; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs',
+      `umask 077; git_dir=$(git rev-parse --absolute-git-dir) || exit; export OPENCODE_DB="$git_dir/factory-opencode.db"
+${nativeToolShell("bun")}
+exec "$factory_runtime" /opt/factory-tools/opt/factory/opencode/server/server.mjs`,
     ],
     env: {
-      FACTORY_BUILD_BROWSER_COMMAND: `/tmp/factory-runtime-connector-${generation}`,
       FACTORY_BUILD_BROWSER_URL: agent.browserURL,
       FACTORY_BUILD_BROWSER_TOKEN: agent.browserToken,
       OPENCODE_PASSWORD: agent.modelToken,
       OPENCODE_DISABLE_MODELS_FETCH: "1",
       FACTORY_OPENCODE_TOKEN: agent.modelToken,
       FACTORY_OPENCODE_CONFIG: JSON.stringify({
-        skills: ["/opt/factory/admitted-skills"],
+        skills: ["/run/factory-skills/admitted"],
         model: `factory/${agent.modelID}`,
         providers: {
           factory: {

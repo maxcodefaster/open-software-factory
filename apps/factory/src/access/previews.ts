@@ -1,21 +1,21 @@
-import { and, desc, eq, exists, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, exists, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   administrator,
   authUser,
   change,
   developmentWorkspace,
+  operation,
   project,
   projectMembership,
-  projectSetupReadiness,
   runtimeAttempt,
-  stagingPreview,
   ticket,
   workspaceShare,
-} from "../../../../packages/db/src/schema";
-import { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { parseSystemContract } from "../../../../packages/system-contract/src/system-contract";
+} from "#db/schema";
+import { createForgejoClient } from "#forge/forge";
+import { parseSystemContract } from "#system-contract/system-contract";
 import { factoryForgeSource } from "../knowledge/forge-source";
 import { createAccessController } from "./controller";
 
@@ -73,31 +73,47 @@ export function createProjectAppPreviews(
   return async (projectID: string, userID: string) => {
     await access.requireProject(userID, projectID);
     const db = drizzleTransaction(database.client);
+    const stagingPreview = alias(operation, "staging_preview");
     const [staging] = await db
       .select({
         repositoryURL: project.repositoryUrl,
         defaultBranch: project.defaultBranch,
-        revision: stagingPreview.revision,
+        revision: sql<string | null>`${stagingPreview.payload}->>'revision'`,
         attemptID: runtimeAttempt.id,
         state: runtimeAttempt.state,
       })
       .from(project)
-      .leftJoin(stagingPreview, eq(stagingPreview.projectId, project.id))
-      .leftJoin(runtimeAttempt, eq(runtimeAttempt.id, stagingPreview.runtimeAttemptId))
+      .leftJoin(
+        stagingPreview,
+        and(
+          eq(stagingPreview.kind, "delivery.staging_preview"),
+          eq(stagingPreview.scopeType, "project"),
+          eq(stagingPreview.scopeId, sql`${project.id}::text`),
+        ),
+      )
+      .leftJoin(
+        runtimeAttempt,
+        eq(sql`${runtimeAttempt.id}::text`, sql`${stagingPreview.payload}->>'runtimeAttemptId'`),
+      )
       .where(
         and(
           eq(project.id, projectID),
           or(
-            isNotNull(stagingPreview.runtimeAttemptId),
+            sql`(${stagingPreview.payload}->>'runtimeAttemptId') IS NOT NULL`,
             exists(
               db
-                .select({ projectID: projectSetupReadiness.projectId })
-                .from(projectSetupReadiness)
+                .select({ id: operation.id })
+                .from(operation)
                 .where(
                   and(
-                    eq(projectSetupReadiness.projectId, project.id),
-                    eq(projectSetupReadiness.task, "configuration"),
-                    eq(projectSetupReadiness.state, "ready"),
+                    eq(operation.kind, "projects.setup_readiness"),
+                    eq(operation.scopeType, "project"),
+                    eq(operation.scopeId, projectID),
+                    eq(
+                      operation.idempotencyKey,
+                      `projects.setup_readiness:${projectID}:configuration`,
+                    ),
+                    eq(operation.state, "ready"),
                   ),
                 ),
             ),

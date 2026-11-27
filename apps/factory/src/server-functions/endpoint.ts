@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { SystemContractError } from "../../../../packages/system-contract/src/system-contract";
+import { SystemContractError } from "#system-contract/system-contract";
 import { CommandError } from "../command-error";
+import { logFailure } from "../failure-log";
 import { json } from "../http";
 import type { FactoryFunctionContext, FactoryServices } from "./context";
 import type { ServerResult } from "./result";
@@ -15,7 +16,7 @@ async function run<T>(execute: () => Promise<T>): Promise<ServerResult<T>> {
       return { ok: false, status: 400, message: "Invalid command. Check the entered values." };
     if (cause instanceof SystemContractError)
       return { ok: false, status: 422, message: cause.message };
-    console.error("Factory server function failed");
+    logFailure("Factory server function failed", cause, { component: "server-functions" });
     return {
       ok: false,
       status: 500,

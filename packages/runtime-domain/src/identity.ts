@@ -9,7 +9,6 @@ export function runtimeIdentity(projectID: string, generation: number) {
   const hex = digest.toString("hex");
   return {
     attemptID: `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`,
-    composeProjectName: "project_devcontainer",
   };
 }
 
@@ -33,6 +32,22 @@ export function runtimeConnectorTokens(secret: string, attemptID: string, genera
       .update(`factory-runtime-connector-v1:${attemptID}:${generation}:${role}`)
       .digest("base64url");
   return { parent: derive("parent"), child: derive("child") };
+}
+
+export function runtimeProjectEntryToken(
+  secret: string,
+  attemptID: string,
+  generation: number,
+  container: string,
+) {
+  if (!secret) throw new Error("Runtime connector secret is required");
+  if (!Number.isSafeInteger(generation) || generation < 1)
+    throw new Error("Generation must be positive");
+  if (!/^[a-z][a-z0-9-]{0,62}$/.test(container))
+    throw new Error("Invalid native Project container name");
+  return createHmac("sha256", secret)
+    .update(`factory-runtime-project-entry-v1:${attemptID}:${generation}:${container}`)
+    .digest("base64url");
 }
 
 export function runtimeModelToken(secret: string, attemptID: string, generation: number) {

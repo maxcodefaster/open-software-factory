@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import composition from "../../deploy/theia-ide/browser-app/package.json";
 import type { SourceTransport } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-source-client";
 import { FactoryWorkspaceSearch } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-search";
 import type { SearchInWorkspaceResult } from "../../deploy/theia-ide/node_modules/@theia/search-in-workspace/lib/common/search-in-workspace-interface";
-import composition from "../../deploy/theia-ide/browser-app/package.json";
 
 test("composition disables upstream symlink-following default and the adapter rejects overrides", async () => {
   expect(composition.theia.frontend.config.preferences["search.followSymlinks"]).toBe(false);

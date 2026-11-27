@@ -81,8 +81,6 @@ export const setupTask = z.enum([
   "protection",
   "hook",
   "wiki",
-  "development",
-  "preview-image",
   "main-preview",
 ]);
 export const setupReadiness = z.array(
@@ -102,10 +100,19 @@ export type SetupTaskView = z.output<typeof setupReadiness>[number];
 const configurationPath = z
   .string()
   .regex(
-    /^(?:\.factory\/system\.json|\.forgejo\/workflows\/factory-verification\.yml|\.devcontainer\/(?:devcontainer\.json|Dockerfile|compose\.ya?ml))$/,
+    /^(?:\.factory\/(?:actor-template|system)\.json|\.forgejo\/workflows\/factory-verification\.yml|\.factory\/images\/[a-z][a-z0-9-]{0,62}\/Dockerfile)$/,
   );
 export const setupFile = z
-  .object({ path: configurationPath, content: z.string().min(1).max(64000) })
+  .object({
+    path: configurationPath,
+    content: z
+      .string()
+      .min(1)
+      .max(64_000)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 64_000, {
+        message: "Setup file exceeds its 64000-byte size bound",
+      }),
+  })
   .strict();
 export const setupFeedbackKey = "$feedback";
 export const setupQuestion = z

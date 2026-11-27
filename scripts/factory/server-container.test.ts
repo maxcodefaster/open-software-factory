@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { releaseNativeControl } from "../../test/fixtures/release-installation";
-import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
 import {
   factoryServerComposeOverlay,
   prepareFactoryServerContainer,
@@ -16,6 +16,11 @@ import {
 const image = `sha256:${"a".repeat(64)}`;
 const containerID = "b".repeat(64);
 const startupID = "b253ade6-c86e-41b4-a9c2-1bd78e8a311c";
+const starterCatalog = JSON.stringify({
+  platform: "linux/arm64",
+  development: `registry.example/starter-work@sha256:${"a".repeat(64)}`,
+  postgres: `registry.example/starter-postgres@sha256:${"b".repeat(64)}`,
+});
 const ok = (stdout = "") => ({ exitCode: 0, stdout, stderr: "" });
 const missing = () => ({ exitCode: 1, stdout: "", stderr: "Error: No such container" });
 
@@ -45,6 +50,7 @@ async function fixture(nodeEnv?: string) {
         FACTORY_RUNTIME_HOST: "192.168.139.2",
         FACTORY_MODEL_API_KEY: "private-provider-key",
         FACTORY_STARTUP_ID: startupID,
+        FACTORY_STARTER_IMAGES: starterCatalog,
         DATABASE_URL: "postgresql://factory:private-password@127.0.0.1:57432/factory",
         HOME: "/host-home-is-not-container-home",
       },
@@ -294,6 +300,7 @@ test("server launch persists identity and keeps secrets out of arguments and pub
     const privateDirectory = resolve(directory, "server-runtime", startupID);
     const environment = await readFile(resolve(privateDirectory, "environment"), "utf8");
     expect(environment).toContain("FACTORY_MODEL_API_KEY=private-provider-key");
+    expect(environment).toContain(`FACTORY_STARTER_IMAGES=${starterCatalog}\n`);
     expect(environment).toContain("KUBECONFIG=/run/factory/kubeconfig");
     expect(environment).toContain("NODE_ENV=development");
     expect(environment).toContain(`FACTORY_STATE_DIRECTORY=${directory}\n`);

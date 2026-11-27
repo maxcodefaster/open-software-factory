@@ -125,18 +125,9 @@ jobs:
           chmod 0555 "$directory/cosign"
           "$directory/cosign" version --json | jq -e '.gitVersion == "v2.5.3"'
           printf '%s\n' "$directory" >> "$GITHUB_PATH"
-      - name: Read native proof tool pins
-        id: proof-tools
-        run: |
-          node -e 'const fs=require("fs"),u=JSON.parse(fs.readFileSync("upstream.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`go=${u.go.version}\nnode=${u.nodeDevelopment.image}\n`);'
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-        with:
-          go-version: ${{ steps.proof-tools.outputs.go }}
-          cache-dependency-path: services/runtime-connector/go.sum
       - name: Build native runtime roles
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_PROOF_IMAGE: ${{ steps.proof-tools.outputs.node }}
         run: |
           set -euo pipefail
           [[ "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
@@ -149,7 +140,7 @@ jobs:
             exit 1
           fi
           docker buildx create --use --driver-opt "image=$BUILDKIT_IMAGE"
-          for role in runtime-host developer-ide browser-tools substrate-bootstrap substrate-runtime; do
+          for role in runtime-host developer-ide browser-tools substrate-runtime starter-work starter-postgres; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
             reuse=false
             if release_exists "$image"; then
@@ -173,19 +164,19 @@ jobs:
               if [[ "$role" == browser-tools ]]; then
                 dockerfile="deploy/$role/Dockerfile"
                 target=()
-              elif [[ "$role" == substrate-bootstrap ]]; then
-                dockerfile=deploy/substrate/rootless/Dockerfile
+              elif [[ "$role" == starter-work ]]; then
+                dockerfile=templates/starter-app/.factory/images/work/Dockerfile
+                target=()
+              elif [[ "$role" == starter-postgres ]]; then
+                dockerfile=templates/starter-app/.factory/images/postgres/Dockerfile
                 target=()
               elif [[ "$role" == substrate-runtime ]]; then
                 dockerfile=deploy/substrate/Runtime.Dockerfile
                 target=()
                 tools="$IMAGE_ROOT/runtime-host:$RELEASE-$ARCH"
-                bootstrap="$IMAGE_ROOT/substrate-bootstrap:$RELEASE-$ARCH"
                 release_require_revision "$tools" "$REVISION"
-                release_require_revision "$bootstrap" "$REVISION"
                 build_args=(
-                  --build-arg "FACTORY_RUNTIME_HOST_IMAGE=$IMAGE_ROOT/runtime-host@$(release_digest "$tools")"
-                  --build-arg "FACTORY_SUBSTRATE_BOOTSTRAP_IMAGE=$IMAGE_ROOT/substrate-bootstrap@$(release_digest "$bootstrap")")
+                  --build-arg "FACTORY_RUNTIME_HOST_IMAGE=$IMAGE_ROOT/runtime-host@$(release_digest "$tools")")
               fi
               build=(docker buildx build --platform "linux/$ARCH"
                 --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"
@@ -193,7 +184,7 @@ jobs:
                 --label "org.opencontainers.image.version=$RELEASE"
                 --file "$dockerfile" "${target[@]}" "${build_args[@]}" --tag "$image")
               attest=(--provenance=mode=max "--sbom=generator=$SBOM_GENERATOR")
-              if [[ "$role" == runtime-host || "$role" == developer-ide || "$role" == substrate-runtime ]]; then
+              if [[ "$role" == runtime-host || "$role" == developer-ide || "$role" == substrate-runtime || "$role" == starter-work || "$role" == starter-postgres ]]; then
                 "${build[@]}" --provenance=false --sbom=false --load \
                   --metadata-file "$RUNNER_TEMP/$role-proven.json" .
                 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
@@ -206,9 +197,7 @@ jobs:
                 rm -- "$proof_archive"
                 [[ "$proven_config" =~ ^sha256:[a-f0-9]{64}$ ]]
                 if [[ "$role" == runtime-host ]]; then
-                  bash scripts/runtime/compose-inputs-proof.sh "$image_id"
-                  registry_proof_image="$(sed -n 's/^[[:space:]]*image: \(docker.io\/library\/registry:[^[:space:]]*\).*/\1/p' deploy/runtime-smoke/registry.yaml)"
-                  bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"
+                  bash scripts/runtime/substrate-image-proof.sh "$image_id"
                 elif [[ "$role" == developer-ide ]]; then
                   docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
                     --security-opt=no-new-privileges --cpus=1 --memory=256m --entrypoint node "$image_id" -e '
@@ -218,8 +207,10 @@ jobs:
                       for (const entry of fs.readdirSync("/opt/factory/theia", { recursive: true, withFileTypes: true }))
                         fs.accessSync(path.join(entry.parentPath, entry.name), fs.constants.R_OK | (entry.isDirectory() ? fs.constants.X_OK : 0));
                     '
-                else
+                elif [[ "$role" == substrate-runtime ]]; then
                   bash scripts/runtime/substrate-image-proof.sh "$image_id"
+                else
+                  bash scripts/runtime/starter-image-proof.sh "$image_id" "$role"
                 fi
                 test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
                 # The proven layers come from the build cache. Publish them with attestations
@@ -267,7 +258,7 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           artifacts='{}'
-          for role in runtime-host developer-ide browser-tools substrate-runtime; do
+          for role in runtime-host developer-ide browser-tools substrate-runtime starter-work starter-postgres; do
             image="$IMAGE_ROOT/$role:$RELEASE"
             for arch in arm64 amd64; do
               release_require_revision "$image-$arch" "$(git rev-parse HEAD)"

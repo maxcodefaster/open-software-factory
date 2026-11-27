@@ -1,9 +1,9 @@
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
+import type { createDatabase } from "#db/client";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adapter";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
-import type { createDatabase } from "../../packages/db/src/client";
 import { buildModelID, fixture } from "./change-agent-turns";
 import { seedMonitoringDelegation } from "./monitoring";
 
@@ -59,9 +59,9 @@ export async function candidateReviewFixture(
       ${commit},'Owned review candidate',${crypto.randomUUID()},'succeeded',created_by,now()
     FROM factory.change WHERE id=${owned.changeID}`;
   await owned.database
-    .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,
+    .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
     action_run_id,created_by,state,summary,completed_at)
-    VALUES(${verificationID},${owned.changeID},${commit},1,'owned-review',1,${owned.userID},'succeeded','Owned exact CI',now())`;
+    VALUES(${verificationID},${owned.changeID},${commit},1,1,${owned.userID},'succeeded','Owned exact CI',now())`;
   await owned.database
     .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
     VALUES(${reviewID},${verificationID},${owned.changeID},${commit},${"a".repeat(40)},${owned.userID})`;

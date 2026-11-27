@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { skillContentInput, skillRevisionInput, skillRoleInput } from "./skills";
 import { libraryCoverState } from "./library-covers";
+import { skillContentInput, skillRevisionInput, skillRoleInput } from "./skills";
 
 export const skillScopeInput = z.enum(["system", "project", "personal"]);
 export type SkillScope = z.infer<typeof skillScopeInput>;

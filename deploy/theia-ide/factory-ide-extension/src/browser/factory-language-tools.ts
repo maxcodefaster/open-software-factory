@@ -2,25 +2,25 @@ import type { FrontendApplicationContribution } from "@theia/core/lib/browser/fr
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
 import { CommandRegistry } from "@theia/core/lib/common/command";
 import { DisposableCollection } from "@theia/core/lib/common/disposable";
-import URI from "@theia/core/lib/common/uri";
 import type { Resource, ResourceResolver } from "@theia/core/lib/common/resource";
+import URI from "@theia/core/lib/common/uri";
 import { inject, injectable } from "@theia/core/shared/inversify";
 import type * as lsp from "@theia/core/shared/vscode-languageserver-protocol";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import { ProblemManager } from "@theia/markers/lib/browser";
-import * as monaco from "@theia/monaco-editor-core";
 import { ProtocolToMonacoConverter } from "@theia/monaco/lib/browser/protocol-to-monaco-converter";
+import * as monaco from "@theia/monaco-editor-core";
 import type { MessageConnection } from "#factory-jsonrpc";
+import { type FactoryLanguage, languagePreset } from "./factory-language";
 import { languageConnection, languageRequest } from "./factory-language-connection";
-import { languagePreset, type FactoryLanguage } from "./factory-language";
 import {
   FactoryRuntimeContext,
   factoryRuntimeContext,
   factoryRuntimePath,
   readyRuntime,
 } from "./factory-runtime-context";
-import { factoryWriteContext } from "./factory-write-context";
 import { workspaceResource, workspaceScheme } from "./factory-workspace-files";
+import { factoryWriteContext } from "./factory-write-context";
 
 const commandID = "factory.language-tools";
 const statusID = "factory-language-tools";
@@ -113,7 +113,14 @@ export class FactoryLanguageTools implements FrontendApplicationContribution, Re
     );
     this.dispose.push(
       factoryRuntimeContext.subscribe((state) => {
-        if (state?.workspaceID === this.workspaceID) void this.runtime.observe();
+        if (!state || state.workspaceID !== this.workspaceID) return;
+        if (["pausing", "paused", "pause-uncertain"].includes(state.state)) {
+          // A compute Pause must not be undone by an already-enabled language connection.
+          this.enabled.delete(state.workspaceID);
+          this.closePeers();
+          this.renderStatus();
+        }
+        void this.runtime.observe();
       }),
     );
     this.dispose.push(
@@ -548,9 +555,9 @@ export class FactoryLanguageTools implements FrontendApplicationContribution, Re
       tooltip:
         failure ??
         (peer?.ready
-          ? "Completion, diagnostics and Go to Definition use this Workspace's Dev Container and installed dependencies. Click to stop language tools without stopping compute."
+          ? "Completion, diagnostics and Go to Definition use this Workspace's native Work container and installed dependencies. Click to stop language tools without pausing compute."
           : allowed
-            ? "Start project language tools. This prepares compute and runs the project's Dev Container setup if it is stopped. Your unsaved buffers stay in the editor."
+            ? "Start project language tools. This may start or resume Workspace compute and run Project preparation. Your unsaved buffers stay in the editor."
             : "Language tools require editing control. Source files and syntax highlighting remain available."),
     });
   }

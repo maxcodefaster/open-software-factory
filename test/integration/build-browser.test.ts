@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import type { DatabaseTransaction } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { runtimeBuildBrowserToken, runtimeModelToken } from "#runtime-domain/identity";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
@@ -12,14 +14,9 @@ import {
   RuntimeParentOperationError,
   type RuntimeSocketData,
 } from "../../apps/factory/src/runtime/hub";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import {
-  runtimeBuildBrowserToken,
-  runtimeModelToken,
-} from "../../packages/runtime-domain/src/identity";
-import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { observe } from "../fixtures/pinned-opencode";
 
@@ -318,19 +315,14 @@ test("runtime browser capability cannot use another turn, generation, Project or
 
 test("one browser_open waits for confirmed cold preparation without another model turn", async () => {
   const scope = await setup();
-  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
-  let preparing = true;
+  const prepare = scope.browser.native.prepare;
+  let preparations = 0;
   try {
-    scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
-      if (preparing && payload.action === "browser-call") {
-        await beforeSend?.(() => scope.frames.push(payload));
-        preparing = false;
-        throw new RuntimeParentOperationError(
-          "browser-call",
-          "Browser tools are preparing; retry browser inspection after preparation completes",
-        );
-      }
-      return forward(attempt, payload, beforeSend);
+    scope.browser.native.prepare = async (...args) => {
+      preparations++;
+      await Bun.sleep(50);
+      expect(scope.frames).toHaveLength(0);
+      await prepare(...args);
     };
     const result = await scope.browser.call(
       scope.authorized.session,
@@ -340,7 +332,8 @@ test("one browser_open waits for confirmed cold preparation without another mode
     );
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent?.turnId).toBe(scope.turn.id);
-    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call", "browser-call"]);
+    expect(preparations).toBe(1);
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call"]);
     expect(
       await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
     ).not.toBeNull();
@@ -353,7 +346,7 @@ test("one browser_open waits for confirmed cold preparation without another mode
 });
 
 test.each(["stopped", "stopping", "cleanup-failed"] as const)(
-  "browser cleanup uses only confirmed exact Runtime Attempt teardown: %s",
+  "Parent state never confirms independent browser cleanup: %s",
   async (state) => {
     const scope = await setup();
     const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
@@ -375,19 +368,15 @@ test.each(["stopped", "stopping", "cleanup-failed"] as const)(
       await scope.browser.closeTurn(scope.turn.id);
       expect(cleanupRequests).toBe(1);
       await scope.owned.database.client`UPDATE factory.runtime_attempt
-        SET state=${state},stopped_at=CASE WHEN ${state}='stopped' THEN now() END
+        SET state=${state}
         WHERE id=${scope.owned.attemptID}`;
       await scope.browser.reconcileCleanup();
       const [browser] = await scope.owned.database.client<
         { state: string; confirmed: boolean }[]
       >`SELECT state,cleanup_confirmed_at IS NOT NULL AS confirmed
         FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
-      expect(browser).toEqual(
-        state === "stopped"
-          ? { state: "closed", confirmed: true }
-          : { state: "closing", confirmed: false },
-      );
-      expect(cleanupRequests).toBe(state === "stopped" ? 1 : 2);
+      expect(browser).toEqual({ state: "closing", confirmed: false });
+      expect(cleanupRequests).toBe(2);
       expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(1);
     } finally {
       scope.owned.hub.parentOperation = forward;
@@ -791,7 +780,7 @@ test.each([
         "browser renewal does not own this execution",
       ].includes(failure)
         ? `Inspection ended: ${failure}`
-        : "Exact owned browser and App proxy cleanup confirmed";
+        : "Original native Browser Actor and template deletion confirmed";
       expect((await read())?.summary).toBe(safeSummary);
       const nativeRecovery = await scope.browser.authorizeRuntime(
         scope.owned.attemptID,
@@ -818,7 +807,7 @@ test.each([
 );
 
 test.each(["Stop", "caller disconnect", "lost response"] as const)(
-  "cold browser preparation cannot replay after %s",
+  "native browser tools cannot replay after %s",
   async (boundary) => {
     const scope = await setup();
     const abort = new AbortController();
@@ -838,10 +827,7 @@ test.each(["Stop", "caller disconnect", "lost response"] as const)(
             scope.owned.changeID,
           );
         }
-        throw new RuntimeParentOperationError(
-          "browser-call",
-          "Browser tools are preparing; retry browser inspection after preparation completes",
-        );
+        throw new Error("Owned browser response unavailable");
       };
       await expect(
         scope.browser.call(

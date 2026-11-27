@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import type { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { createChangeController } from "../../apps/factory/src/change/controller";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("Change admission accepts the configured public Forge behind a private API and rejects foreign repository identities before Forge writes", async () => {
@@ -74,9 +74,9 @@ test("Change admission accepts the configured public Forge behind a private API 
         nonGoals: [],
       });
       await database.client.begin(async (sql) => {
-        await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
           VALUES(${projectID},${`forge-origin-${projectID}`},'Origin fixture',${repositoryURL},
-            'main','.devcontainer/devcontainer.json',${userID})`;
+            'main','.factory/actor-template.json',${userID})`;
         await sql`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
           VALUES(${projectID},${userID},'developer',${userID})`;
         await sql`INSERT INTO factory.ticket(id,project_id,title,created_by)

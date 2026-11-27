@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
 import { connectFactoryMCP, createFactoryTicketCommand } from "../../apps/factory/src/mcp/factory";
@@ -21,8 +21,8 @@ async function fixture() {
   try {
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
     VALUES(${userID},'MCP contributor',${`${userID}@factory.local`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${projectID},${`mcp-${projectID}`},'Factory MCP','https://example.invalid/mcp.git','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES(${projectID},${`mcp-${projectID}`},'Factory MCP','https://example.invalid/mcp.git','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
     VALUES(${projectID},${userID},'product-contributor',${userID})`;
   } catch (cause) {

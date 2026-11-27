@@ -3,7 +3,7 @@ export type InventoryFile = { path: string; size: number };
 type Directory = { files: number; bytes: number; children: Map<string, Directory> };
 
 const manifestPattern =
-  /(^|\/)(package\.json|go\.mod|pyproject\.toml|cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|composer\.json|gemfile|dockerfile|docker-compose\.ya?ml|astro\.config\.[mc]?[jt]s|vite\.config\.[mc]?[jt]s|next\.config\.[mc]?[jt]s|system\.json)$/i;
+  /(^|\/)(package\.json|go\.mod|pyproject\.toml|cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|composer\.json|gemfile|dockerfile|docker-compose\.ya?ml|astro\.config\.[mc]?[jt]s|vite\.config\.[mc]?[jt]s|next\.config\.[mc]?[jt]s|actor-template\.json|system\.json)$/i;
 const documentPattern = /(?:\.mdx?|(?:^|\/)readme)$/i;
 
 function build(files: readonly InventoryFile[]) {
@@ -42,14 +42,25 @@ function walk(node: Directory, depth: number, prefix: string, lines: string[], b
  * A compact, deterministic orientation for Wiki agents. It replaces the complete file list:
  * agents discover paths with the directory and search tools and read only what they need.
  */
-export function repositoryMap(files: readonly InventoryFile[]) {
+export function repositoryMap(
+  files: readonly InventoryFile[],
+  actorTemplatePath = ".factory/actor-template.json",
+) {
   const root = build(files);
   const tree: string[] = [];
   walk(root, 3, "", tree, 120);
+  const nativePaths = [actorTemplatePath, ".factory/system.json"];
+  const manifestRank = (path: string) => {
+    const rank = nativePaths.indexOf(path);
+    return rank < 0 ? nativePaths.length : rank;
+  };
   const manifests = files
-    .filter((file) => manifestPattern.test(file.path))
+    .filter((file) => nativePaths.includes(file.path) || manifestPattern.test(file.path))
     .sort(
-      (a, b) => a.path.split("/").length - b.path.split("/").length || a.path.localeCompare(b.path),
+      (a, b) =>
+        manifestRank(a.path) - manifestRank(b.path) ||
+        a.path.split("/").length - b.path.split("/").length ||
+        a.path.localeCompare(b.path),
     )
     .slice(0, 40)
     .map((file) => file.path);

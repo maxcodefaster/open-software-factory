@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
-import { createDatabase } from "../../packages/db/src/client";
-import { baselineDigest, readMigration, shippedMigrations } from "../../packages/db/src/migrations";
+import { createDatabase } from "#db/client";
+import { baselineDigest, readMigration, shippedMigrations } from "#db/migrations";
 import { ownedPostgresServer } from "../../test/fixtures/postgres-server";
 
 const owned = await ownedPostgresServer();
@@ -63,51 +63,65 @@ try {
       VALUES (${otherUserID}, 'Other Developer', ${`other-${suffix}@factory.local`}, true)
     `;
     await transaction`
-      INSERT INTO factory.user_ui_preference(user_id, desktop_background_key)
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by
+      )
       VALUES
-        (${userID}, 'the-harvesters'),
-        (${otherUserID}, 'mountainous-landscape')
-      ON CONFLICT (user_id) DO UPDATE SET
-        desktop_background_key = EXCLUDED.desktop_background_key,
+        (
+          ${crypto.randomUUID()}, 'user.ui_preference', 'user', ${userID},
+          ${`user.ui_preference:${userID}`}, NULL, 'saved',
+          jsonb_build_object('userId', ${userID}::text, 'desktopBackgroundKey', 'the-harvesters'),
+          ${userID}
+        ),
+        (
+          ${crypto.randomUUID()}, 'user.ui_preference', 'user', ${otherUserID},
+          ${`user.ui_preference:${otherUserID}`}, NULL, 'saved',
+          jsonb_build_object('userId', ${otherUserID}::text, 'desktopBackgroundKey', 'mountainous-landscape'),
+          ${otherUserID}
+        )
+      ON CONFLICT (idempotency_key) DO UPDATE SET
+        payload = EXCLUDED.payload,
         updated_at = now()
     `;
     await transaction`
-      UPDATE factory.user_ui_preference
-      SET desktop_background_key = 'river-landscape'
-      WHERE user_id = ${userID}
+      UPDATE factory.operation
+      SET payload = jsonb_set(payload, '{desktopBackgroundKey}', '"river-landscape"'::jsonb, true),
+        updated_at = now()
+      WHERE kind = 'user.ui_preference' AND idempotency_key = ${`user.ui_preference:${userID}`}
     `;
     const preferences = await transaction<Array<{ userID: string; desktopBackgroundKey: string }>>`
       SELECT
-        user_id AS "userID",
-        desktop_background_key AS "desktopBackgroundKey"
-      FROM factory.user_ui_preference
-      WHERE user_id IN (${userID}, ${otherUserID})
-      ORDER BY user_id
+        scope_id AS "userID",
+        payload->>'desktopBackgroundKey' AS "desktopBackgroundKey"
+      FROM factory.operation
+      WHERE kind = 'user.ui_preference' AND scope_type = 'user'
+        AND scope_id IN (${userID}, ${otherUserID})
+      ORDER BY scope_id
     `;
     const otherPreference = preferences.find((preference) => preference.userID === otherUserID);
     if (otherPreference?.desktopBackgroundKey !== "mountainous-landscape") {
       throw new Error("PostgreSQL did not isolate Desktop Background preferences by user");
     }
+    await transaction`
+      INSERT INTO factory.project(
+        id, slug, name, repository_url, default_branch, actor_template_path, created_by
+      ) VALUES (
+        ${projectID}, ${`integration-${suffix}`}, 'Integration Project',
+        'https://example.invalid/project.git', 'main', '.factory/actor-template.json', ${userID}
+      )
+    `;
     await expectRejected(
       transaction,
       async (savepoint) => {
         await savepoint`
-          UPDATE factory.user_ui_preference
+          UPDATE factory.project
           SET desktop_background_key = 'https://example.invalid/background.jpg'
-          WHERE user_id = ${userID}
+          WHERE id = ${projectID}
         `;
       },
       (cause) => cause.code === "23514",
       "PostgreSQL allowed an arbitrary Desktop Background URL",
     );
-    await transaction`
-      INSERT INTO factory.project(
-        id, slug, name, repository_url, default_branch, devcontainer_path, created_by
-      ) VALUES (
-        ${projectID}, ${`integration-${suffix}`}, 'Integration Project',
-        'https://example.invalid/project.git', 'main', '.devcontainer/devcontainer.json', ${userID}
-      )
-    `;
     await transaction`
       INSERT INTO factory.development_workspace(
         id, project_id, kind, owner_user_id, source_branch, source_revision, created_by
@@ -140,25 +154,24 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            parent_connector_token_hash,create_intended_at,created_by,
+            atespace,actor_name,binding_intent)
           VALUES(${crypto.randomUUID()},${projectID},${personalWorkspaceID},1,${"9".repeat(40)},
-            'create-intended',${"a".repeat(64)},${"c".repeat(64)},now(),${userID})`;
-        await savepoint`SET CONSTRAINTS ALL IMMEDIATE`;
+            'create-intended',${"a".repeat(64)},now(),${userID},
+            'fa-wrong','runtime-wrong','{}')`;
       },
-      (cause) => cause.message.includes("persisted matching owner binding"),
-      "PostgreSQL allowed a native Runtime Attempt without persisted owner binding",
+      (cause) => cause.message.includes("deterministic active Attempt intent"),
+      "PostgreSQL allowed a native Runtime Attempt without deterministic owner binding",
     );
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
-        create_intended_at, created_by
+        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash,
+        create_intended_at, created_by, atespace, actor_name, binding_intent
       ) VALUES (
-        ${firstAttempt}, ${projectID}, ${personalWorkspaceID}, 1, ${"9".repeat(40)}, 'create-intended', ${"a".repeat(64)}, ${"c".repeat(64)},
-        now(), ${userID}
+        ${firstAttempt}, ${projectID}, ${personalWorkspaceID}, 1, ${"9".repeat(40)}, 'create-intended', ${"a".repeat(64)},
+        now(), ${userID}, ${`fa-${firstAttempt.replaceAll("-", "")}`}, ${`runtime-${firstAttempt.replaceAll("-", "")}`}, '{}'
       )
     `;
-    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      VALUES(${firstAttempt},${`fa-${firstAttempt.replaceAll("-", "")}`},${`runtime-${firstAttempt.replaceAll("-", "")}`},'{}')`;
     await expectRejected(
       transaction,
       async (savepoint) => {
@@ -172,15 +185,21 @@ try {
     `;
     await transaction`
       UPDATE factory.runtime_attempt SET
-        state = CASE WHEN state = 'stopping'
-          THEN 'stopping'::factory.runtime_attempt_state
-          ELSE 'stop-intended'::factory.runtime_attempt_state END,
+        state = 'stopping',
         stop_intended_at = now()
       WHERE id = ${firstAttempt}
     `;
-    await transaction`
-      UPDATE factory.runtime_attempt SET state = 'cleanup-failed' WHERE id = ${firstAttempt}
-    `;
+    for (const state of ["stop-intended", "cleanup-failed", "starting", "ready", "paused"])
+      await expectRejected(
+        transaction,
+        async (savepoint) => {
+          await savepoint`UPDATE factory.runtime_attempt
+            SET state=${state}::factory.runtime_attempt_state WHERE id=${firstAttempt}`;
+        },
+        (cause) =>
+          cause.message.includes("Final Stop intent cannot be cleared or reopen execution"),
+        `PostgreSQL allowed Final Stop to reopen execution through ${state}`,
+      );
     let revisionRewriteRejected = false;
     try {
       await transaction.savepoint(async (savepoint) => {
@@ -199,10 +218,10 @@ try {
       await transaction.savepoint(async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
-            ${secondAttempt}, ${projectID}, ${personalWorkspaceID}, 2, ${"9".repeat(40)}, 'starting', ${"b".repeat(64)}, ${"d".repeat(64)},
+            ${secondAttempt}, ${projectID}, ${personalWorkspaceID}, 2, ${"9".repeat(40)}, 'starting', ${"b".repeat(64)},
             now(), ${userID}
           )
         `;
@@ -214,17 +233,15 @@ try {
       throw new Error("PostgreSQL allowed two active Runtime Attempts for one Workspace");
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
-        create_intended_at, created_by
+        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash,
+        create_intended_at, created_by, atespace, actor_name, binding_intent
       ) VALUES (
         ${otherPersonalAttempt}, ${projectID}, ${otherPersonalWorkspaceID}, 1,
         ${"9".repeat(40)}, 'create-intended',
-        ${"7".repeat(64)}, ${"8".repeat(64)}, now(), ${otherUserID}
+        ${"7".repeat(64)}, now(), ${otherUserID},
+        ${`fa-${otherPersonalAttempt.replaceAll("-", "")}`}, ${`runtime-${otherPersonalAttempt.replaceAll("-", "")}`}, '{}'
       )
     `;
-
-    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      VALUES(${otherPersonalAttempt},${`fa-${otherPersonalAttempt.replaceAll("-", "")}`},${`runtime-${otherPersonalAttempt.replaceAll("-", "")}`},'{}')`;
     const secondProjectID = crypto.randomUUID();
     const ticketID = crypto.randomUUID();
     const otherTicketID = crypto.randomUUID();
@@ -250,10 +267,10 @@ try {
 
     await transaction`
       INSERT INTO factory.project(
-        id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+        id, slug, name, repository_url, default_branch, actor_template_path, created_by
       ) VALUES (
         ${secondProjectID}, ${`integration-other-${suffix}`}, 'Other Integration Project',
-        'https://example.invalid/other.git', 'main', '.devcontainer/devcontainer.json', ${userID}
+        'https://example.invalid/other.git', 'main', '.factory/actor-template.json', ${userID}
       )
     `;
     await transaction`
@@ -393,65 +410,98 @@ try {
       (cause) => cause.code === "23505",
       "PostgreSQL allowed a second active Change for one Ticket",
     );
+    await transaction`
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+        payload, created_by, lease_owner, lease_expires_at
+      ) VALUES (
+        ${branchOperationID}, 'delivery.branch_create', 'change', ${changeID},
+        ${`delivery.branch_create:change:${changeID}:create-branch`},
+        ${`delivery.branch_create:${changeID}`}, 'executing',
+        jsonb_build_object(
+          'changeId', ${changeID}::text, 'repositoryOwner', 'factory', 'repositoryName', 'fixture',
+          'branchName', ${branchName}::text, 'startSha', ${baseSHA}::text,
+          'attemptCount', 1, 'leaseGeneration', 1, 'reconcileAfter', NULL
+        ),
+        ${userID}, 'stale-worker', now() - interval '1 second'
+      )
+    `;
     await expectRejected(
       transaction,
       async (savepoint) => {
         await savepoint`
-          INSERT INTO factory.branch_create_operation(
-            id, change_id, repository_owner, repository_name, branch_name, start_sha,
-            idempotency_key
+          INSERT INTO factory.operation(
+            id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by
           ) VALUES (
-            ${crypto.randomUUID()}, ${changeID}, 'factory', 'fixture', ${branchName},
-            ${"f".repeat(40)}, ${`integration:${suffix}:mismatch`}
+            ${crypto.randomUUID()}, 'delivery.branch_create', 'change', ${changeID},
+            ${`delivery.branch_create:change:${changeID}:duplicate-active`},
+            ${`delivery.branch_create:${changeID}`}, 'pending',
+            jsonb_build_object(
+              'changeId', ${changeID}::text, 'repositoryOwner', 'factory', 'repositoryName', 'fixture',
+              'branchName', ${branchName}::text, 'startSha', ${baseSHA}::text,
+              'attemptCount', 0, 'leaseGeneration', 0, 'reconcileAfter', NULL
+            ),
+            ${userID}
           )
         `;
       },
-      (cause) => cause.code === "23503",
-      "PostgreSQL allowed branch intent to drift from its Change base SHA",
+      (cause) => cause.code === "23505",
+      "PostgreSQL allowed two active branch operations for one Change",
     );
-    await transaction`
-      INSERT INTO factory.branch_create_operation(
-        id, change_id, repository_owner, repository_name, branch_name, start_sha,
-        idempotency_key, state, lease_owner, lease_expires_at
-      ) VALUES (
-        ${branchOperationID}, ${changeID}, 'factory', 'fixture', ${branchName}, ${baseSHA},
-        ${`integration:${suffix}`}, 'executing', 'stale-worker', now() - interval '1 second'
-      )
-    `;
     const reclaimed = await transaction`
-      UPDATE factory.branch_create_operation SET lease_owner = 'recovery-worker',
-        lease_generation = lease_generation + 1, lease_expires_at = now() + interval '30 seconds'
-      WHERE id = ${branchOperationID} AND state = 'executing' AND lease_expires_at < now()
+      UPDATE factory.operation
+      SET lease_owner = 'recovery-worker',
+        payload = jsonb_set(
+          payload,
+          '{leaseGeneration}',
+          to_jsonb(COALESCE((payload->>'leaseGeneration')::integer, 0) + 1)
+        ),
+        lease_expires_at = now() + interval '30 seconds',
+        updated_at = now()
+      WHERE id = ${branchOperationID} AND kind = 'delivery.branch_create'
+        AND state = 'executing' AND lease_expires_at < now()
       RETURNING id
     `;
     if (reclaimed.length !== 1)
       throw new Error("PostgreSQL did not reclaim an expired branch lease");
     await transaction`
-      UPDATE factory.branch_create_operation SET state = 'succeeded', observed_head_sha = ${baseSHA},
-        lease_owner = NULL, lease_expires_at = NULL, completed_at = now()
-      WHERE id = ${branchOperationID}
+      UPDATE factory.operation
+      SET state = 'succeeded', active_key = NULL,
+        result = jsonb_build_object('observedHeadSha', ${baseSHA}::text),
+        lease_owner = NULL, lease_expires_at = NULL, completed_at = now(), updated_at = now()
+      WHERE id = ${branchOperationID} AND kind = 'delivery.branch_create'
     `;
     await expectRejected(
       transaction,
       async (savepoint) => {
         await savepoint`
-          UPDATE factory.branch_create_operation SET last_error = 'rewrite'
-          WHERE id = ${branchOperationID}
+          INSERT INTO factory.operation(
+            id, kind, scope_type, scope_id, idempotency_key, state, payload, created_by
+          ) VALUES (
+            ${crypto.randomUUID()}, 'delivery.branch_create', 'change', ${changeID},
+            ${`delivery.branch_create:change:${changeID}:create-branch`}, 'pending',
+            jsonb_build_object(
+              'changeId', ${changeID}::text, 'repositoryOwner', 'factory', 'repositoryName', 'fixture',
+              'branchName', ${branchName}::text, 'startSha', ${baseSHA}::text,
+              'attemptCount', 0, 'leaseGeneration', 0, 'reconcileAfter', NULL
+            ),
+            ${userID}
+          )
         `;
       },
-      (cause) => cause.message.includes("terminal result is immutable"),
-      "PostgreSQL allowed terminal branch result mutation",
+      (cause) => cause.code === "23505",
+      "PostgreSQL allowed a duplicate branch operation idempotency key",
     );
     await expectRejected(
       transaction,
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${secondProjectID}, ${changeID}, ${ticketWorkspaceID}, 1,
-            ${baseSHA}, 'create-intended', ${"1".repeat(64)}, ${"2".repeat(64)},
+            ${baseSHA}, 'create-intended', ${"1".repeat(64)},
             now(), ${userID}
           )
         `;
@@ -464,13 +514,13 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 1,
             ${"f".repeat(40)},
             'create-intended',
-            ${"1".repeat(64)}, ${"2".repeat(64)}, now(), ${userID}
+            ${"1".repeat(64)}, now(), ${userID}
           )
         `;
       },
@@ -480,27 +530,25 @@ try {
     );
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
-        create_intended_at, created_by
+        id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
+        create_intended_at, created_by, atespace, actor_name, binding_intent
       ) VALUES (
         ${changeAttemptID}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 1, ${baseSHA},
-        'create-intended', ${"3".repeat(64)}, ${"4".repeat(64)},
-        now(), ${userID}
+        'create-intended', ${"3".repeat(64)},
+        now(), ${userID}, ${`fa-${changeAttemptID.replaceAll("-", "")}`}, ${`runtime-${changeAttemptID.replaceAll("-", "")}`}, '{}'
       )
     `;
-    await transaction`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      VALUES(${changeAttemptID},${`fa-${changeAttemptID.replaceAll("-", "")}`},${`runtime-${changeAttemptID.replaceAll("-", "")}`},'{}')`;
     await expectRejected(
       transaction,
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 2, ${baseSHA},
             'starting', ${"5".repeat(64)},
-            ${"6".repeat(64)}, now(), ${userID}
+            now(), ${userID}
           )
         `;
       },
@@ -510,23 +558,28 @@ try {
     const candidateSHA = "d".repeat(40);
     const verificationID = crypto.randomUUID();
     await transaction`
-      INSERT INTO factory.pull_request_operation(
-        id, change_id, repository_owner, repository_name, base_branch, head_branch,
-        first_head_sha, title, body, idempotency_key, state,
-        pull_request_number, pull_request_url, completed_at
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+        payload, result, created_by, completed_at
       ) VALUES (
-        ${crypto.randomUUID()}, ${changeID}, 'factory', 'fixture', 'main', ${branchName},
-        ${candidateSHA}, 'Integration Ticket', '', ${`integration:${suffix}:pr`}, 'succeeded',
-        1, 'https://example.invalid/pr/1', now()
+        ${crypto.randomUUID()}, 'delivery.pull_request', 'change', ${changeID},
+        ${`delivery.pull_request:change:${changeID}:pull-request`}, NULL, 'succeeded',
+        jsonb_build_object(
+          'changeId', ${changeID}::text, 'repositoryOwner', 'factory', 'repositoryName', 'fixture',
+          'baseBranch', 'main', 'headBranch', ${branchName}::text, 'commitSha', ${candidateSHA}::text,
+          'firstHeadSha', ${candidateSHA}::text, 'title', 'Integration Ticket', 'body', ''
+        ),
+        jsonb_build_object('number', 1, 'url', 'https://example.invalid/pr/1'),
+        ${userID}, now()
       )
     `;
     await transaction`
       INSERT INTO factory.verification(
         id, change_id, commit_sha, pull_request_number, action_run_id, action_run_url,
-        runner_name, state, summary, completed_at, created_by
+        state, summary, completed_at, created_by
       ) VALUES (
         ${verificationID}, ${changeID}, ${candidateSHA}, 1, 9,
-        'https://example.invalid/actions/9', 'factory-integration', 'succeeded',
+        'https://example.invalid/actions/9', 'succeeded',
         'passed', now(), ${userID}
       )
     `;
@@ -569,11 +622,12 @@ try {
     const sourceCommitSHA = "a".repeat(40);
     const citations = JSON.stringify([{ path: "README.md", commitSha: sourceCommitSHA }]);
     await transaction`
-      INSERT INTO factory.knowledge_generation(
-        id, project_id, source_commit_sha, state, page_count, conflict_count,
-        created_by, completed_at
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by, completed_at
       ) VALUES (
-        ${generationID}, ${projectID}, ${sourceCommitSHA}, 'succeeded', 1, 0,
+        ${generationID}, 'knowledge.generation', 'project', ${projectID},
+        ${`knowledge.generation:${generationID}`}, NULL, 'succeeded',
+        ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: sourceCommitSHA, pageCount: 1, conflictCount: 0, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::text::jsonb,
         ${userID}, now()
       )
     `;
@@ -612,47 +666,43 @@ try {
     );
     const activeGenerationID = crypto.randomUUID();
     await transaction`
-      INSERT INTO factory.knowledge_generation(
-        id, project_id, source_commit_sha, created_by
-      ) VALUES (${activeGenerationID}, ${projectID}, ${sourceCommitSHA}, ${userID})
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by
+      ) VALUES (
+        ${activeGenerationID}, 'knowledge.generation', 'project', ${projectID},
+        ${`knowledge.generation:${activeGenerationID}`}, ${`knowledge.generation:${projectID}`}, 'pending',
+        ${JSON.stringify({ id: activeGenerationID, projectId: projectID, sourceCommitSha: sourceCommitSHA, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::text::jsonb,
+        ${userID}
+      )
     `;
     await expectRejected(
       transaction,
       async (savepoint) => {
+        const duplicateID = crypto.randomUUID();
         await savepoint`
-          INSERT INTO factory.knowledge_generation(
-            id, project_id, source_commit_sha, created_by
-          ) VALUES (${crypto.randomUUID()}, ${projectID}, ${sourceCommitSHA}, ${userID})
+          INSERT INTO factory.operation(
+            id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, created_by
+          ) VALUES (
+            ${duplicateID}, 'knowledge.generation', 'project', ${projectID},
+            ${`knowledge.generation:${duplicateID}`}, ${`knowledge.generation:${projectID}`}, 'pending',
+            ${JSON.stringify({ id: duplicateID, projectId: projectID, sourceCommitSha: sourceCommitSHA, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::text::jsonb,
+            ${userID}
+          )
         `;
       },
       (cause) => cause.code === "23505",
       "PostgreSQL allowed two active Knowledge Generations for one Project",
     );
-    const documentOperationID = crypto.randomUUID();
-    const documentBody = "# Updated documentation\n";
-    const documentDigest = createHash("sha256").update(documentBody).digest("hex");
-    await transaction`
-      INSERT INTO factory.change_commit_operation(
-        id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
-        commit_message, idempotency_key, state, source, repository_path,
-        repository_blob_sha, repository_content, content_digest, created_by
-      ) VALUES (
-        ${documentOperationID}, ${changeID}, NULL, 1, ${branchName}, ${baseSHA},
-        'Update README.md', ${`integration:${suffix}:repository-document`},
-        'push-intended', 'repository-document', 'README.md', ${"b".repeat(40)},
-        ${documentBody}, ${documentDigest}, ${userID}
-      )
-    `;
     const conversationProjectID = crypto.randomUUID();
     const conversationID = crypto.randomUUID();
     const conversationEntryID = crypto.randomUUID();
     await transaction`
       INSERT INTO factory.project(
-        id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+        id, slug, name, repository_url, default_branch, actor_template_path, created_by
       ) VALUES (
         ${conversationProjectID}, ${`integration-conversation-${suffix}`},
         'Conversation Project', 'https://example.invalid/conversation.git', 'main',
-        '.devcontainer/devcontainer.json', ${userID}
+        '.factory/actor-template.json', ${userID}
       )
     `;
     await transaction`
@@ -696,10 +746,10 @@ try {
   try {
     await client`
       INSERT INTO factory.project(
-        id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+        id, slug, name, repository_url, default_branch, actor_template_path, created_by
       ) VALUES (
         ${concurrencyProjectID}, ${`integration-cas-${suffix}`}, 'Concurrency Project',
-        'https://example.invalid/concurrency.git', 'main', '.devcontainer/devcontainer.json',
+        'https://example.invalid/concurrency.git', 'main', '.factory/actor-template.json',
         ${userID}
       )
     `;

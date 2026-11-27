@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { isIP } from "node:net";
 import { dirname, join } from "node:path";
 import { checkServerIdentity } from "node:tls";
-import { type FactoryZeroContext, zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
+import { type FactoryZeroContext, zeroQueries, zeroSchema } from "#zero-schema";
 
 export type RestoredProject = {
   id: string;
@@ -12,7 +12,7 @@ export type RestoredProject = {
   slug: string;
   repositoryUrl: string;
   defaultBranch: string;
-  devcontainerPath: string;
+  actorTemplatePath: string;
 };
 export type ZeroProjectRead = {
   owner: string;
@@ -36,7 +36,7 @@ const fields = [
   "slug",
   "repositoryUrl",
   "defaultBranch",
-  "devcontainerPath",
+  "actorTemplatePath",
 ] as const;
 const failure = () => Error("Restored Zero Project read refused; owned child must be closed");
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;

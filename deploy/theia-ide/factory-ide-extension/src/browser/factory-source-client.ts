@@ -73,11 +73,16 @@ export class FactorySourceClient implements SourceTransport {
     return new URL(`__factory/workspaces/${workspaceID}/source/${operation}`, this.base);
   }
 
-  async presentation(workspaceID: string): Promise<{ workspaceID: string; label: string }> {
+  async presentation(
+    workspaceID: string,
+    signal?: AbortSignal,
+  ): Promise<{ workspaceID: string; label: string }> {
     const response = await this.fetcher(this.url(workspaceID, "context"), {
       credentials: "same-origin",
       cache: "no-store",
-      signal: AbortSignal.timeout(5_000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(5_000)])
+        : AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new SourceResponseError(response.status);
     const value: unknown = await response.json();
@@ -178,12 +183,9 @@ export class FactorySourceClient implements SourceTransport {
         const observed = received;
         void (async () => {
           try {
-            await this.request(
-              workspaceID,
-              "stat",
-              { path: "" },
-              AbortSignal.any([lifetime.signal, AbortSignal.timeout(5_000)]),
-            );
+            // Reconnection is observation, not current-file demand. A stat
+            // wakes paused Actor-owned Source and would undo ordinary Pause.
+            await this.presentation(workspaceID, lifetime.signal);
           } catch (error: unknown) {
             if (lifetime.signal.aborted || events !== current || received !== observed) return;
             if (error instanceof SourceResponseError && [401, 403, 404].includes(error.status)) {
@@ -202,9 +204,9 @@ export class FactorySourceClient implements SourceTransport {
             current.readyState !== EventSource.CLOSED
           )
             return;
-          // A rejected HTTP stream can be permanently CLOSED even though root
-          // access still works. Native reconnect only owns CONNECTING streams.
-          // Retry reads on this same Workspace, never a save or runtime command.
+          // A rejected HTTP stream can be permanently CLOSED even though
+          // membership still allows observation. Native reconnect owns CONNECTING.
+          // Retry only the watch, never current-file access or a runtime command.
           retry = setTimeout(() => {
             retry = undefined;
             if (

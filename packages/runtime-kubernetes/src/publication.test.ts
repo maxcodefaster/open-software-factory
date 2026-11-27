@@ -107,10 +107,12 @@ test("native publication runs one bound Forgejo job with only its scoped release
   expect(config.runner.capacity).toBe(1);
   expect(config.runner.envs).toMatchObject({
     NODE_USE_ENV_PROXY: "1",
-    FACTORY_RELEASE_SOURCE: "/workspace/project",
     FACTORY_RELEASE_VERSION: "1.2.3",
     FACTORY_RELEASE_CREDENTIAL_TOKEN: "owned-task-attestation-token",
   });
+  // Source is resolved inside Work, after the renderer selects the actual checkout.
+  expect(config.runner.envs).not.toHaveProperty("FACTORY_RELEASE_SOURCE");
+  expect(JSON.stringify(process)).not.toContain("/workspace/project");
   expect(config.runner.envs).not.toHaveProperty("FACTORY_RUNNER_CONFIG");
   expect(config.server.connections.factory.token).toBe("owned-runner-token");
   expect(process.command.join(" ")).toContain('"one-job", "--wait"');
@@ -132,5 +134,5 @@ test("native Verification without publication receives no release capability", (
   expect(parse(process.env.FACTORY_RUNNER_CONFIG).server.connections.factory.labels).toEqual([
     "factory-verification:host",
   ]);
-  expect(JSON.stringify(process)).not.toContain("FACTORY_RELEASE_");
+  expect(JSON.stringify(process.env)).not.toContain("FACTORY_RELEASE_");
 });

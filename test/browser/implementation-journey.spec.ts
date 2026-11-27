@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { type ReviewFeedback, visualReviewSchema } from "#conversation-domain/visual-review";
+import { createDatabase } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import {
   type AgentView,
   agentViewSchema,
@@ -9,20 +12,14 @@ import {
 import { changesResponseSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
 import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/workspace/contracts";
-import {
-  type ReviewFeedback,
-  visualReviewSchema,
-} from "../../packages/conversation-domain/src/visual-review";
-import { createDatabase } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
 import {
   browserBootstrap,
@@ -88,8 +85,8 @@ test.beforeEach(async ({ page }) => {
   });
   const db = createDatabase(1);
   try {
-    await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`implementation-ux-${projectID}`}, 'Implementation UX', 'https://example.invalid/owned-implementation-ux.git', 'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
+    await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`implementation-ux-${projectID}`}, 'Implementation UX', 'https://example.invalid/owned-implementation-ux.git', 'main', '.factory/actor-template.json', ${session.user.id})`;
     await db.client`INSERT INTO factory.ticket(id, project_id, title, state, created_by)
       VALUES (${ticketID}, ${projectID}, ${title}, 'ready', ${session.user.id})`;
     await db.client`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
@@ -2273,10 +2270,15 @@ for (const role of ["developer", "product-contributor"] as const) {
       const db = createDatabase(1);
       try {
         await db.client.begin(async (sql) => {
-          await sql`DELETE FROM factory.forge_grant_intent WHERE user_id=${user.id}`;
+          await sql`SET LOCAL session_replication_role = replica`;
+          await sql`DELETE FROM factory.audit_event WHERE actor_id=${user.id}`;
+          await sql`SET LOCAL session_replication_role = origin`;
+          await sql`DELETE FROM factory.operation
+            WHERE (kind='forge.grant' AND payload->>'userId'=${user.id})
+               OR (kind='forge.account' AND scope_type='user' AND scope_id=${user.id})
+               OR (kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${user.id} AND state='stopped')
+               OR (created_by=${user.id} AND kind<>'workspace.developer_ide')`;
           await sql`DELETE FROM auth.account WHERE user_id=${user.id}`;
-          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${user.id}`;
-          await sql`DELETE FROM factory.developer_ide WHERE user_id=${user.id} AND state='stopped'`;
           await sql`DELETE FROM auth."user" WHERE id=${user.id} AND email=${email}
             AND NOT EXISTS(SELECT 1 FROM factory.project_membership WHERE user_id=${user.id})`;
         });
@@ -3809,14 +3811,12 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   await expect(page.getByRole("tab", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const navigation = settings.getByRole("navigation", { name: "Settings navigation" });
-  const scope = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
-  await expect(scope.locator("option")).toHaveText([
+  await expect(navigation.getByRole("heading", { level: 3 })).toHaveText([
     "Project · Implementation UX",
     "Libraries",
     "Personal",
     "Factory administration",
   ]);
-  await expect(scope).toHaveValue("project");
   await chooseSettingsScope(page, "libraries");
   const skills = navigation.getByRole("button", { name: "Skills", exact: true });
   await skills.click();
@@ -3853,8 +3853,16 @@ test("post-start human edits and selected History retain immutable scope without
       VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
     await db.client`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
       VALUES (${changeID}, ${projectID}, ${ticketID}, ${approvalID}, ${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`}, ${"a".repeat(40)}, 'active', ${session.user.id})`;
-    await db.client`INSERT INTO factory.branch_create_operation(id, change_id, repository_owner, repository_name, branch_name, start_sha, idempotency_key, state, completed_at, observed_head_sha)
-      SELECT id, id, 'owned', 'implementation-ux', branch_name, base_sha, id::text, 'succeeded', now(), base_sha FROM factory.change WHERE id = ${changeID}`;
+    await db.client`INSERT INTO factory.operation(id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, result, created_by, completed_at)
+      SELECT id, 'delivery.branch_create', 'change', id::text,
+        'delivery.branch_create:change:' || id::text || ':create-branch', NULL, 'succeeded',
+        jsonb_build_object(
+          'changeId', id::text, 'repositoryOwner', 'owned', 'repositoryName', 'implementation-ux',
+          'branchName', branch_name, 'startSha', base_sha,
+          'attemptCount', 1, 'leaseGeneration', 1, 'reconcileAfter', NULL
+        ),
+        jsonb_build_object('observedHeadSha', base_sha), created_by, now()
+      FROM factory.change WHERE id = ${changeID}`;
     await db.client`UPDATE factory.ticket SET state = 'in-progress' WHERE id = ${ticketID}`;
     await selectProject(page);
     await page
@@ -3975,8 +3983,16 @@ test("delivered work creates one linked unapproved follow-up without another Bui
       VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
     await db.client`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
       VALUES (${crypto.randomUUID()}, ${projectID}, ${ticketID}, ${approvalID}, 'factory/change-123456789abc', ${"a".repeat(40)}, 'delivered', ${session.user.id})`;
-    await db.client`INSERT INTO factory.branch_create_operation(id, change_id, repository_owner, repository_name, branch_name, start_sha, idempotency_key, state, completed_at, observed_head_sha)
-      SELECT id, id, 'owned', 'implementation-ux', branch_name, base_sha, id::text, 'succeeded', now(), base_sha FROM factory.change WHERE ticket_id = ${ticketID}`;
+    await db.client`INSERT INTO factory.operation(id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, result, created_by, completed_at)
+      SELECT id, 'delivery.branch_create', 'change', id::text,
+        'delivery.branch_create:change:' || id::text || ':create-branch', NULL, 'succeeded',
+        jsonb_build_object(
+          'changeId', id::text, 'repositoryOwner', 'owned', 'repositoryName', 'implementation-ux',
+          'branchName', branch_name, 'startSha', base_sha,
+          'attemptCount', 1, 'leaseGeneration', 1, 'reconcileAfter', NULL
+        ),
+        jsonb_build_object('observedHeadSha', base_sha), created_by, now()
+      FROM factory.change WHERE ticket_id = ${ticketID}`;
     await db.client`UPDATE factory.ticket SET state = 'done' WHERE id = ${ticketID}`;
     await selectProject(page);
     await page.getByRole("button", { name: /History/ }).click();
@@ -3986,10 +4002,13 @@ test("delivered work creates one linked unapproved follow-up without another Bui
     const [linked] = await db.client<
       Array<{ approved: number; turns: number; changeCount: number }>
     >`
-      SELECT (SELECT count(*)::integer FROM factory.requirement_approval WHERE ticket_id = link.ticket_id) AS approved,
-        (SELECT count(*)::integer FROM factory.agent_turn WHERE ticket_id = link.ticket_id) AS turns,
-        (SELECT count(*)::integer FROM factory.change WHERE ticket_id = link.ticket_id) AS "changeCount"
-      FROM factory.ticket_follow_up link WHERE source_ticket_id = ${ticketID}`;
+      SELECT (SELECT count(*)::integer FROM factory.requirement_approval WHERE ticket_id = (link.scope_id)::uuid) AS approved,
+        (SELECT count(*)::integer FROM factory.agent_turn WHERE ticket_id = (link.scope_id)::uuid) AS turns,
+        (SELECT count(*)::integer FROM factory.change WHERE ticket_id = (link.scope_id)::uuid) AS "changeCount"
+      FROM factory.audit_event link
+      WHERE link.kind = 'tickets.follow_up'
+        AND link.scope_type = 'ticket'
+        AND link.payload->>'sourceTicketId' = ${ticketID}`;
     expect(linked).toEqual({ approved: 0, turns: 0, changeCount: 0 });
   } finally {
     await db.client.end();

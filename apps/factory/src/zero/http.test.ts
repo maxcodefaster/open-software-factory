@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createDatabase } from "../../../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { handleZeroMutate, zeroDatabase } from "./http";
 
 test("Zero retains its schema provider per database, not per request or across installations", async () => {

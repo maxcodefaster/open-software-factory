@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { runCommand } from "#runtime-kubernetes/command";
 
 const image =
   "docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8";

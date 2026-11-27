@@ -1,5 +1,5 @@
+import type { LearningResult, LearningView } from "#conversation-domain/learning";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
-import type { LearningResult, LearningView } from "../../packages/conversation-domain/src/learning";
 export function calibratedResult(): LearningResult {
   return {
     cases: calibrationCases.map((item) => ({

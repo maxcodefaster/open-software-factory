@@ -4,9 +4,9 @@ import { APIError, type BetterAuthPlugin } from "better-auth";
 import { addOAuthServerContext, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { jwt } from "better-auth/plugins";
 import { z } from "zod";
-import type { createDatabase } from "../../db/src/client";
-import { emergencyAdministratorID, type IdentityPolicy } from "./policy";
+import type { createDatabase } from "#db/client";
 import { factoryMCPRegistration, factoryMCPResource, factoryMCPScopes } from "./mcp-registration";
+import { emergencyAdministratorID, type IdentityPolicy } from "./policy";
 
 export const forgeClientID = "factory-forgejo";
 const issuerSession = z.object({

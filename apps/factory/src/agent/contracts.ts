@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { turnObservationInput } from "../../../../packages/conversation-domain/src/turn-observation";
+import { turnObservationInput } from "#conversation-domain/turn-observation";
 
 export type ActivityEvent<T> = { type: "snapshot"; view: T } | { type: "heartbeat" };
 

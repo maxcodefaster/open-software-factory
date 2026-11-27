@@ -1,7 +1,7 @@
-import type { JSX } from "@solidjs/web";
 import { Show } from "solid-js";
 import { ProjectModelSettings } from "./project-settings";
 import { SystemModelSettings } from "./system-settings";
+
 export function ModelSettings(props: {
   active?: boolean;
   systemManager: boolean;
@@ -9,7 +9,6 @@ export function ModelSettings(props: {
   project: { id: string; name: string } | undefined;
   scope: "personal" | "project" | "system";
   onModelsChanged?: (() => Promise<void>) | undefined;
-  navigation?: JSX.Element;
 }) {
   return (
     <section class="settings-configuration" aria-label="Agent settings">

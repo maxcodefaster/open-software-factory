@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import { unansweredClarification } from "#conversation-domain/clarification";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { codeReadInput } from "../../apps/factory/src/knowledge/contracts";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { technicalPlanningOutstandingIn } from "../../apps/factory/src/technical-design/store";
-import { unansweredClarification } from "../../packages/conversation-domain/src/clarification";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedPostgresServer } from "../fixtures/postgres-server";

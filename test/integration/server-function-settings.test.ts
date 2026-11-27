@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { EnvironmentSettingsView } from "#project-domain/environment";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type { EnvironmentSettingsView } from "../../packages/project-domain/src/environment";
 import {
   decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,
@@ -24,12 +24,10 @@ test("compiled settings functions validate inputs, retain host permissions and p
     environment: "development",
     version: 1,
     variables: [],
-    registries: [],
     canManage: true,
     storeConfigured: true,
     pending: false,
     pendingCommandID: null,
-    preparation: null,
   };
   const services = {
     models: {
@@ -83,7 +81,7 @@ test("compiled settings functions validate inputs, retain host permissions and p
     status: 403,
     message: "System Manager access required",
   });
-  const input = { commandID: crypto.randomUUID(), version: 0, variables: [], registries: [] };
+  const input = { commandID: crypto.randomUUID(), version: 0, variables: [] };
   expect(await call("saveEnvironment", ["forged-project", "development", input])).toMatchObject({
     ok: false,
     status: 400,
@@ -95,6 +93,19 @@ test("compiled settings functions validate inputs, retain host permissions and p
   expect(
     await call("saveEnvironment", [projectID, "development", { ...input, actorID: "forged" }]),
   ).toMatchObject({ ok: false, status: 400 });
+  for (const retired of [
+    { ...input, registries: [] },
+    ...[false, true].map((build) => ({
+      ...input,
+      variables: [
+        { name: "APP_VALUE", value: "never-saved", runtime: true, verification: false, build },
+      ],
+    })),
+  ])
+    expect(await call("saveEnvironment", [projectID, "development", retired])).toMatchObject({
+      ok: false,
+      status: 400,
+    });
   maintenance = true;
   expect(await call("saveEnvironment", [projectID, "development", input])).toMatchObject({
     ok: false,
@@ -110,7 +121,6 @@ test("compiled settings functions validate inputs, retain host permissions and p
       name: `VALUE_${index}`,
       value: "x".repeat(65_530) + String(index).padStart(6, "0"),
       runtime: true,
-      build: false,
       verification: false,
     })),
   };
@@ -123,7 +133,6 @@ test("compiled settings functions validate inputs, retain host permissions and p
       name: `VALUE_${index}`,
       value: "x".repeat(65_530) + String(index).padStart(6, "0"),
       runtime: true,
-      build: false,
       verification: false,
     })),
   };

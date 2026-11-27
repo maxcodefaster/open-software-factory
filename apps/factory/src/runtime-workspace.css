@@ -54,6 +54,13 @@
   max-inline-size: calc(100% - var(--space-6));
 }
 
+.editor-paused-status {
+  position: static;
+  flex: none;
+  max-inline-size: none;
+  border-radius: 0;
+}
+
 .editor-recovery {
   position: absolute;
   inset-inline-start: var(--space-3);

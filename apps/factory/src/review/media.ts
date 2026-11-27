@@ -14,21 +14,17 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import {
-  type DatabaseTransaction,
-  type createDatabase,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
-  attachmentStorage,
   buildBrowserSession,
   candidateReview,
   change,
+  operation,
   reviewFeedback,
   reviewMedia,
   runtimeAttempt,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { CommandError } from "../command-error";
 import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 import { reviewChangeIn } from "./controller";
@@ -73,9 +69,14 @@ export function createReviewMedia(
 ) {
   async function key(id: string) {
     const [storage] = await database.db
-      .select({ id: attachmentStorage.id })
-      .from(attachmentStorage)
-      .where(eq(attachmentStorage.singleton, true));
+      .select({ id: operation.id })
+      .from(operation)
+      .where(
+        and(
+          eq(operation.kind, "attachment.storage"),
+          eq(operation.idempotencyKey, "attachment.storage:singleton"),
+        ),
+      );
     if (!storage) throw new Error("Installation storage identity is unavailable");
     return `factory-review/${storage.id}/${z.uuid().parse(id).toLowerCase()}`;
   }

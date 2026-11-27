@@ -275,9 +275,6 @@ test("explicit lanes keep paid calls and retained-installation restarts outside 
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
   expect(integrationLane("test/integration/native-skill-loading.test.ts")).toBe("native");
   expect(integrationLane("test/integration/substrate-adapter.native.test.ts")).toBe("native");
-  expect(integrationLane("test/integration/substrate-rootless-proxy.native.test.ts")).toBe(
-    "native",
-  );
   expect(integrationLane("test/integration/substrate-workspaces.native.test.ts")).toBe("native");
   expect(integrationLane("test/integration/developer-ide-kubernetes.native.test.ts")).toBe(
     "native",
@@ -326,8 +323,8 @@ test("writer input Stop requires native OpenCode but polling-only proofs stay in
     expect(integrationLane(`test/integration/${name}.test.ts`)).toBe("controllers");
 });
 
-test("the isolated rootless proxy component needs neither Factory build nor PostgreSQL", () => {
-  const component = "test/integration/substrate-rootless-proxy.native.test.ts";
+test("the native adapter owns its database and needs no compiled Factory application", () => {
+  const component = "test/integration/substrate-adapter.native.test.ts";
   const product = "test/integration/substrate-workspaces.native.test.ts";
   expect(integrationNeedsApplicationBuild(component)).toBe(false);
   expect(controllerNeedsDatabase(component)).toBe(false);
@@ -335,6 +332,15 @@ test("the isolated rootless proxy component needs neither Factory build nor Post
   expect(controllerNeedsDatabase("test/integration/bootstrap.test.ts")).toBe(true);
   expect([component].some(integrationNeedsApplicationBuild)).toBe(false);
   expect([component, product].some(integrationNeedsApplicationBuild)).toBe(true);
+});
+
+test("native Browser and usage controllers share only their lane's PostgreSQL server, without an application build", () => {
+  for (const name of ["substrate-browser", "substrate-usage"]) {
+    const path = `test/integration/${name}.test.ts`;
+    expect(integrationLane(path)).toBe("controllers");
+    expect(controllerNeedsDatabase(path)).toBe(true);
+    expect(integrationNeedsApplicationBuild(path)).toBe(false);
+  }
 });
 
 test("the default browser selection excludes explicitly paid cases in mixed journey files", () => {
@@ -367,7 +373,6 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
   for (const name of [
     "runtime-app-origins",
     "runtime-declared-apps",
-    "project-preparation",
     "verification-cancellation",
     "usage-cleanup",
   ]) {
@@ -377,6 +382,7 @@ test("self-contained protocol and PostgreSQL proofs do not acquire an unused sha
   }
   expect(controllerNeedsDatabase("test/integration/substrate-source.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/source-startup.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/native-project-entry.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/substrate-source-seed.test.ts")).toBe(false);
   expect(integrationNeedsApplicationBuild("test/integration/substrate-source-seed.test.ts")).toBe(
     false,
@@ -421,6 +427,8 @@ test("database-only feature checks skip the application build while endpoint che
     "agent-read",
     "agent-turn-store",
     "coding-source-dispatch-fence",
+    "retained-stop-maintenance",
+    "substrate-input-stop",
     "fixture-cleanup",
     "native-ui-fixture",
     "change-document-drizzle",
@@ -450,4 +458,25 @@ test("database-only feature checks skip the application build while endpoint che
   expect(controllerNeedsDatabase("test/integration/project-registration-authority.test.ts")).toBe(
     true,
   );
+});
+
+test("structural naming conventions classify new integration proofs without listing every file", () => {
+  expect(integrationLane("test/integration/example-feature.native.test.ts")).toBe("native");
+  expect(integrationLane("test/integration/example-feature.native.live.test.ts")).toBe("live");
+  expect(integrationNeedsApplicationBuild("test/integration/example-drizzle.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/example-drizzle.test.ts")).toBe(true);
+  expect(controllerNeedsDatabase("test/integration/example-baseline.test.ts")).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/example-baseline.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/substrate-source-example.test.ts")).toBe(false);
+  expect(
+    integrationNeedsApplicationBuild("test/integration/substrate-source-example.test.ts"),
+  ).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-function-example.test.ts")).toBe(false);
+  expect(integrationNeedsApplicationBuild("test/integration/server-function-example.test.ts")).toBe(
+    true,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-mcp-authority.test.ts")).toBe(
+    true,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-ticket-sql.test.ts")).toBe(true);
 });

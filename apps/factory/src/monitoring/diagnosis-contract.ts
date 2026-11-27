@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
-import type { UsageCounters } from "../../../../packages/conversation-domain/src/usage";
-import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
-import { type codeReadInput, type codeReadResult } from "../knowledge/contracts";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
+import type { UsageCounters } from "#conversation-domain/usage";
+import { requirementContentInput } from "#requirement-domain/content";
+import type { codeReadInput, codeReadResult } from "../knowledge/contracts";
 import type { ResolvedModelConnection } from "../models/inference-contracts";
 
 export const monitoringDiagnosis = z

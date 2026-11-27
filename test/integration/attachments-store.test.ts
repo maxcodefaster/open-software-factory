@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
-import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import { attachmentIDs, attachmentMarkdown } from "#conversation-domain/attachments";
+import { drizzleTransaction } from "#db/client";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
 import {
   assertMessageAttachmentsIn,
@@ -9,11 +11,6 @@ import {
   freezeAttachmentContextIn,
   freezeFeedbackAttachmentsIn,
 } from "../../apps/factory/src/attachments/store";
-import {
-  attachmentIDs,
-  attachmentMarkdown,
-} from "../../packages/conversation-domain/src/attachments";
-import { drizzleTransaction } from "../../packages/db/src/client";
 import { attachmentReferenceCases } from "../fixtures/attachment-references";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
@@ -49,8 +46,8 @@ async function realPostgres() {
       await client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${id},'Owned attachment contributor',${`${id}@attachments.test`},true)`;
     for (const id of [projectID, otherProjectID]) {
-      await client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${id},${`attachment-${id}`},'Attachment proof','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${userID})`;
+      await client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${id},${`attachment-${id}`},'Attachment proof','https://example.invalid/owned.git','main','.factory/actor-template.json',${userID})`;
       for (const user of [userID, otherID])
         await client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
           VALUES(${id},${user},'developer',${userID})`;
@@ -196,22 +193,24 @@ test("store intent and draft CAS retain exact identity, empty arrays and Project
     await f.store.retainDraft(f.userID, f.projectID, draft, { sequence: 4, ids: [] });
     await f.store.retainDraft(f.userID, f.otherProjectID, draft, { sequence: 5, ids: [] });
     expect([
-      ...(await sql`SELECT sequence::float8 AS sequence,attachment_ids AS ids,project_id AS project FROM factory.attachment_draft WHERE id=${draft}`),
+      ...(await sql`SELECT (payload->>'sequence')::bigint::float8 AS sequence,payload->'attachmentIds' AS ids,payload->>'projectId' AS project
+        FROM factory.operation WHERE kind='attachments.draft' AND scope_type='attachment' AND scope_id=${draft}`),
     ]).toEqual([{ sequence: 4, ids: [item.file.id], project: f.projectID }]);
     await f.store.retainDraft(f.userID, f.projectID, draft, {
       sequence: Number.MAX_SAFE_INTEGER,
       ids: [],
     });
     expect([
-      ...(await sql`SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft WHERE id=${draft}`),
+      ...(await sql`SELECT (payload->>'sequence')::bigint::float8 AS sequence,payload->'attachmentIds' AS ids
+        FROM factory.operation WHERE kind='attachments.draft' AND scope_type='attachment' AND scope_id=${draft}`),
     ]).toEqual([{ sequence: Number.MAX_SAFE_INTEGER, ids: [] }]);
     await f.store.retainDraft(f.userID, f.projectID, f.ticketID, {
       sequence: 1,
       ids: [item.file.id],
     });
-    expect(await sql`SELECT id FROM factory.attachment_draft WHERE id=${f.ticketID}`).toHaveLength(
-      0,
-    );
+    expect(
+      await sql`SELECT id FROM factory.operation WHERE kind='attachments.draft' AND scope_type='attachment' AND scope_id=${f.ticketID}`,
+    ).toHaveLength(0);
     await sql.begin((transaction) =>
       assertMessageAttachmentsIn(transaction, f.projectID, f.userID, attachmentMarkdown(item.file)),
     );
@@ -453,7 +452,8 @@ test("attachment context pins authored sources to the exact turn and feedback so
       }),
     ).rejects.toThrow("Owned admission rollback");
     expect(
-      await sql`SELECT turn_id FROM factory.attachment_turn_context WHERE turn_id=${record.id}`,
+      await sql`SELECT scope_id FROM factory.operation
+        WHERE kind='attachment.turn_context' AND scope_type='agent_turn' AND scope_id=${record.id}`,
     ).toHaveLength(0);
     expect(
       await sql`SELECT attachment_id FROM factory.attachment_reference WHERE reference_id=${record.id}`,
@@ -506,13 +506,16 @@ test("attachment context pins authored sources to the exact turn and feedback so
         { body: attachmentMarkdown(first.file) },
       ]);
     });
-    const [feedback] = await sql<
-      { content: string }[]
-    >`SELECT content FROM factory.attachment_turn_context WHERE turn_id=${record.id} AND source='feedback'`;
+    const [feedback] = await sql<{ content: string }[]>`
+      SELECT payload->>'content' AS content FROM factory.operation
+      WHERE kind='attachment.turn_context' AND scope_type='agent_turn'
+        AND scope_id=${record.id} AND payload->>'source'='feedback'`;
     expect(feedback?.content).toContain(later.file.id);
     expect(feedback?.content).not.toContain(first.file.id);
     await expect(
-      sql`UPDATE factory.attachment_turn_context SET content='rewritten' WHERE turn_id=${record.id}`,
+      sql`UPDATE factory.operation
+        SET payload=jsonb_set(payload,'{content}','"rewritten"'::jsonb)
+        WHERE kind='attachment.turn_context' AND scope_type='agent_turn' AND scope_id=${record.id}`,
     ).rejects.toThrow("immutable");
   } finally {
     await f.dispose();

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type RuntimeAttempt } from "./runtime/contracts";
+import type { RuntimeAttempt } from "./runtime/contracts";
 import {
   retryableMainPreview,
   runtimeStateLabel,

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ProjectAgentOutput } from "../../packages/conversation-domain/src/conversation";
+import type { ProjectAgentOutput } from "#conversation-domain/conversation";
 import {
   verifyExportPrerequisite,
   verifyProfilePlacement,

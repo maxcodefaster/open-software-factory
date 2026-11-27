@@ -1,7 +1,7 @@
 import { and, count, eq, exists, or } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import { administrator, project, projectMembership } from "../../../../packages/db/src/schema";
-import { desktopBackgroundKeys } from "../../../../packages/interface-domain/src/background";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { administrator, project, projectMembership } from "#db/schema";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 
 export const projectFields = {
   id: project.id,
@@ -10,7 +10,7 @@ export const projectFields = {
   desktopBackgroundKey: project.desktopBackgroundKey,
   repositoryUrl: project.repositoryUrl,
   defaultBranch: project.defaultBranch,
-  devcontainerPath: project.devcontainerPath,
+  actorTemplatePath: project.actorTemplatePath,
   createdAt: project.createdAt,
 };
 
@@ -20,7 +20,7 @@ export async function createProjectIn(
   transaction: DatabaseTransaction,
   input: Pick<
     typeof project.$inferInsert,
-    "id" | "slug" | "name" | "repositoryUrl" | "defaultBranch" | "devcontainerPath" | "createdBy"
+    "id" | "slug" | "name" | "repositoryUrl" | "defaultBranch" | "actorTemplatePath" | "createdBy"
   >,
 ) {
   await transaction`SELECT pg_advisory_xact_lock(hashtextextended('factory-project-background-allocation',0))`;

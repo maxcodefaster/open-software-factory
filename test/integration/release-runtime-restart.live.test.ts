@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
+import { runCommand } from "#runtime-kubernetes/command";
+import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
+import { eventually } from "../fixtures/factory-process";
+import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
 import {
   readReleaseNativeBinding,
   readReleaseNativeTemplate,
   releaseInstallation,
 } from "../fixtures/release-installation";
-import { eventually } from "../fixtures/factory-process";
-import { requireSubstrateActor } from "../../apps/factory/src/runtime/substrate";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
-import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
@@ -22,7 +22,8 @@ test.skipIf(!installation)(
       const selected = await f.database.client<{ id: string; kind: string }[]>`
         SELECT runtime_attempt_id AS id,'ticket' AS kind FROM factory.change
           WHERE id=${dependentChangeID} AND project_id=${projectID}
-        UNION ALL SELECT runtime_attempt_id,'staging' FROM factory.staging_preview WHERE project_id=${projectID}
+        UNION ALL SELECT (payload->>'runtimeAttemptId')::uuid,'staging' FROM factory.operation
+          WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${projectID}
         ORDER BY kind`;
       expect(selected.map(({ kind }) => kind)).toEqual(["staging", "ticket"]);
       expect(new Set(selected.map(({ id }) => id)).size).toBe(2);

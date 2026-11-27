@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pinnedNativeSandboxSpec } from "#runtime-kubernetes/substrate-profile";
 import pins from "../../deploy/substrate/pins.json";
-import { pinnedNativeSandboxSpec } from "../../packages/runtime-kubernetes/src/substrate-profile";
 import { nativeInstallationFixture } from "../../test/fixtures/native-installation";
 import {
   formatPreflight,

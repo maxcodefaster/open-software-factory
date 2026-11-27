@@ -1,9 +1,6 @@
 import { createEffect, createSignal, For, Show, untrack } from "solid-js";
-import {
-  type ModelRole,
-  modelRoles,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
-import type { ModelSettingsView } from "../../../../packages/conversation-domain/src/model-settings";
+import { type ModelRole, modelRoles } from "#conversation-domain/model-inheritance";
+import type { ModelSettingsView } from "#conversation-domain/model-settings";
 import { plainErrorMessage } from "../command-error";
 import { getModelSettings, saveModelSettings } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
@@ -185,8 +182,8 @@ function SystemRoleRules(props: {
 }) {
   const label = () => (props.role === "planning" ? "Planning" : "Build");
   return (
-    <details class="model-policy">
-      <summary>{label()} permissions</summary>
+    <fieldset>
+      <legend>{label()} permissions</legend>
       <label class="model-checkbox">
         <input
           type="checkbox"
@@ -198,29 +195,26 @@ function SystemRoleRules(props: {
         />
         Allow Project and personal overrides
       </label>
-      <fieldset>
-        <legend>Permitted {label().toLowerCase()} models</legend>
-        <For each={props.models}>
-          {(id) => (
-            <label class="model-checkbox">
-              <input
-                type="checkbox"
-                checked={props.rule.models.includes(id)}
-                disabled={props.busy}
-                onChange={(event) =>
-                  props.onChange({
-                    ...props.rule,
-                    models: event.currentTarget.checked
-                      ? [...props.rule.models, id]
-                      : props.rule.models.filter((model) => model !== id),
-                  })
-                }
-              />
-              {id}
-            </label>
-          )}
-        </For>
-      </fieldset>
-    </details>
+      <For each={props.models}>
+        {(id) => (
+          <label class="model-checkbox">
+            <input
+              type="checkbox"
+              checked={props.rule.models.includes(id)}
+              disabled={props.busy}
+              onChange={(event) =>
+                props.onChange({
+                  ...props.rule,
+                  models: event.currentTarget.checked
+                    ? [...props.rule.models, id]
+                    : props.rule.models.filter((model) => model !== id),
+                })
+              }
+            />
+            {id}
+          </label>
+        )}
+      </For>
+    </fieldset>
   );
 }

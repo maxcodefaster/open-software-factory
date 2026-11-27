@@ -1,6 +1,13 @@
-import { eq, sql as query } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { executionPolicyCommand, promotionOperation } from "../../../../packages/db/src/schema";
+import { and, eq, isNull, sql as query } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import {
+  auditEvent,
+  change as changeTable,
+  operation as operationTable,
+  project,
+  ticket,
+} from "#db/schema";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
@@ -16,24 +23,35 @@ export async function retryPromotion(
 ) {
   return database.client.begin(async (sql) => {
     const db = drizzleTransaction(sql);
-    const [change] = await sql<
-      { projectID: string; state: string; repositoryURL: string }[]
-    >`SELECT change.project_id AS "projectID",change.state,project.repository_url AS "repositoryURL"
-      FROM factory.change change JOIN factory.project project ON project.id=change.project_id
-      JOIN factory.ticket ticket ON ticket.id=change.ticket_id AND ticket.trashed_at IS NULL
-      WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
+    const lockedChange = alias(changeTable, "change");
+    const lockedTicket = alias(ticket, "ticket");
+    const [change] = await db
+      .select({
+        projectID: lockedChange.projectId,
+        state: lockedChange.state,
+        repositoryURL: project.repositoryUrl,
+      })
+      .from(lockedChange)
+      .innerJoin(project, eq(project.id, lockedChange.projectId))
+      .innerJoin(
+        lockedTicket,
+        and(eq(lockedTicket.id, lockedChange.ticketId), isNull(lockedTicket.trashedAt)),
+      )
+      .where(eq(lockedChange.id, changeID))
+      .for("update", { of: [lockedChange, lockedTicket] });
     if (!change) throw new CommandError("not-found", "Change not found");
     await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
     const scope = `promotion-retry:${changeID}`;
+    const dedupeKey = `usage.policy_command:${commandID}`;
     const input = { changeID, promotionID };
     const [replay] = await db
       .select({
-        scope: executionPolicyCommand.scope,
-        actor: executionPolicyCommand.actorId,
-        input: query<typeof input>`${executionPolicyCommand.input}`,
+        scope: auditEvent.scopeId,
+        actor: auditEvent.actorId,
+        input: query<typeof input>`${auditEvent.payload}->'input'`,
       })
-      .from(executionPolicyCommand)
-      .where(eq(executionPolicyCommand.commandId, commandID));
+      .from(auditEvent)
+      .where(eq(auditEvent.dedupeKey, dedupeKey));
     if (replay) {
       if (
         replay.scope !== scope ||
@@ -60,11 +78,12 @@ export async function retryPromotion(
       promotion.previous_runtime_attempt_id AS "previousAttemptID",
       promotion.replacement_runtime_attempt_id AS "replacementAttemptID",
       runtime.state AS "replacementState",
-      (runtime.id IS NULL OR EXISTS(SELECT 1 FROM factory.substrate_binding binding
-        WHERE binding.runtime_attempt_id=runtime.id AND binding.deleted_at IS NOT NULL)) AS released,
-      EXISTS(SELECT 1 FROM factory.merge_operation merge
-        WHERE merge.change_id=promotion.change_id AND merge.state='succeeded'
-          AND merge.commit_sha=promotion.commit_sha AND merge.observed_default_sha=promotion.commit_sha) AS merged
+      (runtime.id IS NULL OR runtime.deleted_at IS NOT NULL) AS released,
+      EXISTS(SELECT 1 FROM factory.operation merge
+        WHERE merge.kind='delivery.merge' AND merge.scope_type='change'
+          AND merge.scope_id=promotion.change_id::text AND merge.state='succeeded'
+          AND merge.payload->>'commitSha'=promotion.commit_sha
+          AND merge.result->>'mergeSha'=promotion.commit_sha) AS merged
       FROM factory.current_promotion promotion
       LEFT JOIN factory.runtime_attempt runtime ON runtime.id=promotion.replacement_runtime_attempt_id
       WHERE promotion.change_id=${changeID}`;
@@ -85,9 +104,20 @@ export async function retryPromotion(
         "conflict",
         "Retry Main Preview only after its failed replacement and owned cleanup are confirmed.",
       );
-    const [staging] = await sql<{ attemptID: string | null }[]>`
-      SELECT runtime_attempt_id AS "attemptID" FROM factory.staging_preview
-      WHERE project_id=${change.projectID} FOR UPDATE`;
+    const [staging] = await db
+      .select({
+        attemptID: query<string | null>`${operationTable.payload}->>'runtimeAttemptId'`,
+      })
+      .from(operationTable)
+      .where(
+        and(
+          eq(operationTable.kind, "delivery.staging_preview"),
+          eq(operationTable.scopeType, "project"),
+          eq(operationTable.scopeId, change.projectID),
+          eq(operationTable.idempotencyKey, `delivery.staging_preview:${change.projectID}`),
+        ),
+      )
+      .for("update");
     if ((staging?.attemptID ?? null) !== previous.previousAttemptID)
       throw new CommandError(
         "conflict",
@@ -95,22 +125,42 @@ export async function retryPromotion(
       );
     if ((await defaultHead(change.repositoryURL)) !== previous.commitSHA)
       throw new CommandError("conflict", "The default branch changed after this merge.");
-    await db.insert(executionPolicyCommand).values({
-      commandId: commandID,
-      scope,
-      actorId: userID,
-      input,
-      result: { promotionID: commandID },
-    });
-    await db.insert(promotionOperation).values({
+    const result = { promotionID: commandID };
+    await db.insert(auditEvent).values({
       id: commandID,
-      changeId: changeID,
-      projectId: change.projectID,
-      commitSha: previous.commitSHA,
-      previousRuntimeAttemptId: previous.previousAttemptID,
-      ordinal: previous.ordinal + 1,
-      supersedesId: previous.id,
-      retryCommandId: commandID,
+      kind: "usage.policy_command",
+      scopeType: "execution_policy",
+      scopeId: scope,
+      actorId: userID,
+      dedupeKey,
+      payload: {
+        commandId: commandID,
+        scope,
+        actorId: userID,
+        input,
+        result,
+      },
+    });
+    const nextOrdinal = previous.ordinal + 1;
+    await db.insert(operationTable).values({
+      id: commandID,
+      kind: "delivery.promotion",
+      scopeType: "change",
+      scopeId: changeID,
+      idempotencyKey: `delivery.promotion:${changeID}:${nextOrdinal}`,
+      activeKey: `delivery.promotion:${change.projectID}`,
+      state: "pending",
+      payload: {
+        changeId: changeID,
+        projectId: change.projectID,
+        commitSha: previous.commitSHA,
+        previousRuntimeAttemptId: previous.previousAttemptID,
+        replacementRuntimeAttemptId: null,
+        ordinal: nextOrdinal,
+        supersedesId: previous.id,
+        retryCommandId: commandID,
+      },
+      createdBy: userID,
     });
     return true;
   });

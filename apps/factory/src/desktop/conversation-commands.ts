@@ -1,16 +1,13 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
-import { unansweredClarification } from "../../../../packages/conversation-domain/src/clarification";
-import type {
-  InterviewQuestion,
-  PlanningIntent,
-} from "../../../../packages/conversation-domain/src/conversation";
-import { normalizeInterviewAnswer } from "../../../../packages/conversation-domain/src/conversation";
+import { unansweredClarification } from "#conversation-domain/clarification";
+import type { InterviewQuestion, PlanningIntent } from "#conversation-domain/conversation";
+import { normalizeInterviewAnswer } from "#conversation-domain/conversation";
 import type { createAgentCommandIds } from "../agent-command-ids";
 import { readAttachmentContent } from "../attachments/composer";
-import { type Change, type Ticket } from "../change/contracts";
+import type { Change, Ticket } from "../change/contracts";
 import { plainErrorMessage } from "../command-error";
 import { streamConversation } from "../conversation-stream";
-import { type ConversationView } from "../project-agent/contracts";
+import type { ConversationView } from "../project-agent/contracts";
 import {
   answerConversationQuestion,
   sendConversationMessage as commissionConversationMessage,
@@ -69,7 +66,10 @@ interface ConversationCommandsDependencies {
   mutate: DesktopMutation;
   publishConversation: (value: ConversationView | undefined) => void;
   agentCommandIds: ReturnType<typeof createAgentCommandIds>;
-  trackConversationStream(controller: AbortController): () => void;
+  trackConversationStream(
+    controller: AbortController,
+    turnId?: () => string | undefined,
+  ): () => void;
   refreshConversation: (
     projectID?: string | undefined,
     ticketID?: string | undefined,
@@ -196,7 +196,10 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
           text,
         );
         const streamController = new AbortController();
-        const detachStream = dependencies.trackConversationStream(streamController);
+        const detachStream = dependencies.trackConversationStream(
+          streamController,
+          () => streamTurnId,
+        );
         const message = {
           ...(ticketID ? { ticketId: ticketID } : {}),
           text,

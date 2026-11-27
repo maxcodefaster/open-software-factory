@@ -9,8 +9,8 @@ import {
   untrack,
   useContext,
 } from "solid-js";
-import { zeroQueries } from "../../../../packages/zero-schema/src";
-import { useZeroConnection, useZeroQuery } from "../../../../packages/zero-solid/src";
+import { zeroQueries } from "#zero-schema";
+import { useZeroConnection, useZeroQuery } from "#zero-solid";
 import { invalidateSharedReads } from "../server-functions/shared-reads";
 import { createInvalidatedRead } from "./invalidated-read";
 

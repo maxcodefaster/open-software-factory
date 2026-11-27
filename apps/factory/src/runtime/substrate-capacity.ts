@@ -1,26 +1,23 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, eq, isNull, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  installationMaintenance,
-  substrateCapacityInstallation,
-  substrateWorkerCapacity,
-} from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { operation } from "#db/schema";
 import {
   type NativeCapacityNode,
   nativeCapacityAdmittedNodeReady,
   nativeCapacityCandidates,
   nativeCapacityOriginalNode,
   nativeCapacityOwner,
+  nativeCapacityReadyReplicas,
   nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
   requireNativeCapacityPool,
   requireNativeCapacitySandbox,
   runNativeCapacityKubernetes,
-} from "../../../../packages/runtime-kubernetes/src/substrate-capacity";
-import { nativeRuntimeArchitecture } from "../../../../packages/runtime-kubernetes/src/substrate-profile";
+} from "#runtime-kubernetes/substrate-capacity";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import { CommandError } from "../command-error";
 import { installationInMaintenance } from "../installation/maintenance";
 import type {
@@ -29,6 +26,10 @@ import type {
 } from "./substrate-capacity-contract";
 
 type Database = ReturnType<typeof createDatabase>;
+const CAPACITY_INSTALLATION_KIND = "runtime.capacity_installation";
+const CAPACITY_INSTALLATION_SCOPE_TYPE = "installation";
+const WORKER_CAPACITY_KIND = "runtime.worker_capacity";
+const WORKER_CAPACITY_SCOPE_TYPE = "worker";
 type Intent = {
   database: string;
   selector: Record<string, string>;
@@ -50,6 +51,20 @@ type InstallationIntent = {
   sandboxUID: string;
   base: { uid: string; name: string; namespace: string; workerImage: string };
   node: NativeCapacityNode;
+};
+type InstallationPayload = {
+  owner: string;
+  intent: InstallationIntent;
+};
+type WorkerCapacityPayload = {
+  owner: string;
+  nodeUid: string;
+  intent: Intent;
+  attemptedAt: string | null;
+  rejected: boolean;
+};
+type WorkerCapacityResult = {
+  pool?: Fact["pool"];
 };
 
 // Installation capacity only. The native WorkerPool controller creates workers;
@@ -86,25 +101,43 @@ export function createSubstrateCapacity(
       throw new Error("Original native capacity WorkerPool observation is unavailable");
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   }
-  async function facts(sql = database.client) {
-    return drizzleTransaction(sql)
+  async function facts(sql = database.client): Promise<Fact[]> {
+    const rows = await drizzleTransaction(sql)
       .select({
-        nodeUID: substrateWorkerCapacity.nodeUid,
-        intent: query<Intent>`${substrateWorkerCapacity.intent}`,
-        attemptedAt: query<string | null>`${substrateWorkerCapacity.attemptedAt}::text`,
-        rejected: substrateWorkerCapacity.rejected,
-        pool: query<Fact["pool"]>`${substrateWorkerCapacity.pool}`,
+        payload: operation.payload,
+        result: operation.result,
       })
-      .from(substrateWorkerCapacity)
-      .where(eq(substrateWorkerCapacity.owner, owner))
-      .orderBy(substrateWorkerCapacity.nodeUid);
+      .from(operation)
+      .where(
+        and(
+          eq(operation.kind, WORKER_CAPACITY_KIND),
+          eq(operation.scopeType, WORKER_CAPACITY_SCOPE_TYPE),
+          query`${operation.payload}->>'owner'=${owner}`,
+        ),
+      )
+      .orderBy(query`${operation.payload}->>'nodeUid'`);
+    return rows.map((row) => {
+      const payload = row.payload as WorkerCapacityPayload;
+      const result = (row.result ?? {}) as WorkerCapacityResult;
+      return {
+        nodeUID: payload.nodeUid,
+        intent: payload.intent,
+        attemptedAt: payload.attemptedAt ?? null,
+        rejected: payload.rejected ?? false,
+        pool: result.pool ?? null,
+      };
+    });
   }
   async function ensure() {
     if (await installationInMaintenance(database)) return { ready: [], refused: [] };
     const sql = database.coordination();
     const db = drizzleTransaction(sql);
     const capacityIdentity = (nodeUID: string) =>
-      and(eq(substrateWorkerCapacity.owner, owner), eq(substrateWorkerCapacity.nodeUid, nodeUID));
+      and(
+        eq(operation.kind, WORKER_CAPACITY_KIND),
+        eq(operation.scopeType, WORKER_CAPACITY_SCOPE_TYPE),
+        eq(operation.scopeId, `${owner}:${nodeUID}`),
+      );
     let locked = false;
     try {
       // Share the installation's existing worker-create admission lock. K8s
@@ -131,13 +164,20 @@ export function createSubstrateCapacity(
       const ready: Array<{ cpuMilli: number; memoryMiB: number }> = [];
       const [installed] = await db
         .select({
-          intent: query<InstallationIntent>`${substrateCapacityInstallation.intent}`,
+          payload: operation.payload,
         })
-        .from(substrateCapacityInstallation)
-        .where(eq(substrateCapacityInstallation.owner, owner));
-      let original = installed?.intent;
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, CAPACITY_INSTALLATION_KIND),
+            eq(operation.scopeType, CAPACITY_INSTALLATION_SCOPE_TYPE),
+            eq(operation.scopeId, owner),
+          ),
+        );
+      let original = installed ? (installed.payload as InstallationPayload).intent : undefined;
       const originalNode = nativeCapacityOriginalNode(nodesInput, base, architecture);
-      if (!original && originalNode && base.status?.readyReplicas === 1) {
+      const baseReadyReplicas = nativeCapacityReadyReplicas(base);
+      if (!original && originalNode && baseReadyReplicas >= 1) {
         original = {
           database: config.database,
           selector,
@@ -150,7 +190,23 @@ export function createSubstrateCapacity(
           },
           node: originalNode,
         };
-        await db.insert(substrateCapacityInstallation).values({ owner, intent: original });
+        if (
+          !/^[a-f0-9]{32}$/.test(owner) ||
+          original.database !== currentDatabase.name ||
+          !original.base.uid ||
+          !original.node.uid ||
+          !original.sandboxUID
+        )
+          throw new Error("Native capacity requires its observed installation identity");
+        await db.insert(operation).values({
+          id: crypto.randomUUID(),
+          kind: CAPACITY_INSTALLATION_KIND,
+          scopeType: CAPACITY_INSTALLATION_SCOPE_TYPE,
+          scopeId: owner,
+          idempotencyKey: `${CAPACITY_INSTALLATION_KIND}:${owner}`,
+          state: "active",
+          payload: { owner, intent: original },
+        });
       }
       if (original) {
         if (
@@ -165,12 +221,21 @@ export function createSubstrateCapacity(
         )
           throw new Error("Native capacity profile or original installation identity changed");
         if (
-          base.status?.readyReplicas === 1 &&
+          baseReadyReplicas >= 1 &&
           base.spec.template.nodeSelector["kubernetes.io/hostname"] === original.node.hostname &&
           nativeCapacityAdmittedNodeReady(nodesInput, original.node) &&
           isDeepStrictEqual(nativeCapacityReservedPoolResources(base), original.node.resources)
-        )
-          ready.push(original.node.resources);
+        ) {
+          for (let slot = 0; slot < baseReadyReplicas; slot++) ready.push(original.node.resources);
+        }
+      } else if (
+        baseReadyReplicas >= 1 &&
+        !base.spec.template.nodeSelector["kubernetes.io/hostname"]
+      ) {
+        const baseResources = nativeCapacityReservedPoolResources(base);
+        if (baseResources) {
+          for (let slot = 0; slot < baseReadyReplicas; slot++) ready.push(baseResources);
+        }
       }
       for (const row of saved) {
         if (
@@ -200,14 +265,27 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await db
-            .update(substrateWorkerCapacity)
-            .set({ pool: { uid: observed.metadata.uid } })
-            .where(capacityIdentity(row.nodeUID));
+            .update(operation)
+            .set({
+              result: { pool: { uid: observed.metadata.uid } },
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                capacityIdentity(row.nodeUID),
+                query`(${operation.payload}->>'attemptedAt') IS NOT NULL`,
+                isNull(operation.result),
+              ),
+            );
+        const observedReadyReplicas = nativeCapacityReadyReplicas(observed);
         if (
-          observed.status?.readyReplicas === 1 &&
+          observedReadyReplicas >= 1 &&
           nativeCapacityAdmittedNodeReady(nodesInput, row.intent.node)
-        )
-          ready.push(row.intent.node.resources);
+        ) {
+          for (let slot = 0; slot < observedReadyReplicas; slot++) {
+            ready.push(row.intent.node.resources);
+          }
+        }
       }
       // Existing pools keep their admitted budgets. Only never-dispatched node
       // intents participate in fresh node/Pod resource admission again.
@@ -253,7 +331,21 @@ export function createSubstrateCapacity(
             node,
             pool: renderNativeCapacityPool(base, node, selector, crypto.randomUUID()),
           };
-          await db.insert(substrateWorkerCapacity).values({ owner, nodeUid: node.uid, intent });
+          await db.insert(operation).values({
+            id: crypto.randomUUID(),
+            kind: WORKER_CAPACITY_KIND,
+            scopeType: WORKER_CAPACITY_SCOPE_TYPE,
+            scopeId: `${owner}:${node.uid}`,
+            idempotencyKey: `${WORKER_CAPACITY_KIND}:${owner}:${node.uid}`,
+            state: "active",
+            payload: {
+              owner,
+              nodeUid: node.uid,
+              intent,
+              attemptedAt: null,
+              rejected: false,
+            },
+          });
           row = { nodeUID: node.uid, intent, attemptedAt: null, rejected: false, pool: null };
         }
         if (row.rejected)
@@ -267,18 +359,31 @@ export function createSubstrateCapacity(
           await sql`BEGIN`;
           try {
             const [maintenance] = await db
-              .select({ enabled: installationMaintenance.enabled })
-              .from(installationMaintenance)
-              .where(eq(installationMaintenance.singleton, true))
+              .select({ state: operation.state })
+              .from(operation)
+              .where(
+                and(
+                  eq(operation.kind, "installation.maintenance"),
+                  eq(operation.idempotencyKey, "installation.maintenance:singleton"),
+                ),
+              )
               .for("share");
             if (!maintenance) throw new Error("Installation maintenance state is unavailable");
-            if (maintenance.enabled) return { ready: [], refused: discovered.refused };
+            if (maintenance.state === "enabled") return { ready: [], refused: discovered.refused };
             const [dispatch] = await database.db
-              .update(substrateWorkerCapacity)
-              .set({ attemptedAt: query`now()` })
-              .where(and(capacityIdentity(node.uid), isNull(substrateWorkerCapacity.attemptedAt)))
+              .update(operation)
+              .set({
+                payload: query`${operation.payload} || jsonb_build_object('attemptedAt', now()::text)`,
+                updatedAt: query`now()`,
+              })
+              .where(
+                and(
+                  capacityIdentity(node.uid),
+                  query`(${operation.payload}->>'attemptedAt') IS NULL`,
+                ),
+              )
               .returning({
-                attemptedAt: query<string>`${substrateWorkerCapacity.attemptedAt}::text`,
+                attemptedAt: query<string>`${operation.payload}->>'attemptedAt'`,
               });
             if (!dispatch) throw new Error("Original native capacity dispatch is unsettled");
             row.attemptedAt = dispatch.attemptedAt;
@@ -289,8 +394,11 @@ export function createSubstrateCapacity(
             if (result.exitCode !== 0) {
               if (/AlreadyExists|Forbidden|Unauthorized|Invalid/.test(result.stderr))
                 await database.db
-                  .update(substrateWorkerCapacity)
-                  .set({ rejected: true })
+                  .update(operation)
+                  .set({
+                    payload: query`${operation.payload} || jsonb_build_object('rejected', true)`,
+                    updatedAt: query`now()`,
+                  })
                   .where(capacityIdentity(node.uid));
               throw new Error(
                 "Native capacity creation outcome is unconfirmed; original names and intent retained",
@@ -299,9 +407,18 @@ export function createSubstrateCapacity(
             actual = JSON.parse(result.stdout);
             const confirmed = requireNativeCapacityPool(actual, row.intent.pool, row.attemptedAt);
             await database.db
-              .update(substrateWorkerCapacity)
-              .set({ pool: { uid: confirmed.metadata.uid } })
-              .where(capacityIdentity(node.uid));
+              .update(operation)
+              .set({
+                result: { pool: { uid: confirmed.metadata.uid } },
+                updatedAt: query`now()`,
+              })
+              .where(
+                and(
+                  capacityIdentity(node.uid),
+                  query`(${operation.payload}->>'attemptedAt') IS NOT NULL`,
+                  isNull(operation.result),
+                ),
+              );
             row.pool = { uid: confirmed.metadata.uid };
           } finally {
             await sql`ROLLBACK`;
@@ -319,12 +436,34 @@ export function createSubstrateCapacity(
         );
         if (!row.pool)
           await db
-            .update(substrateWorkerCapacity)
-            .set({ pool: { uid: observed.metadata.uid } })
-            .where(capacityIdentity(node.uid));
-        if (observed.status?.readyReplicas === 1) ready.push(row.intent.node.resources);
+            .update(operation)
+            .set({
+              result: { pool: { uid: observed.metadata.uid } },
+              updatedAt: query`now()`,
+            })
+            .where(
+              and(
+                capacityIdentity(node.uid),
+                query`(${operation.payload}->>'attemptedAt') IS NOT NULL`,
+                isNull(operation.result),
+              ),
+            );
+        const createdReadyReplicas = nativeCapacityReadyReplicas(observed);
+        for (let slot = 0; slot < createdReadyReplicas; slot++) {
+          ready.push(row.intent.node.resources);
+        }
       }
       return { ready, refused: discovered.refused };
+    } catch (cause) {
+      if (cause instanceof z.ZodError) {
+        const firstPath = cause.issues[0]?.path.join(".");
+        throw new CommandError(
+          "unavailable",
+          `Native worker capacity observation returned an unexpected cluster format${firstPath ? ` (${firstPath})` : ""}. No new runtime was started.`,
+          { cause },
+        );
+      }
+      throw cause;
     } finally {
       try {
         if (locked) await sql`SELECT pg_advisory_unlock(hashtext('factory-substrate-capacity'))`;

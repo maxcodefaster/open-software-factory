@@ -1,9 +1,6 @@
 import type { SessionLogOutput } from "@opencode/client";
 import { z } from "zod";
-import {
-  type UsageCounters,
-  unknownCounters,
-} from "../../../../packages/conversation-domain/src/usage";
+import { type UsageCounters, unknownCounters } from "#conversation-domain/usage";
 import type { UsageEntry } from "./journal";
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

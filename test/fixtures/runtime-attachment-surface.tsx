@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
-import { MarkdownReader } from "../../apps/factory/src/markdown-reader";
+import { MarkdownReader } from "../../apps/factory/src/editor/markdown-reader";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { RuntimeWorkspace, RuntimeWorkspaceTabs } from "../../apps/factory/src/runtime-workspace";
 import "../../apps/factory/src/tokens.css";
@@ -8,7 +8,7 @@ import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/runtime-workspace.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
-import { type RuntimeAttempt } from "../../apps/factory/src/runtime/contracts";
+import type { RuntimeAttempt } from "../../apps/factory/src/runtime/contracts";
 import type { WorkspaceTab } from "../../apps/factory/src/workspace-tabs";
 import { fixtureValue } from "./value";
 

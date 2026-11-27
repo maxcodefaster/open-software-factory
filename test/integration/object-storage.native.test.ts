@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseAllDocuments } from "yaml";
+import { runCommand } from "#runtime-kubernetes/command";
 import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
 import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
 import { createPrivateObjects, objectDigest } from "../../apps/factory/src/storage/objects";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
 import { fixtureValue } from "../fixtures/value";
@@ -208,7 +208,8 @@ test("the chart-owned bucket retains attachments and ranged QA media through rep
     const video = new TextEncoder().encode("Retained QA recording with native byte ranges.");
     await media.publish(recordingID, video, 2000);
     const [storage] = await f.database.client<{ id: string }[]>`
-      SELECT id FROM factory.attachment_storage WHERE singleton`;
+      SELECT id FROM factory.operation
+      WHERE kind='attachment.storage' AND idempotency_key='attachment.storage:singleton'`;
     const videoKey = `factory-review/${fixtureValue(storage, "storage").id}/${recordingID}`;
     const endpoint = fixtureValue(
       process.env["FACTORY_OBJECT_S3_ENDPOINT"],

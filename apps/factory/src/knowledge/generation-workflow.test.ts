@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
+import type { WikiPageSnapshot } from "#knowledge-domain/generation";
 import { knownModelRejection } from "../models/execution-policy";
+import { overviewHardLimit } from "./generation-prompts";
 import { generateWiki } from "./generation-workflow";
 import { WikiPublicationConflict } from "./publication";
 
@@ -342,7 +343,7 @@ test.each([
                           : scenario === "verbose-overview" &&
                               !prompt.issues?.length &&
                               prompt.topic.slug === "overview"
-                            ? "x".repeat(1501)
+                            ? "x".repeat(overviewHardLimit + 1)
                             : !prompt.issues?.length && prompt.topic.slug === "overview"
                               ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
                               : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,

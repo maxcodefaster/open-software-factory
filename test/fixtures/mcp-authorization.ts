@@ -1,8 +1,55 @@
-import { factoryMCPResource } from "../../packages/auth/src/mcp-registration";
+import type { OAuthClientProvider, StoredOAuthTokens } from "@modelcontextprotocol/client";
+import { factoryMCPResource } from "#auth/mcp-registration";
+
+const callback = "http://127.0.0.1:39999/owned-mcp-callback";
+
+// The SDK owns discovery, refresh and its authenticated retry. Keep only the
+// already approved fixture registration/tokens here; never silently re-consent.
+export function ownedMCPAuthProvider(grant: {
+  clientID: string;
+  accessToken: string;
+  refreshToken: string;
+  issuer: string;
+}): OAuthClientProvider {
+  let tokens: StoredOAuthTokens = {
+    access_token: grant.accessToken,
+    refresh_token: grant.refreshToken,
+    token_type: "Bearer",
+    issuer: grant.issuer,
+  };
+  const explicitAuthorization = () => {
+    throw new Error("Owned MCP authorization needs a new explicit consent");
+  };
+  return {
+    redirectUrl: callback,
+    clientMetadata: {
+      client_name: "Owned MCP proof",
+      redirect_uris: [callback],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+    },
+    clientInformation: () => ({
+      client_id: grant.clientID,
+      token_endpoint_auth_method: "none",
+      issuer: grant.issuer,
+    }),
+    tokens: () => tokens,
+    saveTokens: (next) => {
+      tokens = next;
+    },
+    redirectToAuthorization: explicitAuthorization,
+    saveCodeVerifier: explicitAuthorization,
+    codeVerifier: explicitAuthorization,
+  };
+}
 
 /** An explicit OAuth grant in a separately owned installation, never a copied personal login. */
 export async function ownedMCPAuthorization(base: string, cookie: string, work = true) {
-  const callback = "http://127.0.0.1:39999/owned-mcp-callback";
+  const discovery = await fetch(`${base}/.well-known/oauth-authorization-server/api/auth`);
+  if (!discovery.ok) throw new Error(`Owned MCP issuer discovery failed: ${discovery.status}`);
+  const { issuer } = (await discovery.json()) as { issuer?: unknown };
+  if (typeof issuer !== "string" || issuer !== `${base.replace(/\/$/, "")}/api/auth`)
+    throw new Error("Owned MCP issuer differs from this Factory");
   const registration = await fetch(`${base}/api/auth/mcp/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -67,5 +114,6 @@ export async function ownedMCPAuthorization(base: string, cookie: string, work =
     clientID: registered.client_id,
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
+    issuer,
   };
 }

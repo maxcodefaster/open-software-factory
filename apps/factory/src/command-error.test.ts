@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CommandError,
+  type CommandErrorReason,
+  genericFailure,
+  isUnreachable,
+  plainErrorFor,
   plainErrorMessage,
   plainFailureMessage,
   unreachableMessage,
@@ -153,5 +158,144 @@ describe("plainFailureMessage for stored failures", () => {
     const quoted =
       "Prerequisites must be delivered before implementation: Fix network error 429 overloaded";
     expect(plainErrorMessage(quoted)).toBe(quoted);
+  });
+});
+
+describe("CommandError typed reasons and plainErrorFor", () => {
+  const expectedByReason: Record<CommandErrorReason, string> = {
+    "rate-limited":
+      "The model provider is limiting requests right now. Wait a minute, then retry. Retained work is kept.",
+    "provider-auth":
+      "The model provider rejected Factory's credentials. Ask a System Manager to check the model connection, then retry. Retained work is kept.",
+    "provider-quota":
+      "The model provider reports that the account has no quota left. Ask a System Manager to check the provider account, then retry. Retained work is kept.",
+    "context-too-long":
+      "This conversation is too long for the model. Start a new conversation or shorten the request. Retained work is kept.",
+    "provider-unavailable":
+      "The model provider is temporarily unavailable. Wait a minute, then retry. Retained work is kept.",
+    "provider-network":
+      "Factory lost its connection to the model provider. Wait a minute, then retry. Retained work is kept.",
+    "coding-allowance":
+      "The Coding allowance is used up. Your code is kept. Resume after the allowance resets or is raised.",
+    "stale-request": "This request no longer matches what was saved. Reload and try again.",
+    "work-changed":
+      "The work changed while this was running. Check its current status, then try again.",
+    "namespace-collision":
+      "Two connected tools have the same name. Disable one of them in Settings.",
+    "database-state":
+      "Factory could not confirm its saved state. Check the current status before starting another action.",
+    unreachable: unreachableMessage,
+  };
+
+  test("preserves backward-compatible two-argument CommandError construction", () => {
+    const cases = [
+      ["invalid", 400],
+      ["conflict", 409],
+      ["not-found", 404],
+      ["unavailable", 503],
+      ["forbidden", 403],
+    ] as const;
+    for (const [code, status] of cases) {
+      const error = new CommandError(code, "Something went wrong.");
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(CommandError);
+      expect(error.name).toBe("CommandError");
+      expect(error.code).toBe(code);
+      expect(error.status).toBe(status);
+      expect(error.message).toBe("Something went wrong.");
+      expect(error.reason).toBeUndefined();
+      expect(error.cause).toBeUndefined();
+    }
+  });
+
+  test("records optional reason and cause on CommandError", () => {
+    const inner = new Error("socket closed");
+    const error = new CommandError("unavailable", "upstream disconnected", {
+      reason: "provider-network",
+      cause: inner,
+    });
+    expect(error.code).toBe("unavailable");
+    expect(error.status).toBe(503);
+    expect(error.message).toBe("upstream disconnected");
+    expect(error.reason).toBe("provider-network");
+    expect(error.cause).toBe(inner);
+  });
+
+  test("treats CommandError with unreachable reason as unreachable for retries", async () => {
+    const error = new CommandError("unavailable", "gateway timeout", { reason: "unreachable" });
+    expect(isUnreachable(error)).toBe(true);
+    expect(
+      isUnreachable(new CommandError("unavailable", "rate limit", { reason: "rate-limited" })),
+    ).toBe(false);
+
+    let calls = 0;
+    const result = await untilReachable(
+      async () => {
+        calls += 1;
+        if (calls < 2) throw error;
+        return "recovered";
+      },
+      1_000,
+      1,
+    );
+    expect(result).toBe("recovered");
+    expect(calls).toBe(2);
+  });
+
+  test("maps every CommandErrorReason directly via lookup table before regex rules", () => {
+    const reasons = Object.keys(expectedByReason) as CommandErrorReason[];
+    for (const reason of reasons) {
+      const expected = expectedByReason[reason];
+      // Raw message deliberately resembles a different error category to verify reason wins first.
+      const conflictingRaw =
+        reason === "database-state"
+          ? "Failed to fetch"
+          : 'Failed query: select "secret" from "tokens"';
+      const error = new CommandError("unavailable", conflictingRaw, { reason });
+
+      expect(plainErrorFor(error)).toBe(expected);
+      expect(plainErrorMessage(conflictingRaw, reason)).toBe(expected);
+      expect(plainFailureMessage(conflictingRaw, reason)).toBe(expected);
+    }
+  });
+
+  test("plainErrorFor falls back to plainErrorMessage when CommandError has no reason", () => {
+    expect(
+      plainErrorFor(new CommandError("conflict", "Build authority changed before dispatch")),
+    ).toBe(expectedByReason["work-changed"]);
+    expect(
+      plainErrorFor(new CommandError("invalid", "Name is already used in this Project.")),
+    ).toBe("Name is already used in this Project.");
+
+    const quoted =
+      "Prerequisites must be delivered before implementation: Fix network error 429 overloaded";
+    expect(plainErrorFor(new CommandError("conflict", quoted))).toBe(quoted);
+  });
+
+  test("plainErrorFor handles plain Errors, strings, and unknown values", () => {
+    expect(plainErrorFor(new TypeError("Failed to fetch"))).toBe(unreachableMessage);
+    expect(plainErrorFor(new Error("TypeError: x is undefined"))).toBe(genericFailure);
+    expect(plainErrorFor(new Error("Failed query: select 1"))).toBe(
+      expectedByReason["database-state"],
+    );
+    expect(plainErrorFor(new Error("This Runtime Attempt is not connected."))).toBe(
+      "This Sandbox is not connected.",
+    );
+    expect(plainErrorFor("Failed to fetch")).toBe(unreachableMessage);
+    expect(plainErrorFor("Name is already used.")).toBe("Name is already used.");
+
+    for (const blank of [
+      new CommandError("unavailable", ""),
+      new CommandError("unavailable", "   "),
+      new Error(""),
+      "",
+      "   ",
+      null,
+      undefined,
+      42,
+      { message: "ignored object" },
+    ]) {
+      expect(plainErrorFor(blank)).toBe(genericFailure);
+    }
   });
 });

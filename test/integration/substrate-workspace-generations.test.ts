@@ -2,6 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import {
   substrateWorkspaceGrantIn,
@@ -17,13 +23,8 @@ import {
   createSubstrateSources,
   type SubstrateSourceHandoff,
 } from "../../apps/factory/src/workspace/substrate-source";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
-import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { eventually } from "../fixtures/factory-process";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
@@ -90,6 +91,9 @@ async function proveGenerations(kind: "personal" | "ticket") {
     }
   >();
   f.hub.sourceConnected = () => true;
+  f.hub.childOperation = async (_attemptID, input) => {
+    expect(input["action"]).toBe("source-drain");
+  };
   f.hub.parentOperation = async () => ({});
   f.hub.request = async (_attempt, _channel, request, path) => {
     if (path.endsWith("/checkpoint")) return Response.json(bundle());
@@ -107,7 +111,9 @@ async function proveGenerations(kind: "personal" | "ticket") {
         await sql`UPDATE factory.substrate_source SET owner='service',writer_epoch=writer_epoch+1,
           writable=true,service_base=checkpoint_id,checkpoint_id=NULL WHERE workspace_id=${workspaceID}`;
     },
-    resume: source.resume,
+    // commitColdRestore below simulates the initial/successor service export.
+    // This generation contract must not start a host Source subprocess.
+    async resume() {},
     async requireIndependent(workspaceID, actorUID, sql) {
       const row = await source.lease(workspaceID, sql);
       if (
@@ -122,8 +128,8 @@ async function proveGenerations(kind: "personal" | "ticket") {
   };
   async function commitColdRestore(actorUID: string) {
     const [attempt] = await f.database.client<{ id: string; generation: number }[]>`
-      SELECT a.id,a.generation::float8 AS generation FROM factory.runtime_attempt a
-      JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE b.actor_uid=${actorUID}`;
+      SELECT id,generation::float8 AS generation FROM factory.runtime_attempt
+      WHERE actor_uid=${actorUID}`;
     const previous = await source.lease(f.workspaceID);
     if (!attempt || !previous) throw new Error("Controlled Source recipient is missing");
     expect(previous).toMatchObject({ owner: "service", writable: true });
@@ -310,17 +316,20 @@ async function proveGenerations(kind: "personal" | "ticket") {
           await recordSubmission(submitted, 3);
         }
         return {
-          version: 1,
-          primaryApp: "web",
-          apps: [
-            {
-              id: "web",
-              label: "Owned",
-              command: ["node", "server.mjs"],
-              port: 4300,
-              healthPath: "/",
-            },
-          ],
+          actorTemplate: nativeProjectTemplate,
+          systemContract: {
+            version: 1,
+            primaryApp: "web",
+            apps: [
+              {
+                id: "web",
+                label: "Owned",
+                command: ["node", "server.mjs"],
+                port: 4300,
+                healthPath: "/",
+              },
+            ],
+          },
         };
       },
       sources,
@@ -359,7 +368,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
       ).toBe(submitted);
     }
     const original = await f.database
-      .client`SELECT row_to_json(b) AS binding FROM factory.substrate_binding b WHERE runtime_attempt_id=${firstID}`;
+      .client`SELECT row_to_json(a) AS binding FROM factory.runtime_attempt a WHERE id=${firstID}`;
     independent = false;
     await expect(start()).rejects.toThrow("independent Source");
     expect(creates).toHaveLength(5);
@@ -389,7 +398,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
       expect(creates).toHaveLength(5);
       expect(
         await f.database
-          .client`SELECT generation FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=2`,
+          .client`SELECT generation FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace' AND generation=2`,
       ).toHaveLength(0);
     }
     loseCreate = true;
@@ -413,8 +422,18 @@ async function proveGenerations(kind: "personal" | "ticket") {
           ...extra,
         },
       });
+    const retainedLease = await source.lease(f.workspaceID);
     const restored = await source.restoreEndpoint(request(), secondID);
-    expect(restored.status).toBe(409);
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({
+      version: 2,
+      retained: true,
+      actorUID: newUID,
+      writerEpoch: retainedLease?.writerEpoch,
+      readOnly: false,
+      checkpoint: null,
+    });
+    expect(await source.lease(f.workspaceID)).toEqual(retainedLease);
     const restore = restoredSources.get(secondID);
     if (!restore) throw new Error("Controlled cold import was not committed");
     expect(restore.actorUID).toBe(newUID);
@@ -428,7 +447,7 @@ async function proveGenerations(kind: "personal" | "ticket") {
     expect((await source.restoreEndpoint(request(), firstID)).status).toBe(403);
     expect(
       await f.database
-        .client`SELECT row_to_json(b) AS binding FROM factory.substrate_binding b WHERE runtime_attempt_id=${firstID}`,
+        .client`SELECT row_to_json(a) AS binding FROM factory.runtime_attempt a WHERE id=${firstID}`,
     ).toEqual(original);
     const revision = kind === "ticket" ? submitted : base;
     const attempts = await f.database
@@ -466,13 +485,13 @@ async function proveGenerations(kind: "personal" | "ticket") {
     const successor = (
       await f.database.client<
         { intent: { revision: string } }[]
-      >`SELECT intent FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=2`
+      >`SELECT intent FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace' AND generation=2`
     )[0]?.intent;
     expect(successor?.revision).toBe(revision);
     expect([
       ...(await f.database.client<{ generation: string; hosts: string[] }[]>`
         SELECT generation,intent#>'{configuration,egressHosts}' AS hosts
-        FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}
+        FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'
         ORDER BY generation`),
     ]).toEqual([
       { generation: "1", hosts: [] },
@@ -480,13 +499,13 @@ async function proveGenerations(kind: "personal" | "ticket") {
     ]);
     expect((await first.get()).state).toBe("deleted");
     const provisions = await f.database
-      .client`SELECT generation FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} ORDER BY generation`;
+      .client`SELECT generation FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace' ORDER BY generation`;
     expect([...provisions]).toEqual([{ generation: "1" }, { generation: "2" }]);
     await expect(
       Promise.resolve(f.database.client`
-      INSERT INTO factory.substrate_workspace(workspace_id,generation,intent)
-      SELECT workspace_id,3,intent FROM factory.substrate_workspace
-      WHERE workspace_id=${f.workspaceID} AND generation=2`),
+      INSERT INTO factory.substrate_provision(owner_id,kind,generation,intent)
+      SELECT owner_id,'workspace',3,intent FROM factory.substrate_provision
+      WHERE owner_id=${f.workspaceID} AND kind='workspace' AND generation=2`),
     ).rejects.toThrow("exact cleanup and independent Source");
     const lease = await source.lease(f.workspaceID);
     await expect(
@@ -519,13 +538,13 @@ test("a human Ticket Start rechecks a concurrent Agent Stop after the existing C
   let locked = false;
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,
-        state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        state,parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent)
         VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},
-          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
+          'create-intended',${"b".repeat(64)},now(),${f.userID},
+          ${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.change_writer SET state='human',epoch=2,user_id=${f.userID} WHERE change_id=${f.changeID}`;

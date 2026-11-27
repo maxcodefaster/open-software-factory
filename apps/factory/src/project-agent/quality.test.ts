@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
-import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
-import { createDatabase } from "../../../../packages/db/src/client";
+import type { ProjectAgentOutput } from "#conversation-domain/conversation";
+import { createDatabase } from "#db/client";
 import {
   verifyExportPrerequisite,
   verifyProfilePlacement,
   verifyReadOnlyProfile,
 } from "../../../../test/support/project-agent-quality";
+import type { ConversationEntry } from "../conversations/store";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { installationPlanningConnection } from "../models/resolver";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
-import type { ConversationEntry } from "../conversations/store";
 
 // Explicit opt-in. Controlled source facts, real admitted provider configuration,
 // no mutations to retained Tickets, no LLM grader and no automatic paid retries.

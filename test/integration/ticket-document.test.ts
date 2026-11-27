@@ -1,13 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { drizzleTransaction } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { createPlanningTicketIn, insertInitialTicketIn } from "#ticket-authoring/authoring";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
-import { drizzleTransaction } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import {
-  createPlanningTicketIn,
-  insertInitialTicketIn,
-} from "../../packages/ticket-authoring/src/authoring";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -375,15 +372,20 @@ test.each([false, true])(
           sourceRevisionID: string;
         }>
       >`
-      SELECT follow.source_ticket_id AS "sourceID", ticket.project_id AS "projectID",
-        follow.source_document_id AS "sourceDocumentID",follow.source_revision_id AS "sourceRevisionID",
+      SELECT (follow.payload->>'sourceTicketId')::uuid AS "sourceID", ticket.project_id AS "projectID",
+        (follow.payload->>'sourceDocumentId')::uuid AS "sourceDocumentID",
+        (follow.payload->>'sourceRevisionId')::uuid AS "sourceRevisionID",
         ticket.title,ticket.description,revision.canonical_content AS canonical,revision.content_digest AS digest,
         revision.ordinal,revision.created_by AS "createdBy",
         (SELECT count(*)::integer FROM factory.requirement_approval WHERE ticket_id = ticket.id) AS approved,
         (SELECT count(*)::integer FROM factory.change WHERE ticket_id = ticket.id) AS changes,
         (SELECT count(*)::integer FROM factory.requirement_revision WHERE ticket_id = ticket.id) AS revisions,
         (SELECT count(*)::integer FROM factory.ticket_document_revision WHERE ticket_id = ticket.id) AS documents
-      FROM factory.ticket ticket JOIN factory.ticket_follow_up follow ON follow.ticket_id = ticket.id
+      FROM factory.ticket ticket
+      JOIN factory.audit_event follow
+        ON follow.kind = 'tickets.follow_up'
+        AND follow.scope_type = 'ticket'
+        AND follow.scope_id = ticket.id::text
       JOIN factory.requirement_revision revision ON revision.ticket_id=ticket.id WHERE ticket.id = ${first.ticketId}`;
       const [original] = await db.client<{ canonical: string }[]>`
       SELECT canonical_content AS canonical FROM factory.requirement_revision WHERE id=${owned.revisionID}`;

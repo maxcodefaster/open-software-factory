@@ -1,8 +1,8 @@
 import { and, asc, eq, inArray, isNotNull, notExists, or, sql } from "drizzle-orm";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { implementationOrder, ticket } from "../../../../packages/db/src/schema";
-import { type createAgentController } from "../agent/api";
+import type { CodingReasoning } from "#conversation-domain/model-settings";
+import type { createDatabase } from "#db/client";
+import { operation, ticket } from "#db/schema";
+import type { createAgentController } from "../agent/api";
 import { CommandError } from "../command-error";
 import type { createChangeController } from "./controller";
 
@@ -25,13 +25,21 @@ export function createImplementationOrders(
       try {
         const db = database.db;
         await db
-          .update(implementationOrder)
-          .set({ state: "cancelled", cancelledAt: sql<Date>`now()`, updatedAt: sql<Date>`now()` })
+          .update(operation)
+          .set({
+            state: "cancelled",
+            activeKey: null,
+            completedAt: sql<Date>`now()`,
+            payload: sql`${operation.payload} || jsonb_build_object('cancelledAt', to_jsonb(now()))`,
+            updatedAt: sql<Date>`now()`,
+          })
           .from(ticket)
           .where(
             and(
-              eq(ticket.id, implementationOrder.ticketId),
-              eq(implementationOrder.state, "waiting"),
+              eq(operation.kind, "tickets.implementation_order"),
+              eq(operation.scopeType, "ticket"),
+              eq(sql`${ticket.id}::text`, operation.scopeId),
+              eq(operation.state, "waiting"),
               or(
                 isNotNull(ticket.trashedAt),
                 inArray(ticket.state, ["cancelled", "done"]),
@@ -41,29 +49,33 @@ export function createImplementationOrders(
           );
         const orders = await db
           .select({
-            commandID: implementationOrder.commandId,
-            ticketID: implementationOrder.ticketId,
-            userID: implementationOrder.createdBy,
-            revisionID: implementationOrder.requirementRevisionId,
-            technicalID: implementationOrder.technicalDesignRevisionId,
-            reasoning: sql<CodingReasoning | null>`${implementationOrder.codingReasoning}`,
+            commandID: operation.id,
+            ticketID: sql<string>`(${operation.scopeId})::uuid`,
+            userID: sql<string>`coalesce(${operation.createdBy}, (${operation.payload}->>'createdBy')::uuid)`,
+            revisionID: sql<string>`(${operation.payload}->>'requirementRevisionId')::uuid`,
+            technicalID: sql<
+              string | null
+            >`(${operation.payload}->>'technicalDesignRevisionId')::uuid`,
+            reasoning: sql<CodingReasoning | null>`${operation.payload}->>'codingReasoning'`,
           })
-          .from(implementationOrder)
+          .from(operation)
           .where(
             and(
-              eq(implementationOrder.state, "waiting"),
+              eq(operation.kind, "tickets.implementation_order"),
+              eq(operation.scopeType, "ticket"),
+              eq(operation.state, "waiting"),
               notExists(
                 // The existing native routine owns the prerequisite Delivery predicate.
                 db
                   .select({ delivered: sql<boolean>`prerequisite.delivered` })
                   .from(
-                    sql`factory.ticket_prerequisites(${implementationOrder.projectId},${implementationOrder.ticketId}) AS prerequisite`,
+                    sql`factory.ticket_prerequisites((${operation.payload}->>'projectId')::uuid,(${operation.scopeId})::uuid) AS prerequisite`,
                   )
                   .where(sql<boolean>`NOT prerequisite.delivered`),
               ),
             ),
           )
-          .orderBy(asc(implementationOrder.createdAt), asc(implementationOrder.commandId))
+          .orderBy(asc(operation.createdAt), asc(operation.id))
           .limit(32);
         for (const order of orders) {
           try {
@@ -82,35 +94,44 @@ export function createImplementationOrders(
                 ),
             });
           } catch (cause) {
-            if (cause instanceof CommandError)
+            if (cause instanceof CommandError) {
+              const message = cause.message.slice(0, 2000);
               await db
-                .update(implementationOrder)
+                .update(operation)
                 .set({
                   state: "blocked",
-                  lastError: cause.message.slice(0, 2000),
+                  activeKey: null,
+                  completedAt: sql<Date>`now()`,
+                  error: message,
+                  payload: sql`${operation.payload} || ${JSON.stringify({ lastError: message })}::jsonb`,
                   updatedAt: sql<Date>`now()`,
                 })
                 .where(
                   and(
-                    eq(implementationOrder.commandId, order.commandID),
-                    eq(implementationOrder.state, "waiting"),
+                    eq(operation.id, order.commandID),
+                    eq(operation.kind, "tickets.implementation_order"),
+                    eq(operation.state, "waiting"),
                   ),
                 );
-            else
+            } else {
+              const unconfirmed =
+                "Implementation start is unconfirmed. Factory will reconcile this retained order.";
               await db
-                .update(implementationOrder)
+                .update(operation)
                 .set({
-                  lastError:
-                    "Implementation start is unconfirmed. Factory will reconcile this retained order.",
+                  error: unconfirmed,
+                  payload: sql`${operation.payload} || ${JSON.stringify({ lastError: unconfirmed })}::jsonb`,
                   updatedAt: sql<Date>`now()`,
                 })
                 .where(
                   and(
-                    eq(implementationOrder.commandId, order.commandID),
-                    eq(implementationOrder.state, "waiting"),
-                    sql<boolean>`${implementationOrder.lastError} IS DISTINCT FROM 'Implementation start is unconfirmed. Factory will reconcile this retained order.'`,
+                    eq(operation.id, order.commandID),
+                    eq(operation.kind, "tickets.implementation_order"),
+                    eq(operation.state, "waiting"),
+                    sql<boolean>`${operation.error} IS DISTINCT FROM ${unconfirmed}`,
                   ),
                 );
+            }
             // External outcomes are recovered by the existing deterministic
             // Change/turn intents. Never invent another command on recovery.
           }

@@ -8,6 +8,8 @@ import {
   nativeCapacityCandidates,
   nativeCapacityNodeReady,
   nativeCapacityOriginalNode,
+  nativeCapacityPool,
+  nativeCapacityReadyReplicas,
   nativeCapacityReservedPoolResources,
   renderNativeCapacityPool,
   requireNativeCapacityBase,
@@ -305,4 +307,65 @@ test("native pool observations require exact create time, UID, labels, pin and r
       changed.metadata.annotations["factory.dev/creation-intent"] = crypto.randomUUID();
     expect(() => requireNativeCapacityPool(changed, intended, at, uid)).toThrow("creation intent");
   }
+});
+
+test("native WorkerPool parsing and ready replica accounting support 0, 1 and multi-replica pools", () => {
+  const f = nativeCapacityFixture();
+  const zeroPool = structuredClone(f.base);
+  zeroPool.spec.replicas = 0;
+  zeroPool.status = { readyReplicas: 1 };
+  const parsedZero = nativeCapacityPool.parse(zeroPool);
+  expect(parsedZero.spec.replicas).toBe(0);
+  expect(nativeCapacityReadyReplicas(parsedZero)).toBe(0);
+
+  const singlePool = structuredClone(f.base);
+  singlePool.spec.replicas = 1;
+  singlePool.status = { readyReplicas: 1 };
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(singlePool))).toBe(1);
+  singlePool.status = { readyReplicas: 0 };
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(singlePool))).toBe(0);
+
+  const multiPool = structuredClone(f.base);
+  multiPool.spec.replicas = 2;
+  multiPool.status = { readyReplicas: 2 };
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(multiPool))).toBe(2);
+  multiPool.status = { readyReplicas: 1 };
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(multiPool))).toBe(1);
+  multiPool.status = { readyReplicas: 3 };
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(multiPool))).toBe(2);
+  const withoutStatus = structuredClone(multiPool) as Record<string, unknown>;
+  withoutStatus["status"] = {};
+  expect(nativeCapacityReadyReplicas(nativeCapacityPool.parse(withoutStatus))).toBe(0);
+
+  const negativePool = structuredClone(f.base);
+  negativePool.spec.replicas = -1;
+  expect(nativeCapacityPool.safeParse(negativePool).success).toBe(false);
+
+  // Single 0-replica base pool parses gracefully and contributes 0 ready replicas.
+  const onlyZero = requireNativeCapacityBase({ items: [zeroPool] }, f.selector, "amd64");
+  expect(onlyZero.spec.replicas).toBe(0);
+  expect(nativeCapacityReadyReplicas(onlyZero)).toBe(0);
+
+  // A drained 0-replica companion pool does not block selecting the active multi-replica base pool.
+  const drainedCompanion = structuredClone(zeroPool);
+  drainedCompanion.metadata.name = "drained-worker";
+  drainedCompanion.metadata.uid = crypto.randomUUID();
+  const activeMulti = structuredClone(f.base);
+  activeMulti.spec.replicas = 2;
+  activeMulti.status = { readyReplicas: 2 };
+  const selected = requireNativeCapacityBase(
+    { items: [drainedCompanion, activeMulti] },
+    f.selector,
+    "amd64",
+  );
+  expect(selected.metadata.uid).toBe(activeMulti.metadata.uid);
+  expect(nativeCapacityReadyReplicas(selected)).toBe(2);
+
+  // Two active pools matching the same installation selector still fail admission.
+  const duplicateActive = structuredClone(f.base);
+  duplicateActive.metadata.name = "duplicate-worker";
+  duplicateActive.metadata.uid = crypto.randomUUID();
+  expect(() =>
+    requireNativeCapacityBase({ items: [activeMulti, duplicateActive] }, f.selector, "amd64"),
+  ).toThrow("one original admitted WorkerPool");
 });

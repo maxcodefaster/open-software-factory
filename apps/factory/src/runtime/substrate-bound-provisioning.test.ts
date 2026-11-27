@@ -1,13 +1,17 @@
 import { expect, test } from "bun:test";
-import { SubstrateRPCError } from "../../../../packages/runtime-kubernetes/src/substrate-control";
+import { SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
+import {
+  nativeProjectBootstrap,
+  nativeProjectDefinition,
+} from "../../../../test/fixtures/native-project";
 import { substrateTemplateSHA256 } from "./substrate";
 import {
   absentBoundNativeResource,
+  type BoundNativeProvisioningFacts,
   boundNativeCreateRejected,
   boundNativeProvisioningChecks,
   boundNativeProvisioningKinds,
   boundNativeProvisioningResource,
-  type BoundNativeProvisioningFacts,
   provisionBoundNativeResources,
 } from "./substrate-bound-provisioning";
 import { renderSubstrateTemplate } from "./substrate-template";
@@ -21,7 +25,8 @@ const template = renderSubstrateTemplate(
     workloadImage: `registry.test/native@sha256:${"a".repeat(64)}`,
     workerSelector: { "factory.dev/deployment": "owned" },
   },
-  { runtimeAttemptId: crypto.randomUUID() },
+  nativeProjectBootstrap({ assignment: { runtimeAttemptId: crypto.randomUUID() } }),
+  nativeProjectDefinition,
 );
 
 test.each(["lost-create", "lost-outcome"] as const)(
@@ -130,7 +135,7 @@ test.each(["lost-create", "lost-outcome"] as const)(
   },
 );
 
-test.each(["prebuild", "Verification", "isolated"] as const)(
+test.each(["Workspace", "Verification", "isolated"] as const)(
   "%s checks retain each bound resource's name, scope, dispatch time, UID and version",
   (label) => {
     const checks = boundNativeProvisioningChecks(

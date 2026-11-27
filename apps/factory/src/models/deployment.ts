@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
+import { modelProvider } from "#conversation-domain/model-connection";
 import { validateModelEndpoint } from "./native";
 
 // Deployment credentials remain server-only. Adoption uses the normal durable

@@ -1,7 +1,7 @@
-import { and, desc, eq, inArray, isNotNull, sql as query } from "drizzle-orm";
+import { and, desc, eq, inArray, sql as query } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
+import type { BuildBrowserResult } from "#conversation-domain/browser-tools";
 import {
   feedbackCreateInput,
   feedbackDispatchInput,
@@ -11,26 +11,26 @@ import {
   feedbackUpdateInput,
   pendingReviewThreads,
   visualReviewSchema,
-} from "../../../../packages/conversation-domain/src/visual-review";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+} from "#conversation-domain/visual-review";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
+  auditEvent,
   candidateReview,
+  change,
+  changeCommitOperation,
+  operation,
   reviewFeedback,
-  reviewFeedbackCommand,
-  reviewFeedbackMessage,
   reviewMedia,
-  reviewScenario,
   runtimeAttempt,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/authority";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { assertMessageAttachmentsIn, freezeFeedbackAttachmentsIn } from "../attachments/api";
 import { CommandError } from "../command-error";
+
+const FEEDBACK_MESSAGE_KIND = "review.feedback_message";
+const REVIEW_SCENARIO_KIND = "review.scenario";
 
 type Database = ReturnType<typeof createDatabase>;
 
@@ -47,17 +47,23 @@ async function feedbackIn(sql: DatabaseTransaction, changeID: string) {
         ELSE 'sent'
       END AS "correctionState",
       COALESCE((SELECT jsonb_agg(jsonb_build_object(
-        'id',message.id,'author',person.name,'body',message.body,'createdAt',message.created_at::text)
+        'id',message.id,'author',person.name,'body',message.payload->>'body','createdAt',message.created_at::text)
         ORDER BY message.created_at,message.id)
-        FROM factory.review_feedback_message message JOIN auth."user" person ON person.id=message.author_id
-        WHERE message.feedback_id=feedback.id),'[]'::jsonb) AS messages
+        FROM factory.audit_event message JOIN auth."user" person ON person.id=message.actor_id
+        WHERE message.kind='review.feedback_message' AND message.scope_type='review_feedback'
+          AND message.scope_id=feedback.id::text),'[]'::jsonb) AS messages
     FROM factory.review_feedback feedback JOIN auth."user" author ON author.id=feedback.author_id
     LEFT JOIN LATERAL (
       SELECT (entry->>'version')::int AS version,turn.state
-      FROM factory.review_feedback_command command
-      JOIN factory.agent_turn turn ON turn.id=command.turn_id
-      CROSS JOIN LATERAL jsonb_array_elements(COALESCE(command.input->'feedback','[]'::jsonb)) entry
-      WHERE command.change_id=feedback.change_id AND entry->>'id'=feedback.id::text
+      FROM factory.audit_event command
+      JOIN factory.agent_turn turn ON turn.id=(command.payload->>'turnId')::uuid
+      CROSS JOIN LATERAL jsonb_array_elements(COALESCE(command.payload->'input'->'feedback','[]'::jsonb)) entry
+      WHERE command.kind='review.feedback_command'
+        AND command.scope_type='feedback'
+        AND command.scope_id=feedback.change_id::text
+        AND command.payload->>'changeId'=feedback.change_id::text
+        AND command.payload->>'turnId' IS NOT NULL
+        AND entry->>'id'=feedback.id::text
       ORDER BY command.created_at DESC,command.id DESC LIMIT 1
     ) dispatch ON true
     WHERE feedback.change_id=${changeID} ORDER BY feedback.created_at,feedback.id`;
@@ -70,16 +76,31 @@ export async function reviewChangeIn(
   userID: string,
   write = false,
 ) {
-  const [change] = await sql<{ projectID: string; state: string; commitSHA: string }[]>`
-    SELECT project_id AS "projectID",state,COALESCE(
-      (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id
-        AND state='succeeded' ORDER BY sequence DESC LIMIT 1),base_sha) AS "commitSHA"
-    FROM factory.change WHERE id=${changeID} FOR UPDATE`;
-  if (!change) throw new CommandError("not-found", "Change not found");
-  await projectAuthorityIn(sql, userID, change.projectID);
-  if (write && !["active", "starting", "branch-pending"].includes(change.state))
+  const db = drizzleTransaction(sql);
+  const [current] = await db
+    .select({
+      projectID: change.projectId,
+      state: change.state,
+      commitSHA: query<string>`COALESCE((${db
+        .select({ commitSha: changeCommitOperation.commitSha })
+        .from(changeCommitOperation)
+        .where(
+          and(
+            eq(changeCommitOperation.changeId, change.id),
+            eq(changeCommitOperation.state, "succeeded"),
+          ),
+        )
+        .orderBy(desc(changeCommitOperation.sequence))
+        .limit(1)}), ${change.baseSha})`,
+    })
+    .from(change)
+    .where(eq(change.id, changeID))
+    .for("update");
+  if (!current) throw new CommandError("not-found", "Change not found");
+  await projectAuthorityIn(sql, userID, current.projectID);
+  if (write && !["active", "starting", "branch-pending"].includes(current.state))
     throw new CommandError("conflict", "Review feedback is read-only after Delivery starts");
-  return change;
+  return current;
 }
 
 export function createVisualReviewController(
@@ -98,22 +119,25 @@ export function createVisualReviewController(
       const db = drizzleTransaction(sql);
       const [previous] = await db
         .select({
-          feedbackId: reviewFeedbackCommand.feedbackId,
-          turnId: reviewFeedbackCommand.turnId,
+          feedbackId: query<string | null>`${auditEvent.payload}->>'feedbackId'`,
+          turnId: query<string | null>`${auditEvent.payload}->>'turnId'`,
         })
-        .from(reviewFeedbackCommand)
-        .where(eq(reviewFeedbackCommand.id, input.commandId));
+        .from(auditEvent)
+        .where(
+          and(eq(auditEvent.id, input.commandId), eq(auditEvent.kind, "review.feedback_command")),
+        );
       if (previous) {
         await reviewChangeIn(sql, changeID, userID);
         const [same] = await db
-          .select({ id: reviewFeedbackCommand.id })
-          .from(reviewFeedbackCommand)
+          .select({ id: auditEvent.id })
+          .from(auditEvent)
           .where(
             and(
-              eq(reviewFeedbackCommand.id, input.commandId),
-              eq(reviewFeedbackCommand.changeId, changeID),
-              eq(reviewFeedbackCommand.actorId, userID),
-              query`${reviewFeedbackCommand.input}=${JSON.stringify(input)}::jsonb`,
+              eq(auditEvent.id, input.commandId),
+              eq(auditEvent.kind, "review.feedback_command"),
+              eq(query<string>`${auditEvent.payload}->>'changeId'`, changeID),
+              eq(auditEvent.actorId, userID),
+              query`${auditEvent.payload}->'input'=${JSON.stringify(input)}::jsonb`,
             ),
           );
         if (!same) throw new CommandError("conflict", "Feedback command changed input");
@@ -121,13 +145,19 @@ export function createVisualReviewController(
       }
       await reviewChangeIn(sql, changeID, userID, true);
       const result = await work(sql);
-      await db.insert(reviewFeedbackCommand).values({
+      await db.insert(auditEvent).values({
         id: input.commandId,
-        changeId: changeID,
+        kind: "review.feedback_command",
+        scopeType: "feedback",
+        scopeId: result.feedbackId ?? changeID,
+        dedupeKey: result.turnId ? `review.feedback_turn:${result.turnId}` : null,
         actorId: userID,
-        input,
-        feedbackId: result.feedbackId ?? null,
-        turnId: result.turnId ?? null,
+        payload: {
+          changeId: changeID,
+          input,
+          feedbackId: result.feedbackId ?? null,
+          turnId: result.turnId ?? null,
+        },
       });
       return result;
     });
@@ -135,9 +165,9 @@ export function createVisualReviewController(
   return {
     async tools(turnID: string) {
       const [bundle] = await database.db
-        .select({ id: reviewFeedbackCommand.id })
-        .from(reviewFeedbackCommand)
-        .where(eq(reviewFeedbackCommand.turnId, turnID));
+        .select({ id: auditEvent.id })
+        .from(auditEvent)
+        .where(eq(auditEvent.dedupeKey, `review.feedback_turn:${turnID}`));
       return bundle ? feedbackToolCatalogue : [];
     },
     async call(turnID: string, ownerToken: string, raw: unknown): Promise<BuildBrowserResult> {
@@ -147,14 +177,14 @@ export function createVisualReviewController(
         const db = drizzleTransaction(sql);
         const [bundle] = await db
           .select({
-            changeID: reviewFeedbackCommand.changeId,
-            userID: reviewFeedbackCommand.actorId,
+            changeID: query<string>`${auditEvent.payload}->>'changeId'`,
+            userID: auditEvent.actorId,
             selection: query<
               { id: string; version: number }[]
-            >`${reviewFeedbackCommand.input}->'feedback'`,
+            >`${auditEvent.payload}->'input'->'feedback'`,
           })
-          .from(reviewFeedbackCommand)
-          .where(eq(reviewFeedbackCommand.turnId, turnID));
+          .from(auditEvent)
+          .where(eq(auditEvent.dedupeKey, `review.feedback_turn:${turnID}`));
         if (!bundle) throw new CommandError("forbidden", "This turn has no human revision batch");
         await reviewChangeIn(sql, bundle.changeID, bundle.userID, true);
         if (call.name === "feedback_list") {
@@ -163,6 +193,7 @@ export function createVisualReviewController(
         }
         const selected = bundle.selection.find((item) => item.id === call.arguments.feedbackId);
         if (!selected) throw new CommandError("forbidden", "Thread is not in this revision batch");
+        const messageEvent = alias(auditEvent, "message");
         const [feedback] = await db
           .select({
             kind: reviewFeedback.kind,
@@ -173,11 +204,17 @@ export function createVisualReviewController(
             'commit',${reviewFeedback.commitSha},'annotation',${reviewFeedback.annotation},
             'messages',(${db
               .select({
-                messages: query`jsonb_agg(${reviewFeedbackMessage.body}
-              ORDER BY ${reviewFeedbackMessage.createdAt},${reviewFeedbackMessage.id})`,
+                messages: query`jsonb_agg(${messageEvent.payload}->>'body'
+              ORDER BY ${messageEvent.createdAt},${messageEvent.id})`,
               })
-              .from(reviewFeedbackMessage)
-              .where(eq(reviewFeedbackMessage.feedbackId, reviewFeedback.id))}))`,
+              .from(messageEvent)
+              .where(
+                and(
+                  eq(messageEvent.kind, FEEDBACK_MESSAGE_KIND),
+                  eq(messageEvent.scopeType, "review_feedback"),
+                  eq(messageEvent.scopeId, query<string>`${reviewFeedback.id}::text`),
+                ),
+              )}))`,
           })
           .from(reviewFeedback)
           .where(
@@ -282,59 +319,89 @@ export function createVisualReviewController(
             ),
           )
           .limit(1);
-        const following = alias(reviewScenario, "following");
+        const scenario = alias(operation, "scenario");
+        const following = alias(operation, "following");
         const nextCase = db
-          .select({ nextMs: following.mediaStartedMs })
+          .select({
+            nextMs: query<number | null>`(${following.payload}->>'mediaStartedMs')::bigint`.as(
+              "next_ms",
+            ),
+          })
           .from(following)
           .where(
             and(
-              eq(following.reviewId, reviewScenario.reviewId),
-              query`(${following.startedAt},${following.id})>(${reviewScenario.startedAt},${reviewScenario.id})`,
-              query`${following.observationKind} IS DISTINCT FROM 'source'`,
-              isNotNull(following.mediaStartedMs),
-              query`${following.mediaSessionId} IS NOT DISTINCT FROM ${reviewMedia.browserSessionId}`,
+              eq(following.kind, REVIEW_SCENARIO_KIND),
+              eq(following.scopeType, "candidate_review"),
+              eq(following.scopeId, scenario.scopeId),
+              query`(${following.createdAt},${following.payload}->>'id')>(${scenario.createdAt},${scenario.payload}->>'id')`,
+              query`(${following.payload}->>'observationKind') IS DISTINCT FROM 'source'`,
+              query`(${following.payload}->>'mediaStartedMs') IS NOT NULL`,
+              query`(${following.payload}->>'mediaSessionId')::uuid IS NOT DISTINCT FROM ${reviewMedia.browserSessionId}`,
             ),
           )
-          .orderBy(following.startedAt, following.id)
+          .orderBy(following.createdAt, query`${following.payload}->>'id'`)
           .limit(1)
           .as("next_case");
         const scenarios = recording
           ? await db
               .select({
-                id: reviewScenario.id,
-                title: reviewScenario.title,
-                category: reviewScenario.category,
-                observationKind: reviewScenario.observationKind,
-                expected: reviewScenario.expected,
-                observed: reviewScenario.observed,
-                startedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),COALESCE(${reviewScenario.mediaStartedMs},0))::float8`,
-                endedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),GREATEST(COALESCE(${reviewScenario.mediaStartedMs},0),
+                id: query<string>`${scenario.payload}->>'id'`,
+                title: query<string>`${scenario.payload}->>'title'`,
+                category: query<"normal" | "error" | "boundary">`${scenario.payload}->>'category'`,
+                observationKind: query<
+                  "app" | "source" | null
+                >`${scenario.payload}->>'observationKind'`,
+                expected: query<string>`${scenario.payload}->>'expected'`,
+                observed: query<string | null>`${scenario.payload}->>'observed'`,
+                startedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),COALESCE((${scenario.payload}->>'mediaStartedMs')::bigint,0))::float8`,
+                endedMs: query<number>`LEAST(COALESCE(${reviewMedia.durationMs},0),GREATEST(COALESCE((${scenario.payload}->>'mediaStartedMs')::bigint,0),
                 COALESCE(${nextCase.nextMs},${reviewMedia.durationMs},0)))::float8`,
-                hasRecordingPosition: query<boolean>`(${reviewScenario.mediaStartedMs} IS NOT NULL
-                AND ${reviewScenario.mediaSessionId} IS NOT DISTINCT FROM ${reviewMedia.browserSessionId})`,
-                status: reviewScenario.status,
+                hasRecordingPosition: query<boolean>`((${scenario.payload}->>'mediaStartedMs') IS NOT NULL
+                AND (${scenario.payload}->>'mediaSessionId')::uuid IS NOT DISTINCT FROM ${reviewMedia.browserSessionId})`,
+                status: query<
+                  "passed" | "failed" | "unverified" | null
+                >`${scenario.payload}->>'status'`,
               })
-              .from(reviewScenario)
-              .innerJoin(reviewMedia, eq(reviewMedia.reviewId, reviewScenario.reviewId))
+              .from(scenario)
+              .innerJoin(
+                reviewMedia,
+                and(
+                  eq(scenario.kind, REVIEW_SCENARIO_KIND),
+                  eq(scenario.scopeType, "candidate_review"),
+                  eq(scenario.scopeId, query<string>`${reviewMedia.reviewId}::text`),
+                ),
+              )
               .leftJoinLateral(nextCase, query`true`)
               .where(eq(reviewMedia.id, recording.id))
-              .orderBy(reviewScenario.startedAt, reviewScenario.id)
+              .orderBy(scenario.createdAt, query`${scenario.payload}->>'id'`)
           : review
             ? await db
                 .select({
-                  id: reviewScenario.id,
-                  title: reviewScenario.title,
-                  category: reviewScenario.category,
-                  observationKind: reviewScenario.observationKind,
-                  expected: reviewScenario.expected,
-                  observed: reviewScenario.observed,
+                  id: query<string>`${scenario.payload}->>'id'`,
+                  title: query<string>`${scenario.payload}->>'title'`,
+                  category: query<
+                    "normal" | "error" | "boundary"
+                  >`${scenario.payload}->>'category'`,
+                  observationKind: query<
+                    "app" | "source" | null
+                  >`${scenario.payload}->>'observationKind'`,
+                  expected: query<string>`${scenario.payload}->>'expected'`,
+                  observed: query<string | null>`${scenario.payload}->>'observed'`,
                   startedMs: query<number>`0::float8`,
                   endedMs: query<null>`NULL::float8`,
-                  status: reviewScenario.status,
+                  status: query<
+                    "passed" | "failed" | "unverified" | null
+                  >`${scenario.payload}->>'status'`,
                 })
-                .from(reviewScenario)
-                .where(eq(reviewScenario.reviewId, review.id))
-                .orderBy(reviewScenario.startedAt, reviewScenario.id)
+                .from(scenario)
+                .where(
+                  and(
+                    eq(scenario.kind, REVIEW_SCENARIO_KIND),
+                    eq(scenario.scopeType, "candidate_review"),
+                    eq(scenario.scopeId, review.id),
+                  ),
+                )
+                .orderBy(scenario.createdAt, query`${scenario.payload}->>'id'`)
             : [];
         return visualReviewSchema.parse({
           feedback,
@@ -425,11 +492,14 @@ export function createVisualReviewController(
           annotation: annotation ?? null,
           mediaId: input.annotation?.mediaId ?? null,
         });
-        await db.insert(reviewFeedbackMessage).values({
+        await db.insert(auditEvent).values({
           id: crypto.randomUUID(),
-          feedbackId: id,
-          authorId: userID,
-          body: input.body,
+          kind: FEEDBACK_MESSAGE_KIND,
+          scopeType: "review_feedback",
+          scopeId: id,
+          dedupeKey: null,
+          actorId: userID,
+          payload: { feedbackId: id, authorId: userID, body: input.body },
         });
         return { feedbackId: id };
       });
@@ -438,16 +508,24 @@ export function createVisualReviewController(
       const input = feedbackUpdateInput.parse(raw);
       return command(changeID, userID, input, async (sql) => {
         const change = await reviewChangeIn(sql, changeID, userID, true);
-        const [feedback] = await sql<{ kind: string; version: number; authorID: string }[]>`
-          SELECT kind,version,author_id AS "authorID" FROM factory.review_feedback
-          WHERE id=${input.feedbackId} AND change_id=${changeID} FOR UPDATE`;
+        const db = drizzleTransaction(sql);
+        const [feedback] = await db
+          .select({
+            kind: reviewFeedback.kind,
+            version: reviewFeedback.version,
+            authorID: reviewFeedback.authorId,
+          })
+          .from(reviewFeedback)
+          .where(
+            and(eq(reviewFeedback.id, input.feedbackId), eq(reviewFeedback.changeId, changeID)),
+          )
+          .for("update");
         if (!feedback) throw new CommandError("not-found", "Feedback not found");
         if (feedback.version !== input.expectedVersion)
           throw new CommandError(
             "conflict",
             "Feedback changed. Reload before replying or resolving.",
           );
-        const db = drizzleTransaction(sql);
         if (input.action !== "reply") {
           if (feedback.kind !== "thread")
             throw new CommandError("conflict", "Comments do not resolve");
@@ -464,11 +542,14 @@ export function createVisualReviewController(
         } else {
           if (!input.body) throw new CommandError("conflict", "Reply cannot be empty");
           await assertMessageAttachmentsIn(sql, change.projectID, userID, input.body);
-          await db.insert(reviewFeedbackMessage).values({
+          await db.insert(auditEvent).values({
             id: crypto.randomUUID(),
-            feedbackId: input.feedbackId,
-            authorId: userID,
-            body: input.body,
+            kind: FEEDBACK_MESSAGE_KIND,
+            scopeType: "review_feedback",
+            scopeId: input.feedbackId,
+            dedupeKey: null,
+            actorId: userID,
+            payload: { feedbackId: input.feedbackId, authorId: userID, body: input.body },
           });
           await db
             .update(reviewFeedback)

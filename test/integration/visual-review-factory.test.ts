@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
@@ -15,7 +16,6 @@ import {
   scopeRuntimeEmbedding,
 } from "../../apps/factory/src/runtime/embedding";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -71,9 +71,15 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     const title = "Keep a draft after validation fails";
     await database.client`UPDATE factory.ticket SET title=${title},state='ready' WHERE id=${fixture.ticketID}`;
     await database.client`UPDATE factory.project SET name='Review workspace' WHERE id=${fixture.projectID}`;
-    await database.client`INSERT INTO factory.branch_create_operation(
-      id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','review',branch_name,base_sha,${`owned-review:${owned.id}`},'succeeded',base_sha,now()
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+        ${`delivery.branch_create:owned-review:${owned.id}`},NULL,'succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+          'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',1,'reconcileAfter',NULL
+        ),
+        jsonb_build_object('observedHeadSha',base_sha),created_by,now()
       FROM factory.change WHERE id=${fixture.changeID}`;
     await database.client`INSERT INTO auth.account(id,account_id,provider_id,user_id,password)
       SELECT ${crypto.randomUUID()},${fixture.userID},'credential',${fixture.userID},password
@@ -234,8 +240,28 @@ test("review fits the actual Factory Ticket and retains human work in its existi
       ["empty", "Empty title", "error", 400],
       ["retry", "Retry after validation", "boundary", 800],
     ] as const) {
-      await database.client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,status,ended_at,media_started_ms,observed)
-        VALUES(${fixture.reviewID},${id},${name},${category},1,'The entered draft stays visible.','passed',now(),${position},'The draft remains in the form.')`;
+      await database.client`WITH ts AS (SELECT clock_timestamp() AS now)
+        INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at,completed_at)
+        SELECT ${crypto.randomUUID()},'review.scenario','candidate_review',${fixture.reviewID},
+          ${`review.scenario:${fixture.reviewID}:${id}`},'passed',
+          jsonb_build_object(
+            'reviewId',${fixture.reviewID}::text,
+            'id',${id}::text,
+            'title',${name}::text,
+            'category',${category}::text,
+            'criterion',1,
+            'expected','The entered draft stays visible.'::text,
+            'startedAt',ts.now::text,
+            'endedAt',ts.now::text,
+            'observed','The draft remains in the form.'::text,
+            'mediaStartedMs',${position}::bigint,
+            'mediaSessionId',NULL,
+            'status','passed'::text,
+            'observationKind',NULL
+          ),
+          ts.now,ts.now,ts.now
+        FROM ts`;
     }
     const review = createVisualReviewController(database, media.bytes);
     const original = await media.still(
@@ -689,7 +715,8 @@ test("review fits the actual Factory Ticket and retains human work in its existi
       await browser.close();
       await owned.shutdown();
       if (f) {
-        await database.client`DELETE FROM factory.branch_create_operation WHERE change_id=${f.changeID}`;
+        await database.client`DELETE FROM factory.operation
+          WHERE kind='delivery.branch_create' AND scope_type='change' AND scope_id=${f.changeID}`;
         await f.dispose();
       } else await database.client.end();
       await owned.dispose();

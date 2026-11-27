@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import type { WikiPageSnapshot } from "#knowledge-domain/generation";
 import { generateWiki } from "../../apps/factory/src/knowledge/generation-workflow";
 import { publishWikiPackage } from "../../apps/factory/src/knowledge/publication";
 import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
-import type { WikiPageSnapshot } from "../../packages/knowledge-domain/src/generation";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test
@@ -89,8 +89,8 @@ test
     try {
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${userID},'Wiki locality owner',${`${userID}@factory.invalid`})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${`locality-${projectID}`},'Support desk','https://forge.invalid/owned/locality.git','main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`locality-${projectID}`},'Support desk','https://forge.invalid/owned/locality.git','main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${userID},'developer',${userID})`;
       for (const [index, page] of pages.entries()) {
@@ -104,9 +104,10 @@ test
         await database.client`UPDATE factory.knowledge_page SET current_revision_id=${page.revisionId}
           WHERE id=${page.id}`;
       }
-      await database.client`INSERT INTO factory.knowledge_generation
-        (id,project_id,source_commit_sha,state,created_by,attempt_id)
-        VALUES(${generationID},${projectID},${commit},'running',${userID},${attemptID})`;
+      await database.client`INSERT INTO factory.operation
+        (id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+        VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${projectID}`},'running',${userID},
+          ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: null, attemptId: attemptID, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
       pages = await snapshots();
       await generateWiki({
         name: "Support desk",

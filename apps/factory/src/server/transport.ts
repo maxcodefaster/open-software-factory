@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from "bun";
-import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
+import { hashConnectorToken } from "#runtime-domain/identity";
 import { runtimeWriteAuthorityIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
 import { json, maximumHTTPRequestBytes } from "../http";
@@ -13,6 +13,7 @@ import {
   theiaConnectionToken,
 } from "../runtime/hub";
 import { runtimeAppRequest } from "../runtime-app-request";
+import { runtimeAppOriginRoute } from "../runtime-origins";
 import type { DeveloperEditorSocketData } from "../workspace/developer-ide-edge";
 import type { FactoryApplication } from "./application";
 import { createFactoryProtocols, type FactoryProtocolServices } from "./protocols";
@@ -56,6 +57,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
       const connectionRequest = request;
       request = runtimeAppRequest(request, factoryOrigin);
       const url = factoryRequestURL(request, factoryOrigin);
+      const originApp = runtimeAppOriginRoute(factoryOrigin, url);
       if (
         request.method === "GET" &&
         [
@@ -151,7 +153,11 @@ export function startFactoryTransport(application: FactoryTransportServices) {
         if (!runtimeHub.hasAppChannel(attemptID, appChannel)) {
           return new Response("Declared App is not available", { status: 404 });
         }
-        const socketContext = appRuntimeSocketContext(request, `${suffix || "/"}${url.search}`);
+        const socketContext = appRuntimeSocketContext(
+          request,
+          `${suffix || "/"}${url.search}`,
+          originApp?.attemptID === attemptID && originApp.channel === appChannel,
+        );
         if (
           !server.upgrade(connectionRequest, {
             ...(socketContext.protocol
@@ -184,7 +190,13 @@ export function startFactoryTransport(application: FactoryTransportServices) {
         const connectionToken =
           channel === "ide" ? theiaConnectionToken(request.headers) : undefined;
         const socketContext: { headers?: Record<string, string>; protocol?: string } =
-          channel === "app" ? appRuntimeSocketContext(request, path) : {};
+          channel === "app"
+            ? appRuntimeSocketContext(
+                request,
+                path,
+                originApp?.attemptID === attemptID && originApp.channel === channel,
+              )
+            : {};
         if (
           !server.upgrade(connectionRequest, {
             ...(socketContext.protocol

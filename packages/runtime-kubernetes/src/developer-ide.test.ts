@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { developerIDEIdentity } from "#workspace-domain/developer-ide";
 import { fixtureValue } from "../../../test/fixtures/value";
-import { developerIDEIdentity } from "../../workspace-domain/src/developer-ide";
 import { createDeveloperIDEClient, validateDeveloperIDEObservation } from "./developer-ide";
 import { createDeveloperIDEKubernetesClient } from "./developer-ide-kubernetes";
 import { renderDeveloperIDEResources } from "./developer-ide-manifest";

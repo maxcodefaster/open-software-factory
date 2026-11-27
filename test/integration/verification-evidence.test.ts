@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
+import type { VerificationDiagnosis } from "#conversation-domain/verification";
+import type { createForgejoClient } from "#forge/forge";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createVerificationTools } from "../../apps/factory/src/agent/verification-tools";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { buildModelID, fixture } from "../fixtures/change-agent-turns";
-import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
-import type { VerificationDiagnosis } from "../../packages/conversation-domain/src/verification";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { verificationReceipt } from "../fixtures/verification";
 
 test("competing reconcilers use one saved diagnosis and one admitted correction", async () => {
@@ -29,6 +29,9 @@ test("competing reconcilers use one saved diagnosis and one admitted correction"
       {
         startVerification: async () => null,
         startStagingReplacement: async () => null,
+        pause: async () => {
+          throw new Error("Verification handoff must not pause Coding compute");
+        },
         stop: async () => null,
       },
       {
@@ -62,11 +65,17 @@ test("competing reconcilers use one saved diagnosis and one admitted correction"
   try {
     await f.database
       .client`UPDATE factory.verification SET state='running',completed_at=NULL WHERE id=${f.verificationID}`;
-    await f.database.client`INSERT INTO factory.pull_request_operation(
-      id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
-      title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','review','main',branch_name,${f.commit},
-        'Owned concurrent diagnostics','','owned-concurrent-'||id,'succeeded',1,'https://forge.invalid/owned/review/pulls/1',now()
+    await f.database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.pull_request','change',id::text,
+        'delivery.pull_request:owned-concurrent-'||id,NULL,'succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+          'baseBranch','main','headBranch',branch_name,'commitSha',${f.commit}::text,
+          'firstHeadSha',${f.commit}::text,'title','Owned concurrent diagnostics','body',''
+        ),
+        jsonb_build_object('number',1,'url','https://forge.invalid/owned/review/pulls/1'),
+        created_by,now()
       FROM factory.change WHERE id=${f.changeID}`;
     secondRun = make(async () => {
       entered.resolve();
@@ -163,6 +172,9 @@ test.each(["check-failed", "execution-failed", "cancelled", "skipped", "unavaila
       {
         startVerification: async () => null,
         startStagingReplacement: async () => null,
+        pause: async () => {
+          throw new Error("Verification handoff must not pause Coding compute");
+        },
         stop: async () => null,
       },
       {
@@ -189,11 +201,17 @@ test.each(["check-failed", "execution-failed", "cancelled", "skipped", "unavaila
     try {
       await f.database
         .client`UPDATE factory.verification SET state='running',completed_at=NULL WHERE id=${f.verificationID}`;
-      await f.database.client`INSERT INTO factory.pull_request_operation(
-        id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
-        title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
-        SELECT ${crypto.randomUUID()},id,'owned','review','main',branch_name,${f.commit},
-          'Owned diagnostics','','owned-diagnostics-'||id,'succeeded',1,'https://forge.invalid/owned/review/pulls/1',now()
+      await f.database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+        SELECT ${crypto.randomUUID()},'delivery.pull_request','change',id::text,
+          'delivery.pull_request:owned-diagnostics-'||id,NULL,'succeeded',
+          jsonb_build_object(
+            'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+            'baseBranch','main','headBranch',branch_name,'commitSha',${f.commit}::text,
+            'firstHeadSha',${f.commit}::text,'title','Owned diagnostics','body',''
+          ),
+          jsonb_build_object('number',1,'url','https://forge.invalid/owned/review/pulls/1'),
+          created_by,now()
         FROM factory.change WHERE id=${f.changeID}`;
       await controller.reconcile(f.changeID);
       const [saved] = await f.database.client<{ diagnosis: VerificationDiagnosis }[]>`
@@ -263,8 +281,8 @@ test("Verification output is bound to the correction, exact failed job/attempt a
     await f.database
       .client`UPDATE factory.project SET repository_url='https://forge.invalid/owned/app.git' WHERE id=${f.projectID}`;
     await f.database.client`INSERT INTO factory.verification(
-      id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,state,completed_at,diagnosis)
-      VALUES(${verificationID},${f.changeID},${"a".repeat(40)},1,'owned-evidence',7,${f.userID},'failed',now(),${JSON.stringify(diagnosis)}::jsonb)`;
+      id,change_id,commit_sha,pull_request_number,action_run_id,created_by,state,completed_at,diagnosis)
+      VALUES(${verificationID},${f.changeID},${"a".repeat(40)},1,7,${f.userID},'failed',now(),${JSON.stringify(diagnosis)}::jsonb)`;
     const admitted = await createChangeAdmission(f.database, buildModelID).admit(
       f.changeID,
       f.userID,

@@ -1,14 +1,66 @@
 import { expect } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { z } from "zod";
+import type { createDatabase } from "#db/client";
+import { zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import type { createDatabase } from "../../packages/db/src/client";
-import { zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually } from "./factory-process";
 import { callFactoryFunction } from "./server-functions";
 import { saveTicketRequirements } from "./ticket-requirements";
+
+export async function approveStarterDelivery(
+  input: {
+    database: ReturnType<typeof createDatabase>;
+    base: string;
+    cookie: string;
+    changeID: string;
+    commitSha: string;
+  },
+  call = callFactoryFunction,
+) {
+  const { database, base, cookie, changeID, commitSha } = input;
+  const [approval] = await database.client<{ id: string }[]>`
+    SELECT id FROM factory.delivery_approval WHERE change_id=${changeID}`;
+  if (approval) return;
+  await eventually(
+    async () => {
+      const delivery = deliveryViewSchema.parse(
+        await serverCall(call(base, "getDelivery", [changeID], { cookie })),
+      );
+      if (
+        delivery.verificationState !== "succeeded" ||
+        delivery.verificationCommitSha !== commitSha ||
+        !delivery.verificationId ||
+        !delivery.reviewId ||
+        delivery.reviewState !== "passed" ||
+        delivery.reviewCurrent !== true
+      )
+        return false;
+      // The public view omits the review SHA. Read only the exact displayed
+      // identities; never adopt a different candidate or repair a blocking review.
+      const [review] = await database.client<{ sha: string }[]>`
+        SELECT review.commit_sha AS sha FROM factory.candidate_review review
+        JOIN factory.verification verification ON verification.id=review.verification_id
+        JOIN factory.agent_turn turn ON turn.id=review.turn_id
+        JOIN factory.change change ON change.id=review.change_id
+        WHERE review.id=${delivery.reviewId} AND review.verification_id=${delivery.verificationId}
+          AND review.change_id=${changeID} AND verification.change_id=review.change_id
+          AND review.commit_sha=verification.commit_sha AND review.base_sha=change.base_sha
+          AND review.state='passed' AND verification.state='succeeded' AND turn.state='completed'
+          AND review.ordinal=(SELECT MAX(ordinal) FROM factory.candidate_review WHERE verification_id=verification.id)
+          AND review.turn_id=(SELECT id FROM factory.agent_turn WHERE change_id=change.id ORDER BY created_at DESC,id DESC LIMIT 1)
+          AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
+            WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;
+      return review?.sha === commitSha;
+    },
+    (ready) => ready,
+    `Starter independent review did not pass for verified commit ${commitSha}`,
+    600_000,
+  );
+  await serverCall(call(base, "approveDelivery", [changeID], { cookie }));
+}
 
 export async function starterDelivery(input: {
   database: ReturnType<typeof createDatabase>;
@@ -159,14 +211,19 @@ export async function starterDelivery(input: {
     revision: verified.verificationCommitSha,
     workspaceID: null,
   });
-  const [approval] = await database.client<{ id: string }[]>`
-    SELECT id FROM factory.delivery_approval WHERE change_id=${change.id}`;
-  if (!approval)
-    await serverCall(callFactoryFunction(base, "approveDelivery", [change.id], { cookie: cookie }));
+  await approveStarterDelivery({
+    database,
+    base,
+    cookie,
+    changeID: change.id,
+    commitSha: verified.verificationCommitSha,
+  });
   const [completed] = await database.client<{ state: string; previewState: string }[]>`
     SELECT change.state,attempt.state AS "previewState" FROM factory.change change
-    JOIN factory.staging_preview preview ON preview.project_id=change.project_id
-    JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id WHERE change.id=${change.id}`;
+    JOIN factory.operation preview ON preview.kind='delivery.staging_preview'
+      AND preview.scope_type='project' AND preview.scope_id=change.project_id::text
+    JOIN factory.runtime_attempt attempt ON attempt.id::text=preview.payload->>'runtimeAttemptId'
+    WHERE change.id=${change.id}`;
   if (completed?.state === "delivered" && ["stopped", "failed"].includes(completed.previewState))
     await serverCall(callFactoryFunction(base, "ensureStaging", [projectID], { cookie }));
   const promoted = await eventually(
@@ -180,11 +237,14 @@ export async function starterDelivery(input: {
           promotionState: string | null;
           failure: string | null;
         }[]
-      >`SELECT attempt.id,attempt.state,change.state AS "changeState",preview.revision,
-        promotion.state AS "promotionState",promotion.last_error AS failure
-        FROM factory.staging_preview preview JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id
-        JOIN factory.change change ON change.project_id=preview.project_id
-        LEFT JOIN factory.promotion_operation promotion ON promotion.change_id=change.id WHERE change.id=${change.id}`;
+      >`SELECT attempt.id,attempt.state,change.state AS "changeState",preview.payload->>'revision' AS revision,
+        promotion.state AS "promotionState",promotion.error AS failure
+        FROM factory.operation preview
+        JOIN factory.runtime_attempt attempt ON attempt.id::text=preview.payload->>'runtimeAttemptId'
+        JOIN factory.change change ON change.project_id::text=preview.scope_id
+        LEFT JOIN factory.operation promotion ON promotion.kind='delivery.promotion' AND promotion.scope_type='change' AND promotion.scope_id=change.id::text
+        WHERE preview.kind='delivery.staging_preview' AND preview.scope_type='project' AND change.id=${change.id}
+        ORDER BY (promotion.payload->>'ordinal')::int DESC NULLS LAST LIMIT 1`;
       if (row?.promotionState === "failed")
         throw new Error(`Starter promotion failed: ${row.failure}`);
       return row;

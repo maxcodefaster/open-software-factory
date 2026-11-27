@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import { createProjectAgentController } from "./controller";
 
 test("conversation mode cannot commission Coding without exact Implement admission", async () => {

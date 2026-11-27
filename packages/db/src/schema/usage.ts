@@ -11,35 +11,11 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { ExecutionPolicy } from "../../../conversation-domain/src/execution-policy";
-import type {
-  UsageCounters,
-  UsagePurpose,
-  UsageRate,
-} from "../../../conversation-domain/src/usage";
+import type { ExecutionPolicy } from "#conversation-domain/execution-policy";
+import type { UsageCounters, UsagePurpose, UsageRate } from "#conversation-domain/usage";
 import { authUser } from "./auth";
-import { agentTurn } from "./coding";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
-
-export const executionPolicyCommand = factorySchema.table(
-  "execution_policy_command",
-  {
-    commandId: uuid("command_id").primaryKey().notNull(),
-    scope: text("scope").notNull(),
-    actorId: uuid("actor_id").notNull(),
-    input: jsonb("input").notNull(),
-    result: jsonb("result").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.actorId],
-      foreignColumns: [authUser.id],
-      name: "execution_policy_command_actor_id_fkey",
-    }),
-  ],
-);
 
 export const usageOperation = factorySchema.table(
   "usage_operation",
@@ -92,34 +68,6 @@ export const usageOperation = factorySchema.table(
   ],
 );
 
-export const codingPause = factorySchema.table(
-  "coding_pause",
-  {
-    turnId: uuid("turn_id").primaryKey().notNull(),
-    reason: text("reason")
-      .$type<"accounting-incomplete" | "coding-budget-used" | "finish-reserve-used">()
-      .notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    resumedByTurnId: uuid("resumed_by_turn_id"),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.resumedByTurnId],
-      foreignColumns: [agentTurn.id],
-      name: "coding_pause_resumed_by_turn_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "coding_pause_turn_id_fkey",
-    }).onDelete("cascade"),
-    check(
-      "coding_pause_reason_check",
-      sql`${table.reason} = ANY (ARRAY['accounting-incomplete'::text, 'coding-budget-used'::text, 'finish-reserve-used'::text])`,
-    ),
-  ],
-);
-
 export const executionPolicy = factorySchema.table(
   "execution_policy",
   {
@@ -146,47 +94,6 @@ export const executionPolicy = factorySchema.table(
       sql`(${table.scope} = 'factory'::text) OR (${table.scope} ~ '^[0-9a-f-]{36}$'::text)`,
     ),
     check("execution_policy_version_check", sql`${table.version} >= 1`),
-  ],
-);
-
-export const usageReplayCursor = factorySchema.table(
-  "usage_replay_cursor",
-  {
-    operationId: text("operation_id").notNull(),
-    sessionId: text("session_id").notNull(),
-    sequence: bigint("sequence", { mode: "number" }).notNull(),
-    startSequence: bigint("start_sequence", { mode: "number" }).default(0).notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.operationId],
-      foreignColumns: [usageOperation.id],
-      name: "usage_replay_cursor_operation_id_fkey",
-    }).onDelete("cascade"),
-    primaryKey({ columns: [table.operationId, table.sessionId], name: "usage_replay_cursor_pkey" }),
-    check("usage_replay_cursor_sequence_check", sql`${table.sequence} >= 0`),
-    check("usage_replay_cursor_start_sequence_check", sql`${table.startSequence} >= 0`),
-  ],
-);
-
-export const usageRateOverride = factorySchema.table(
-  "usage_rate_override",
-  {
-    provider: text("provider").notNull(),
-    model: text("model").notNull(),
-    version: bigint("version", { mode: "number" }).notNull(),
-    rate: jsonb("rate").$type<UsageRate>(),
-    updatedBy: uuid("updated_by").notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.updatedBy],
-      foreignColumns: [authUser.id],
-      name: "usage_rate_override_updated_by_fkey",
-    }),
-    primaryKey({ columns: [table.provider, table.model], name: "usage_rate_override_pkey" }),
-    check("usage_rate_override_version_check", sql`${table.version} > 0`),
   ],
 );
 

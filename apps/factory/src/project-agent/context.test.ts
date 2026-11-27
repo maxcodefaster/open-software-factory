@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ProjectContextLimitError, projectContextByteLimit, projectModelContext } from "./context";
 import type { ConversationEntry } from "../conversations/store";
+import { ProjectContextLimitError, projectContextByteLimit, projectModelContext } from "./context";
 
 function entry(ordinal: number, values: Partial<ConversationEntry> = {}): ConversationEntry {
   return {

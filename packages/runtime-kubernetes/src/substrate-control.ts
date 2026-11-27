@@ -68,7 +68,7 @@ export const nativeSnapshot = z.object({
   uuid: z.uuid(),
   generation: z.number().int().positive(),
   owner: z.literal("SNAPSHOT_OWNER_ACTOR"),
-  fidelity: z.literal("SNAPSHOT_FIDELITY_ROOTFS"),
+  fidelity: z.enum(["SNAPSHOT_FIDELITY_ROOTFS", "SNAPSHOT_FIDELITY_MEMORY"]),
   actorTemplateUid: z.uuid(),
   sandboxRuntime: nativeRuntime,
   durableSnapshot: z.object({
@@ -83,6 +83,9 @@ export const nativeActor = z.object({
   sourceTag: z.unknown().optional(),
   status: z.object({
     state: z.string(),
+    // A suspended Actor can release its worker assignment while its checkpoint
+    // remains attached to this node. Absence of the assignment is not detach.
+    assignedNode: z.string().min(1).optional(),
     crash: z
       .object({ message: z.string().max(4096), crashTime: z.iso.datetime().optional() })
       .optional(),

@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import {
+  type MCPChoice,
   mcpDefinition,
   mcpSaveContent,
   publicMCPAddress,
   recommendedMCPs,
   resolveMCPChoice,
   validateMCPSelection,
-  type MCPChoice,
 } from "./mcp-library";
 
 test("MCP definitions accept only remote HTTPS without credential-bearing URLs", () => {

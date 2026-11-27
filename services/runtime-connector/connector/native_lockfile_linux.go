@@ -25,7 +25,7 @@ func nativeDevcontainerLockfile(assignment Assignment, reserve bool) error {
 	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
 		return denied
 	}
-	config := assignment.DevcontainerPath
+	config := assignment.ActorTemplatePath
 	if config == "" || config == "." || strings.ContainsAny(config, "\x00\\") || filepath.IsAbs(config) || filepath.Clean(config) != config || config == ".." || strings.HasPrefix(config, "../") {
 		return denied
 	}

@@ -3,14 +3,14 @@ import { randomInt } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createCanvas } from "@napi-rs/canvas";
+import { attachmentMarkdown } from "#conversation-domain/attachments";
+import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
+import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
-import { attachmentDigest } from "../../apps/factory/src/attachments/objects";
-import { fixture } from "../fixtures/change-agent-turns";
-import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { attachmentDOCX, attachmentPDF, scannedAttachmentPDF } from "../fixtures/attachment-files";
-import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
+import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
+import { fixture } from "../fixtures/change-agent-turns";
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(

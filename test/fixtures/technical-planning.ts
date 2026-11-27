@@ -1,4 +1,4 @@
-import type { TechnicalDesignContent } from "../../packages/requirement-domain/src/technical-design";
+import type { TechnicalDesignContent } from "#requirement-domain/technical-design";
 
 export const planningProduct = {
   summary:

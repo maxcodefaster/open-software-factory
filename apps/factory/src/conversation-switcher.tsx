@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { Icon } from "./icon";
 import { bindPopoverKeyboard } from "./popover-keyboard";
-import { type ConversationView } from "./project-agent/contracts";
+import type { ConversationView } from "./project-agent/contracts";
 import "./conversation-switcher.css";
 
 export function ConversationSwitcher(props: {

@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
-import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillRole } from "#conversation-domain/skills";
 import { plainErrorMessage } from "../command-error";
 import { type ServerValue, serverCall } from "../server-functions/result";
 import { getSkillInvocations } from "../server-functions/skills";

@@ -1,21 +1,26 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { z } from "zod";
-import {
-  type ReviewFeedback,
-  reviewRegion,
-} from "../../../../packages/conversation-domain/src/visual-review";
 import { Icon } from "../icon";
-import { type ReviewCapture, ReviewPanel } from "./panel";
-
-const selectionInput = z.object({
-  type: z.literal("factory-review-selection"),
-  selectionId: z.uuid(),
-  documentId: z.uuid(),
-  region: reviewRegion,
-  page: z.string().startsWith("/").max(4096),
-  element: z.string().max(1000).optional(),
-  selector: z.string().max(1000).optional(),
-});
+import { ReviewPanel } from "./panel";
+import {
+  activeFeedbackID,
+  attachPreviewContextImage,
+  buildPreviewPins,
+  calculatePreviewPopoverPosition,
+  createPreviewCapture,
+  ensurePopoverMounted,
+  hasPreviewDraft,
+  isPopoverMounted,
+  isPopoverOpen,
+  type PreviewBridgeMode,
+  type PreviewDocumentState,
+  type PreviewDraftState,
+  type PreviewPopoverState,
+  type PreviewReviewData,
+  parsePreviewBridgeMessage,
+  previewHintMessage,
+  previewToggleLabel,
+  readPreviewTheme,
+} from "./preview-state";
 
 export function PreviewReview(props: {
   projectID?: string | undefined;
@@ -28,99 +33,92 @@ export function PreviewReview(props: {
   active: boolean;
   onOpenTicket?: (() => void) | undefined;
 }) {
-  const [commenting, setCommenting] = createSignal(false);
-  const [ready, setReady] = createSignal(false);
-  const [mounted, setMounted] = createSignal(false);
-  const [popup, setPopup] = createSignal(false);
-  const [capture, setCapture] = createSignal<ReviewCapture>();
-  const [feedbackID, setFeedbackID] = createSignal<string>();
-  const [feedback, setFeedback] = createSignal<ReviewFeedback[]>([]);
-  const [readOnly, setReadOnly] = createSignal(false);
-  const [dirty, setDirty] = createSignal(false);
-  const [documentID, setDocumentID] = createSignal("");
-  const [page, setPage] = createSignal("");
+  const [bridgeMode, setBridgeMode] = createSignal<PreviewBridgeMode>({ kind: "idle" });
+  const [popover, setPopover] = createSignal<PreviewPopoverState>({ kind: "unmounted" });
+  const [previewDoc, setPreviewDoc] = createSignal<PreviewDocumentState>({ kind: "unloaded" });
+  const [draft, setDraft] = createSignal<PreviewDraftState>({ capture: undefined, dirty: false });
+  const [reviewData, setReviewData] = createSignal<PreviewReviewData>({
+    feedback: [],
+    readOnly: false,
+  });
   const [error, setError] = createSignal("");
   const [position, setPosition] = createSignal({ x: 16, y: 64 });
   const token = crypto.randomUUID();
   let toggle: HTMLButtonElement | undefined;
   let feedbackHeading: HTMLHeadingElement | undefined;
   let readiness: ReturnType<typeof setTimeout> | undefined;
+
+  const commenting = () => bridgeMode().kind !== "idle";
+  const popup = () => isPopoverOpen(popover());
+  const feedbackID = () => activeFeedbackID(popover());
   const send = (data: Record<string, unknown>) =>
     props.frame()?.contentWindow?.postMessage({ ...data, token }, props.runtimeOrigin);
+
+  function positionPopup() {
+    const next = calculatePreviewPopoverPosition(
+      props.frame()?.getBoundingClientRect(),
+      draft().capture,
+    );
+    if (next) setPosition(next);
+  }
+
   function stop() {
     clearTimeout(readiness);
-    setCommenting(false);
-    setReady(false);
+    setBridgeMode({ kind: "idle" });
     send({ type: "factory-review-select", mode: "" });
   }
+
   function start() {
-    if (readOnly()) return;
-    setMounted(true);
-    setCommenting(true);
-    setReady(false);
+    if (reviewData().readOnly) return;
+    setPopover(ensurePopoverMounted);
+    setBridgeMode({ kind: "connecting" });
     setError("");
-    const style = getComputedStyle(toggle ?? document.body);
     send({
       type: "factory-review-select",
       mode: "element",
-      theme: {
-        accent: style.getPropertyValue("--color-river-deep").trim(),
-        foreground: style.getPropertyValue("--color-ink-inverse").trim(),
-        fontFamily: style.getPropertyValue("--font-interface").trim(),
-        fontSize: style.getPropertyValue("--text-sm").trim(),
-      },
+      theme: readPreviewTheme(toggle ?? document.body),
     });
     clearTimeout(readiness);
     readiness = setTimeout(() => {
       setError(
         "This App did not enable element selection. You can still add general feedback here.",
       );
-      setPopup(true);
-      setCommenting(false);
+      setPopover({ kind: "composer" });
+      setBridgeMode({ kind: "idle" });
     }, 3_000);
     props.frame()?.focus();
   }
-  const selection = () => {
-    const current = capture();
-    return current?.region ? { x: current.region.x, y: current.region.y } : { x: 0.5, y: 0.2 };
-  };
-  function positionPopup() {
-    const rect = props.frame()?.getBoundingClientRect();
-    if (!rect) return;
-    const point = selection();
-    const x = rect.width * point.x;
-    const y = rect.height * point.y;
-    setPosition({
-      x: Math.max(12, Math.min(rect.width - 336, x + 330 < rect.width ? x + 14 : x - 330)),
-      y: Math.max(12, Math.min(Math.max(12, rect.height - 310), y + 18)),
-    });
-  }
+
   function openFeedback(id: string) {
-    if (dirty() || capture()) {
+    if (hasPreviewDraft(draft())) {
       setError("Finish or cancel your current feedback first. Your draft is kept.");
       return;
     }
-    const item = feedback().find((candidate) => candidate.id === id);
-    if (!item) return;
-    setFeedbackID(id);
-    setPopup(true);
-    setMounted(true);
+    if (!reviewData().feedback.some((candidate) => candidate.id === id)) return;
+    setPopover({ kind: "feedback", feedbackID: id });
     positionPopup();
   }
+
   function closeFeedback() {
     const id = feedbackID();
-    setPopup(false);
-    setFeedbackID(undefined);
+    const doc = previewDoc();
+    setPopover({ kind: "closed" });
     toggle?.focus({ preventScroll: true });
     if (id && props.active)
-      send({ type: "factory-review-focus-feedback", feedbackId: id, documentId: documentID() });
+      send({
+        type: "factory-review-focus-feedback",
+        feedbackId: id,
+        documentId: doc.kind === "loaded" ? doc.documentID : "",
+      });
   }
+
   createEffect(
     () => Boolean(feedbackID() && popup() && props.active),
     (visible) => {
       if (visible) queueMicrotask(() => feedbackHeading?.focus({ preventScroll: true }));
     },
   );
+
   function receive(event: MessageEvent) {
     if (
       event.source !== props.frame()?.contentWindow ||
@@ -128,84 +126,38 @@ export function PreviewReview(props: {
       event.data?.token !== token
     )
       return;
-    if (event.data.type === "factory-review-ready") {
-      const input = z
-        .object({ documentId: z.uuid(), page: z.string().startsWith("/").max(4096) })
-        .safeParse(event.data);
-      if (!input.success) return;
+    const message = parsePreviewBridgeMessage(event.data);
+    if (!message) return;
+    if (message.type === "ready") {
       clearTimeout(readiness);
-      setDocumentID(input.data.documentId);
-      setPage(input.data.page);
-      setReady(true);
-      return;
-    }
-    if (event.data.type === "factory-review-cancel") {
+      setPreviewDoc({ kind: "loaded", documentID: message.documentId, page: message.page });
+      setBridgeMode({ kind: "selecting" });
+    } else if (message.type === "cancel") {
       stop();
       toggle?.focus({ preventScroll: true });
-      return;
+    } else if (message.type === "open-feedback") {
+      const doc = previewDoc();
+      if (doc.kind === "loaded" && message.documentId === doc.documentID)
+        openFeedback(message.feedbackId);
+    } else if (message.type === "context-image") {
+      setDraft((prev) =>
+        attachPreviewContextImage(prev, message.selectionId, message.documentId, message.frame),
+      );
+    } else if (message.type === "selection") {
+      if (!commenting() || !props.active || draft().dirty) return;
+      const value = message.payload;
+      setPreviewDoc({ kind: "loaded", documentID: value.documentId, page: value.page });
+      setDraft((prev) => ({
+        ...prev,
+        capture: createPreviewCapture(value, props.attemptID),
+      }));
+      positionPopup();
+      setPopover({ kind: "composer" });
     }
-    if (event.data.type === "factory-review-open-feedback") {
-      if (event.data.documentId === documentID() && typeof event.data.feedbackId === "string")
-        openFeedback(event.data.feedbackId);
-      return;
-    }
-    if (event.data.type === "factory-review-context-image") {
-      const current = capture();
-      if (
-        !current ||
-        current.id !== event.data.selectionId ||
-        current.documentId !== event.data.documentId
-      )
-        return;
-      const image: unknown = event.data.image;
-      if (
-        typeof image !== "string" ||
-        image.length > 2_800_000 ||
-        !image.startsWith("data:image/jpeg;base64,")
-      )
-        return;
-      try {
-        const data = Uint8Array.from(atob(image.slice(image.indexOf(",") + 1)), (value) =>
-          value.charCodeAt(0),
-        );
-        if (data.byteLength > 2_097_152) return;
-        setCapture((value) =>
-          value && value.id === current.id
-            ? { ...value, frame: new Blob([data], { type: "image/jpeg" }) }
-            : value,
-        );
-      } catch {
-        /* The optional context image never blocks feedback. */
-      }
-      return;
-    }
-    if (!commenting() || !props.active) return;
-    const input = selectionInput.safeParse(event.data);
-    if (!input.success || dirty()) return;
-    const value = input.data;
-    setDocumentID(value.documentId);
-    setPage(value.page);
-    setFeedbackID(undefined);
-    setCapture({
-      id: value.selectionId,
-      context: {
-        source: "preview",
-        attemptId: props.attemptID,
-        representation: "dom-reconstruction",
-      },
-      page: value.page,
-      documentId: value.documentId,
-      region: value.region,
-      ...(value.selector ? { selector: value.selector } : {}),
-      ...(value.element ? { element: value.element } : {}),
-    });
-    positionPopup();
-    setPopup(true);
   }
-  window.addEventListener("message", receive);
+
   const reload = () => {
-    setDocumentID("");
-    setPage("");
+    setPreviewDoc({ kind: "unloaded" });
     if (commenting() && props.active) start();
   };
   createEffect(
@@ -222,37 +174,21 @@ export function PreviewReview(props: {
     },
   );
   createEffect(
-    () => ({ id: documentID(), items: feedback(), active: commenting(), page: page() }),
-    (current) => {
-      if (!current.id) return;
+    () => ({ doc: previewDoc(), items: reviewData().feedback, active: commenting() }),
+    ({ doc, items, active }) => {
+      if (doc.kind !== "loaded") return;
       send({
         type: "factory-review-pins",
-        documentId: current.id,
-        pins: current.active
-          ? current.items.flatMap((item, index) => {
-              const annotation = item.annotation;
-              return annotation?.source === "preview" &&
-                annotation.attemptId === props.attemptID &&
-                annotation.documentId === current.id &&
-                annotation.page === current.page &&
-                annotation.selector
-                ? [
-                    {
-                      id: item.id,
-                      selector: annotation.selector,
-                      label: String(index + 1),
-                      element: annotation.element ?? "",
-                    },
-                  ]
-                : [];
-            })
-          : [],
+        documentId: doc.documentID,
+        pins: buildPreviewPins(items, props.attemptID, doc, active),
       });
     },
   );
+
   const hidden = () => {
     if (document.visibilityState === "hidden") stop();
   };
+  window.addEventListener("message", receive);
   document.addEventListener("visibilitychange", hidden);
   window.addEventListener("resize", positionPopup);
   onCleanup(() => {
@@ -261,6 +197,7 @@ export function PreviewReview(props: {
     window.removeEventListener("resize", positionPopup);
     document.removeEventListener("visibilitychange", hidden);
   });
+
   return (
     <div class={`preview-review ${commenting() ? "is-commenting" : ""}`}>
       <div class="preview-review-toolbar">
@@ -270,7 +207,7 @@ export function PreviewReview(props: {
             Feedback in Ticket
           </button>
         </Show>
-        <Show when={!readOnly()}>
+        <Show when={!reviewData().readOnly}>
           <button
             ref={toggle}
             type="button"
@@ -278,24 +215,18 @@ export function PreviewReview(props: {
             aria-pressed={commenting() ? "true" : "false"}
             onClick={() => {
               if (commenting()) stop();
-              else if (capture() || dirty()) setPopup(true);
+              else if (hasPreviewDraft(draft())) setPopover({ kind: "composer" });
               else start();
             }}
           >
             <Icon name="comment" />
-            {commenting()
-              ? "Done commenting"
-              : capture() || dirty()
-                ? "Continue feedback"
-                : "Comment"}
+            {previewToggleLabel(bridgeMode(), draft())}
           </button>
         </Show>
       </div>
       <Show when={commenting() && !popup()}>
         <p class="preview-comment-hint" role="status">
-          {ready()
-            ? "Hover an element and click. Tab and Enter also work. Esc exits."
-            : "Opening comment mode…"}
+          {previewHintMessage(bridgeMode())}
         </p>
       </Show>
       <Show when={error()}>
@@ -303,7 +234,7 @@ export function PreviewReview(props: {
           {error()}
         </p>
       </Show>
-      <Show when={mounted()}>
+      <Show when={isPopoverMounted(popover())}>
         <section
           class="preview-comment-popover"
           aria-label="Preview feedback"
@@ -341,24 +272,23 @@ export function PreviewReview(props: {
             changeID={props.changeID}
             userID={props.userID}
             canDevelop={props.canDevelop}
-            capture={capture()}
+            capture={draft().capture}
             feedbackID={feedbackID()}
             active={props.active && popup()}
             compact
             viewID={`${props.attemptID}:${props.frame()?.src ?? "preview"}`}
-            onDraftChange={setDirty}
+            onDraftChange={(dirty) => setDraft((prev) => ({ ...prev, dirty }))}
             onFeedback={(items, closed) => {
-              setFeedback(items);
-              setReadOnly(closed);
+              setReviewData({ feedback: items, readOnly: closed });
               if (closed) stop();
             }}
             onCaptureCleared={() => {
-              setCapture(undefined);
-              setPopup(false);
+              setDraft((prev) => ({ ...prev, capture: undefined }));
+              setPopover({ kind: "closed" });
               if (commenting() && props.active) start();
             }}
             onClose={() => {
-              setPopup(false);
+              setPopover({ kind: "closed" });
               stop();
               toggle?.focus({ preventScroll: true });
             }}

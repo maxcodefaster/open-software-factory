@@ -47,7 +47,6 @@ test.skipIf(process.env["FACTORY_RUN_USAGE_MODEL_PROOF"] !== "1")(
     const native = await pinnedOpenCode(
       undefined,
       undefined,
-      undefined,
       `http://host.docker.internal:${provider.port}/v1`,
     );
     const processFixture = await factoryProcess();

@@ -1,9 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import {
-  createRegisterProjectInput,
-  type RegisterProjectInput,
-} from "../../../../packages/project-domain/src/project";
+import { createRegisterProjectInput, type RegisterProjectInput } from "#project-domain/project";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

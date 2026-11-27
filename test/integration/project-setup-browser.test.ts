@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
+import { setupReadiness } from "#project-domain/setup";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { setupReadiness } from "../../packages/project-domain/src/setup";
 
 test("setup side panel retains its draft through minimize, refresh and Factory Settings", async () => {
   const process = await factoryProcess(undefined, {
@@ -83,7 +83,8 @@ test("setup side panel retains its draft through minimize, refresh and Factory S
     });
     expect(errors).toEqual([]);
     expect((await database.client`SELECT id FROM factory.project`).length).toBe(0);
-    const [draft] = await database.client`SELECT name FROM factory.project_setup_draft`;
+    const [draft] =
+      await database.client`SELECT payload->>'name' AS name FROM factory.operation WHERE kind='projects.setup_draft'`;
     expect(draft?.["name"]).toBe("Retained immediately");
   } finally {
     await browser.close();
@@ -115,15 +116,41 @@ test("setup questions retain answers across refresh and minimize; readiness resu
     await visible(setup.getByLabel("Project name", { exact: true })).toBeVisible();
     const [draft] = await database.client<
       { id: string; userID: string }[]
-    >`SELECT id,user_id AS "userID" FROM factory.project_setup_draft`;
+    >`SELECT id,scope_id AS "userID" FROM factory.operation WHERE kind='projects.setup_draft'`;
     if (!draft) throw new Error("Owned setup draft missing");
     const projectID = crypto.randomUUID();
     const inspectionID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`owned-${projectID}`},'Imported application','http://127.0.0.1:9/owned-process-fixture/app','main','.devcontainer/devcontainer.json',${draft.userID})`;
-    await database.client`UPDATE factory.project_setup_draft SET state='created',name='Imported application',kind='import',project_id=${projectID} WHERE id=${draft.id}`;
-    await database.client`INSERT INTO factory.project_setup_inspection(id,project_id,source_commit,state,created_by,output)
-      VALUES(${inspectionID},${projectID},${"a".repeat(40)},'proposal',${draft.userID},${JSON.stringify({ purpose: "A small internal application for support teams.", services: [{ name: "Web", description: "Existing application", port: 4300 }], uncertainty: [], questions: [{ id: "command", question: "Which existing command starts the application?" }], files: [] })}::jsonb)`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`owned-${projectID}`},'Imported application','http://127.0.0.1:9/owned-process-fixture/app','main','.factory/actor-template.json',${draft.userID})`;
+    await database.client`UPDATE factory.operation
+      SET state='created',active_key=NULL,completed_at=now(),
+        payload=payload || jsonb_build_object('name','Imported application','kind','import'),
+        result=jsonb_build_object('projectID',${projectID}::text)
+      WHERE id=${draft.id}`;
+    await database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${inspectionID},'project.setup_inspection','project',${projectID},
+        ${`project.setup_inspection:${inspectionID}`},${`project.setup_inspection:${projectID}`},'proposal',
+        ${JSON.stringify({
+          projectId: projectID,
+          sourceCommit: "a".repeat(40),
+          output: {
+            purpose: "A small internal application for support teams.",
+            services: [{ name: "Web", description: "Existing application", port: 4300 }],
+            uncertainty: [],
+            questions: [
+              { id: "command", question: "Which existing command starts the application?" },
+            ],
+            files: [],
+          },
+          failure: null,
+          modelId: null,
+          connectionId: null,
+          connectionVersion: null,
+          parentId: null,
+          answers: {},
+          createdBy: draft.userID,
+        })}::jsonb,${draft.userID})`;
     const task = {
       task: "wiki",
       state: "failed",
@@ -177,7 +204,7 @@ test("setup questions retain answers across refresh and minimize; readiness resu
     ).toBeVisible();
     expect(
       (
-        await database.client`SELECT state FROM factory.project_setup_inspection WHERE id=${inspectionID}`
+        await database.client`SELECT state FROM factory.operation WHERE id=${inspectionID} AND kind='project.setup_inspection'`
       )[0]?.["state"],
     ).toBe("superseded");
   } finally {

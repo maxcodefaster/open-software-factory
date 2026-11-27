@@ -1,7 +1,4 @@
-import {
-  mergeDocumentText,
-  withoutRepeatedTitle,
-} from "../../../../packages/knowledge-domain/src/document-merge";
+import { mergeDocumentText, withoutRepeatedTitle } from "#knowledge-domain/document-merge";
 
 export type PageSnapshot = { id: string; version: number; title: string; body: string };
 export type KnowledgeDraft = { base: PageSnapshot; title: string; body: string; conflict: boolean };

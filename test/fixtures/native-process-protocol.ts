@@ -1,22 +1,26 @@
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
+import type { createDatabase } from "#db/client";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
+import type { SystemContract } from "#system-contract/system-contract";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createSubstrateIsolated } from "../../apps/factory/src/runtime/substrate-isolated";
 import {
   createSubstrateWorkspaces,
   substrateInstallationConfiguration,
 } from "../../apps/factory/src/runtime/substrate-workspaces";
+import { admitInitialSource } from "../../apps/factory/src/workspace/source-initialization";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import type { createDatabase } from "../../packages/db/src/client";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
-import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import type { SystemContract } from "../../packages/system-contract/src/system-contract";
 import { eventually, type factoryProcess, ownedFactorySigningSecret } from "./factory-process";
+import { nativeProjectTemplate } from "./native-project";
+import { memoryPrivateObjects } from "./private-objects";
 
 type Host = Awaited<ReturnType<typeof factoryProcess>>;
 type Database = ReturnType<typeof createDatabase>;
@@ -56,7 +60,98 @@ export async function nativeProcessProtocol(
   const calls: { method: string; scope: string }[] = [];
   const token = crypto.randomUUID();
   const hub = new RuntimeHub(async () => {});
-  const sources = createSubstrateSources(database, hub);
+  const sourceDirectory = await mkdtemp(join(dirname(expected), "controlled-source-"));
+  const sourceBinary = join(sourceDirectory, "source-host");
+  const content = Buffer.from("Owned prior Session source\n");
+  const digest = createHash("sha256").update(content).digest("hex");
+  let sources: ReturnType<typeof createSubstrateSources>;
+  try {
+    // The same controlled Source bytes serve native Resume and the subsequent
+    // authenticated import. This process owns its state, binary and objects;
+    // it never uses the host installation root or a retained Factory's files.
+    await writeFile(
+      sourceBinary,
+      `#!${process.execPath}
+const input = await Bun.stdin.json();
+const bytes = Buffer.from(${JSON.stringify(content.toString("base64"))}, "base64");
+const bundle = {version:1,bytes:bytes.length,sha256:${JSON.stringify(digest)},chunks:[${JSON.stringify(digest)}]};
+let checkpoint;
+const server = Bun.serve({unix:input.socket,fetch:async request => {
+  if(request.headers.get("authorization") !== "Bearer "+input.access.token ||
+     request.headers.get("X-Factory-Source-Service") !== input.access.serviceId ||
+     request.headers.get("X-Factory-Source-Epoch") !== String(input.access.epoch))
+    return new Response(null,{status:403});
+  const operation = new URL(request.url).pathname.split("/").at(-1);
+  if(operation === "stat") return Response.json({kind:"directory"});
+  const body = await request.json();
+  if(operation === "checkpoint" && typeof body.checkpointId === "string" &&
+     body.writerEpoch === input.access.ownerEpoch+1) {
+    checkpoint ??= {checkpointId:body.checkpointId,writerEpoch:body.writerEpoch};
+    if(JSON.stringify(checkpoint) === JSON.stringify(body)) return Response.json(bundle);
+  }
+  if(operation === "chunk" && checkpoint && body.checkpointId === checkpoint.checkpointId &&
+     body.writerEpoch === checkpoint.writerEpoch && body.chunk === 0) return new Response(bytes);
+  return new Response(null,{status:409});
+}});
+process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
+`,
+      { mode: 0o700 },
+    );
+    const previous = {
+      FACTORY_STATE_DIRECTORY: process.env["FACTORY_STATE_DIRECTORY"],
+      FACTORY_SOURCE_SERVICE_BINARY: process.env["FACTORY_SOURCE_SERVICE_BINARY"],
+    };
+    try {
+      process.env["FACTORY_STATE_DIRECTORY"] = sourceDirectory;
+      process.env["FACTORY_SOURCE_SERVICE_BINARY"] = sourceBinary;
+      sources = createSubstrateSources(database, hub, memoryPrivateObjects());
+    } finally {
+      for (const [key, value] of Object.entries(previous))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
+  } catch (cause) {
+    await rm(sourceDirectory, { recursive: true, force: true });
+    throw cause;
+  }
+  const preparedSources = new Set<string>();
+  async function prepareWorkspaceSource(projectID: string, userID: string, changeID?: string) {
+    const workspaceID = await admitInitialSource(
+      database,
+      userID,
+      changeID ? { changeID } : { projectID },
+    );
+    const initial = await sources.lease(workspaceID);
+    if (preparedSources.has(workspaceID)) return initial;
+    if (
+      !initial?.seed ||
+      initial.seed.projectID !== projectID ||
+      initial.owner !== "service" ||
+      initial.actorUID !== null ||
+      !initial.writable ||
+      initial.seedConfirmedAt !== null
+    )
+      throw Error("Controlled native Source requires its fresh owned initial seed");
+    const tree = join(sourceDirectory, "workspace-source", workspaceID, initial.seed.id);
+    await mkdir(join(tree, "project"), { recursive: true, mode: 0o700 });
+    await writeFile(join(tree, "project", "README.md"), content, { flag: "wx", mode: 0o600 });
+    await writeFile(join(tree, "initial-source.json"), JSON.stringify(initial.seed), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    preparedSources.add(workspaceID);
+    return initial;
+  }
+  // Keep real Source lifecycle operations, while Project configuration remains
+  // this peer's explicit fixture input, not a saved-checkout configuration read.
+  // Every Workspace kind must retain the real Factory's sourceRestoreProtocol: 2.
+  const sourceHandoff = {
+    attach: sources.attach,
+    freezeActor: sources.freezeActor,
+    makeIndependent: sources.makeIndependent,
+    resume: sources.resume,
+    requireIndependent: sources.requireIndependent,
+  };
   const sockets = new Set<WebSocket>();
   const socketOwners = new WeakMap<WebSocket, { attemptID: string; role: "parent" | "child" }>();
   const sourceFences: {
@@ -194,12 +289,16 @@ process.stdout.write(await response.text());
     return {
       calls,
       sourceFences,
+      sources,
+      sourceDirectory,
+      prepareWorkspaceSource,
       async startWorkspace(
         projectID: string,
         userID: string,
         contract: SystemContract,
         changeID?: string,
       ) {
+        await prepareWorkspaceSource(projectID, userID, changeID);
         const owner = createSubstrateWorkspaces(
           database,
           hub,
@@ -207,8 +306,8 @@ process.stdout.write(await response.text());
           { ...configuration, projectID },
           call,
           call,
-          async () => contract,
-          changeID ? sources : undefined,
+          async () => ({ systemContract: contract, actorTemplate: nativeProjectTemplate }),
+          sourceHandoff,
         );
         const previousImage = process.env["FACTORY_BROWSER_TOOLS_IMAGE"];
         try {
@@ -229,15 +328,17 @@ process.stdout.write(await response.text());
           async () => contract,
           call,
           call,
+          undefined,
+          undefined,
+          async () => ({ systemContract: contract, actorTemplate: nativeProjectTemplate }),
         );
         return owner.stage(userID);
       },
       async connectorHeaders(attemptID: string, role: "parent" | "child") {
         const [attempt] = await database.client<{ actorUID: string; generation: number }[]>`
-          SELECT binding.actor_uid AS "actorUID",attempt.generation::float8 AS generation
-          FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-            ON binding.runtime_attempt_id=attempt.id
-          WHERE attempt.id=${attemptID} AND binding.actor_uid IS NOT NULL AND binding.deleted_at IS NULL`;
+          SELECT attempt.actor_uid AS "actorUID",attempt.generation::float8 AS generation
+          FROM factory.runtime_attempt attempt
+          WHERE attempt.id=${attemptID} AND attempt.actor_uid IS NOT NULL AND attempt.deleted_at IS NULL`;
         if (!attempt) throw Error("Controlled Connector requires its original Actor binding");
         const tokens = runtimeConnectorTokens(
           ownedFactorySigningSecret,
@@ -345,8 +446,7 @@ process.stdout.write(await response.text());
               }[]
             >`SELECT attempt.id AS "attemptID",writer.epoch::float8 AS epoch,writer.state
           FROM factory.substrate_source source JOIN factory.runtime_attempt attempt
-            ON attempt.workspace_id=source.workspace_id
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id AND binding.actor_uid=source.actor_uid
+            ON attempt.workspace_id=source.workspace_id AND attempt.actor_uid=source.actor_uid
           JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
           JOIN factory.change_writer writer ON writer.change_id=workspace.change_id
           WHERE source.workspace_id=${path[1] ?? ""} AND source.owner='actor' AND source.writable
@@ -386,6 +486,7 @@ process.stdout.write(await response.text());
         await writeFile(expected, original, { mode: 0o600 });
         await rm(bridge, { force: true });
         await rm(tokenFile, { force: true });
+        await rm(sourceDirectory, { recursive: true, force: true });
       },
     };
   } catch (cause) {
@@ -394,6 +495,7 @@ process.stdout.write(await response.text());
     await writeFile(expected, original, { mode: 0o600 });
     await rm(bridge, { force: true });
     await rm(tokenFile, { force: true });
+    await rm(sourceDirectory, { recursive: true, force: true });
     throw cause;
   }
 }

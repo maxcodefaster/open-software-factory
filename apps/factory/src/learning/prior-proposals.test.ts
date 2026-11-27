@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  LearningResultRejected,
-  learningResult,
-} from "../../../../packages/conversation-domain/src/learning";
+import { LearningResultRejected, learningResult } from "#conversation-domain/learning";
 import { comparisonExample } from "../../../../test/fixtures/learning-comparison";
 import { fixtureValue } from "../../../../test/fixtures/value";
 import {

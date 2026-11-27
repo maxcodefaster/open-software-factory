@@ -4,8 +4,8 @@ import type {
   changeAgentResumeInput,
   changeAgentStartInput,
   changeAgentStopConfirmationInput,
-} from "../../../../packages/conversation-domain/src/agent-turn";
-import { type createAccessController } from "../access/api";
+} from "#conversation-domain/agent-turn";
+import type { createAccessController } from "../access/api";
 import { agentActivityStream } from "./activity-stream";
 import type { newCodingConversationInput } from "./commands";
 import { agentViewSchema } from "./contracts";

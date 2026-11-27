@@ -27,8 +27,16 @@ separate [runtime coding policy](deploy/opencode-server/config/AGENTS.md).
 ## Product boundaries
 
 - Factory owns product authority and execution intent; pinned official Substrate owns Actor
-  lifecycle and snapshots. Use its native operations, private Docker, the exact Dev Containers CLI
-  and the Factory Runtime Connector. ROOTFS cold restart is the contract, not warm memory restore.
+  lifecycle and snapshots. Use native ActorTemplates, direct Project containers and the Factory
+  Runtime Connector; remove nested Docker and Dev Containers rather than translating or retaining
+  them. Prefer native MEMORY snapshots while supporting Substrate's cold ROOTFS fallback. Never
+  promise RAM continuity from a preference or snapshot label without actual restore evidence.
+- A Workspace retains its native Actor and canonical files after first Source admission.
+  Anhalten/Pause is native durable Suspend; continuing uses native Resume. Do not copy or transfer
+  canonical Source to another writer on normal Pause/Resume or delete the Actor as a routine Stop.
+  Destructive removal is explicit and separate; Coding cancellation remains a distinct operation.
+  Show retained UI/tree state promptly and honestly. Current file access may wake paused compute,
+  never inference; App health must not gate Source or general UI interaction.
 - This is Greenfield development. Remove obsolete execution paths instead of adding compatibility.
   No Coder/Terraform stack, generic runtime providers, private runtime fork or new lifecycle engine.
 - Preserve TLS, egress, writer ownership, external-effect safeguards and real user data. Recreate

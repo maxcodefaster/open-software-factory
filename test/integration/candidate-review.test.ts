@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
+import type { DatabaseTransaction } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { runtimeBuildBrowserToken } from "#runtime-domain/identity";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -7,15 +11,12 @@ import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-adap
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { runtimeBuildBrowserToken } from "../../packages/runtime-domain/src/identity";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { observe } from "../fixtures/pinned-opencode";
 
 test("direct review admission also waits for exact Verification cleanup and runner revocation", async () => {
@@ -33,6 +34,21 @@ test("direct review admission also waits for exact Verification cleanup and runn
         runner_uuid=${crypto.randomUUID()},runner_token='owned-unused',
         runner_job_handle='owned-review-job' WHERE id=${f.verificationID}`;
     const attemptID = await native.startVerification(f.verificationID, f.userID);
+    expect(native.projectReads).toEqual([
+      {
+        repository: "https://owned-build.factory.invalid/owned/review.git",
+        revision: f.commit,
+        actorTemplatePath: nativeProjectTemplate.path,
+      },
+    ]);
+    const [provision] = await database.client`
+      SELECT intent FROM factory.substrate_provision WHERE kind='verification' AND runtime_attempt_id=${attemptID}`;
+    expect(provision?.["intent"]).toMatchObject({
+      repository: "https://owned-build.factory.invalid/owned/review.git",
+      revision: f.commit,
+      actorTemplatePath: nativeProjectTemplate.path,
+      projectTemplate: nativeProjectTemplate,
+    });
     await f.database.client`UPDATE factory.verification
       SET state='succeeded',completed_at=now(),summary='Owned exact CI'
       WHERE id=${f.verificationID}`;
@@ -57,7 +73,7 @@ test("direct review admission also waits for exact Verification cleanup and runn
     await expect(admit(f.changeID, f.reviewID, f.userID)).rejects.toMatchObject({
       code: "conflict",
     });
-    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
+    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped'
       WHERE id=${attemptID}`;
     // A state projection cannot stand in for deletion of the original Actor.
     await expect(admit(f.changeID, f.reviewID, f.userID)).rejects.toMatchObject({
@@ -66,8 +82,8 @@ test("direct review admission also waits for exact Verification cleanup and runn
     expect(await f.turns.getByCommand(f.reviewID)).toBeNull();
     await native.stop(attemptID);
     const [deleted] = await database.client`
-      SELECT deleted_at IS NOT NULL AS confirmed FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${attemptID}`;
+      SELECT deleted_at IS NOT NULL AS confirmed FROM factory.runtime_attempt
+      WHERE id=${attemptID}`;
     expect(deleted).toEqual({ confirmed: true });
     const accepted = await admit(f.changeID, f.reviewID, f.userID);
     expect(accepted.replayed).toBe(false);
@@ -115,6 +131,13 @@ test("a queued review rechecks original Actor deletion immediately before dispat
       runner_uuid=${crypto.randomUUID()},runner_token='owned-unused',
       runner_job_handle='owned-queued-review-job' WHERE id=${f.verificationID}`;
     const attemptID = await native.startVerification(f.verificationID, f.userID);
+    expect(native.projectReads).toEqual([
+      {
+        repository: "https://owned-build.factory.invalid/owned/review.git",
+        revision: f.commit,
+        actorTemplatePath: nativeProjectTemplate.path,
+      },
+    ]);
     await database.client`UPDATE factory.verification SET state='succeeded',completed_at=now()
       WHERE id=${f.verificationID}`;
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${attemptID}`;
@@ -898,8 +921,8 @@ test.each([false, true])(
       const verificationID = crypto.randomUUID();
       const reviewID = crypto.randomUUID();
       await f.database.client`INSERT INTO factory.verification(
-        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,state,completed_at)
-        VALUES(${verificationID},${f.changeID},${newer},1,'owned-focus',2,${f.userID},'succeeded',now())`;
+        id,change_id,commit_sha,pull_request_number,action_run_id,created_by,state,completed_at)
+        VALUES(${verificationID},${f.changeID},${newer},1,2,${f.userID},'succeeded',now())`;
       await f.database.client`INSERT INTO factory.candidate_review(
         id,verification_id,change_id,commit_sha,base_sha,created_by,focus_review_id)
         VALUES(${reviewID},${verificationID},${f.changeID},${newer},${"a".repeat(40)},${f.userID},${f.reviewID})`;
@@ -1062,8 +1085,11 @@ test("App scenarios retain compact recording positions independently of observat
     );
     const scenarios = await f.database.client<
       { id: string; position: number; session: string }[]
-    >`SELECT id,media_started_ms::float8 AS position,media_session_id AS session
-      FROM factory.review_scenario WHERE review_id=${f.reviewID} ORDER BY started_at,id`;
+    >`SELECT payload->>'id' AS id,(payload->>'mediaStartedMs')::float8 AS position,
+        payload->>'mediaSessionId' AS session
+      FROM factory.operation
+      WHERE kind='review.scenario' AND scope_type='candidate_review' AND scope_id=${f.reviewID}
+      ORDER BY created_at,payload->>'id'`;
     expect([...scenarios]).toEqual([
       { id: "first-app", position: 0, session: grant.sessionID },
       { id: "second-app", position: 750, session: grant.sessionID },
@@ -1126,8 +1152,10 @@ test("a frontend review can cover protected checks with an observed source-only 
     await expect(
       (async () => {
         await f.database.client`
-        UPDATE factory.review_scenario SET observation_kind='app'
-        WHERE review_id=${f.reviewID} AND id='protected-checks'`;
+        UPDATE factory.operation
+        SET payload=jsonb_set(payload,'{observationKind}','"app"'::jsonb)
+        WHERE kind='review.scenario' AND scope_type='candidate_review'
+          AND idempotency_key=${`review.scenario:${f.reviewID}:protected-checks`}`;
       })(),
     ).rejects.toThrow("immutable");
     await controller.call(
@@ -1162,8 +1190,11 @@ test("a frontend review can cover protected checks with an observed source-only 
     );
     const [sourceCase] = await f.database.client<
       { kind: string; position: string | null; session: string | null }[]
-    >`SELECT observation_kind AS kind,media_started_ms::text AS position,media_session_id AS session
-      FROM factory.review_scenario WHERE review_id=${f.reviewID} AND id='protected-checks'`;
+    >`SELECT payload->>'observationKind' AS kind,payload->>'mediaStartedMs' AS position,
+        payload->>'mediaSessionId' AS session
+      FROM factory.operation
+      WHERE kind='review.scenario' AND scope_type='candidate_review'
+        AND idempotency_key=${`review.scenario:${f.reviewID}:protected-checks`}`;
     expect(sourceCase).toEqual({ kind: "source", position: null, session: null });
     await controller.call(
       turn.id,
@@ -1265,8 +1296,10 @@ test("an App case cannot be closed as passing before its own App observation", a
       ),
     ).rejects.toThrow("actual App observation");
     const [row] = await f.database.client<{ active: boolean; status: string | null }[]>`
-      SELECT ended_at IS NULL AS active,status FROM factory.review_scenario
-      WHERE review_id=${f.reviewID} AND id='app-case'`;
+      SELECT completed_at IS NULL AS active,payload->>'status' AS status
+      FROM factory.operation
+      WHERE kind='review.scenario' AND scope_type='candidate_review'
+        AND idempotency_key=${`review.scenario:${f.reviewID}:app-case`}`;
     expect(row).toEqual({ active: true, status: null });
     await controller.observeBrowser(
       turn.id,
@@ -1302,8 +1335,10 @@ test("an App case cannot be closed as passing before its own App observation", a
       "observed-result",
     );
     const [completed] = await f.database.client<{ active: boolean; status: string }[]>`
-      SELECT ended_at IS NULL AS active,status FROM factory.review_scenario
-      WHERE review_id=${f.reviewID} AND id='app-case'`;
+      SELECT completed_at IS NULL AS active,payload->>'status' AS status
+      FROM factory.operation
+      WHERE kind='review.scenario' AND scope_type='candidate_review'
+        AND idempotency_key=${`review.scenario:${f.reviewID}:app-case`}`;
     expect(completed).toEqual({ active: false, status: "passed" });
   } finally {
     await f.dispose();

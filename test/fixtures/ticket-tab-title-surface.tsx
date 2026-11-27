@@ -1,11 +1,11 @@
 import { render } from "@solidjs/web";
 import { createSignal, onCleanup, onSettled, Show } from "solid-js";
 import { createAgentCommandIds } from "../../apps/factory/src/agent-command-ids";
-import { type TicketDraft } from "../../apps/factory/src/change/contracts";
+import type { TicketDraft } from "../../apps/factory/src/change/contracts";
 import type { TicketDetail } from "../../apps/factory/src/desktop/contracts";
 import { createDesktopReads } from "../../apps/factory/src/desktop/reads";
 import { createTicketCommands } from "../../apps/factory/src/desktop/ticket-commands";
-import { TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
+import { TicketWorkspace } from "../../apps/factory/src/tickets/ticket-workspace";
 import { createWorkspaceState } from "../../apps/factory/src/workspace/state";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import { selectedWorkspaceTab, type WorkspaceTab } from "../../apps/factory/src/workspace-tabs";

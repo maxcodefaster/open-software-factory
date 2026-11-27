@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { SkillContent, SkillRevision } from "#conversation-domain/skills";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type { SkillContent, SkillRevision } from "../../packages/conversation-domain/src/skills";
 import {
   decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,

@@ -1,474 +1,37 @@
-import { createHmac, randomBytes } from "node:crypto";
-import {
-  checkResourceAllowed,
-  type FetchLike,
-  type OAuthClientProvider,
-  type OAuthDiscoveryState,
-  resourceUrlFromServerUrl,
-  type StoredOAuthClientInformation,
-  type StoredOAuthTokens,
-  UnauthorizedError,
-} from "@modelcontextprotocol/client";
-import { and, eq, gt, inArray, ne, sql as expression } from "drizzle-orm";
-import {
-  type MCPAssignment,
-  mcpConnectInput,
-} from "../../../../packages/conversation-domain/src/mcp-library";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  mcpConnectIntent,
-  mcpConnection,
-  mcpOauthFlow,
-  mcpSecretWrite,
-  mcpTokenRefresh,
-} from "../../../../packages/db/src/schema";
+import { createHmac } from "node:crypto";
+import type { FetchLike } from "@modelcontextprotocol/client";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
 import { CommandError } from "../command-error";
-import { canonicalMCPJSON, createMCPLibrary, mcpDigest } from "./controller";
+import { completeOAuthCallback, connectMCP } from "./connection-lifecycle";
+import {
+  type MCPConnectionContext,
+  type MCPDatabase,
+  markConnectionReview,
+} from "./connection-state";
+import { canonicalMCPJSON, createMCPLibrary } from "./controller";
 import { secureMCPFetch } from "./network";
-import { createRemoteMCP } from "./remote";
+import { createRemoteConnection } from "./oauth-provider";
+import { recoverSecretWrites } from "./secret-store";
 import type { MCPSecrets } from "./secrets";
 
-type Material = {
-  bearer?: string;
-  clients?: Record<string, StoredOAuthClientInformation>;
-  tokens?: StoredOAuthTokens;
-  verifier?: string;
-  discovery?: OAuthDiscoveryState;
-};
-type Write = {
-  id: string;
-  connectionId: string;
-  baseKey: string | null;
-  credentialEpoch: string;
-  secretKey: string;
-  digest: string;
-  state: string;
-};
 export function createMCPConnections(
-  database: ReturnType<typeof createDatabase>,
+  database: MCPDatabase,
   secrets: MCPSecrets,
   signingKey: string,
   factoryOrigin: string,
   fetcher: FetchLike = secureMCPFetch,
 ) {
   const library = createMCPLibrary(database);
-  const fingerprint = (value: unknown) =>
-    createHmac("sha256", signingKey).update(canonicalMCPJSON(value)).digest("hex");
-  const callback = new URL("/api/mcp/oauth/callback", factoryOrigin).href;
-  async function material(id: string, epoch?: string): Promise<Material> {
-    const connection = await database.client.begin((sql) => library.connectionIn(sql, id));
-    if (epoch && connection.credentialEpoch !== epoch)
-      throw new CommandError("conflict", "MCP authorization was replaced");
-    if (connection.state === "revoked")
-      throw new CommandError("forbidden", "MCP connection was disconnected");
-    if (!connection.secretKey) return {};
-    const stored = await secrets.read(connection.secretKey);
-    if (!stored || stored.connectionId !== id || fingerprint(stored.material) !== stored.digest)
-      throw new CommandError("unavailable", "The MCP credential is unavailable");
-    return stored.material as Material;
-  }
-  async function settle(write: Write) {
-    const stored = await secrets.read(write.secretKey);
-    if (!stored) return false;
-    if (
-      stored.connectionId !== write.connectionId ||
-      stored.commandId !== write.id ||
-      stored.digest !== write.digest ||
-      fingerprint(stored.material) !== write.digest
-    )
-      throw new CommandError("unavailable", "MCP secret does not match its durable write intent");
-    const committed = await database.client.begin(async (sql) => {
-      const db = drizzleTransaction(sql);
-      await db.execute(
-        expression`SELECT pg_advisory_xact_lock(hashtext(${`mcp-secret:${write.connectionId}`}))`,
-      );
-      const [current] = await db
-        .select({ state: mcpSecretWrite.state })
-        .from(mcpSecretWrite)
-        .where(eq(mcpSecretWrite.id, write.id))
-        .for("update");
-      if (current?.state !== "intended") return current?.state === "committed";
-      const [actor] = await db
-        .select({ id: mcpConnection.authorizedBy })
-        .from(mcpConnection)
-        .where(eq(mcpConnection.id, write.connectionId));
-      try {
-        if (!actor) throw new CommandError("not-found", "MCP connection not found");
-        await library.authorizeIn(sql, write.connectionId, actor.id);
-      } catch (cause) {
-        if (!(cause instanceof CommandError) || !["forbidden", "not-found"].includes(cause.code))
-          throw cause;
-        await db
-          .update(mcpSecretWrite)
-          .set({ state: "superseded" })
-          .where(eq(mcpSecretWrite.id, write.id));
-        return false;
-      }
-      const updated = await db
-        .update(mcpConnection)
-        .set({ secretKey: write.secretKey, updatedAt: expression<Date>`now()` })
-        .where(
-          and(
-            eq(mcpConnection.id, write.connectionId),
-            expression<boolean>`${mcpConnection.secretKey} IS NOT DISTINCT FROM ${write.baseKey}`,
-            eq(mcpConnection.credentialEpoch, write.credentialEpoch),
-            ne(mcpConnection.state, "revoked"),
-          ),
-        )
-        .returning({ id: mcpConnection.id });
-      await db
-        .update(mcpSecretWrite)
-        .set({ state: updated.length ? "committed" : "superseded" })
-        .where(eq(mcpSecretWrite.id, write.id));
-      if (updated.length) {
-        const renewed = await db
-          .update(mcpTokenRefresh)
-          .set({ state: "committed" })
-          .where(
-            and(
-              eq(mcpTokenRefresh.id, write.id),
-              eq(mcpTokenRefresh.connectionId, write.connectionId),
-              eq(mcpTokenRefresh.credentialEpoch, write.credentialEpoch),
-            ),
-          )
-          .returning({ id: mcpTokenRefresh.id });
-        if (renewed.length)
-          await db
-            .update(mcpConnection)
-            .set({ state: "ready" })
-            .where(
-              and(
-                eq(mcpConnection.id, write.connectionId),
-                eq(mcpConnection.credentialEpoch, write.credentialEpoch),
-                eq(mcpConnection.state, "reconnect"),
-                gt(expression<number>`jsonb_array_length(${mcpConnection.allowedTools})`, 0),
-              ),
-            );
-      }
-      return updated.length > 0;
-    });
-    if (!committed)
-      throw new CommandError("conflict", "MCP credentials changed or were disconnected");
-    return true;
-  }
-  async function persist(
-    id: string,
-    value: Material,
-    epoch: string,
-    commandId: string = crypto.randomUUID(),
-  ) {
-    const encoded = JSON.stringify(value);
-    if (Buffer.byteLength(encoded) > 131072)
-      throw new CommandError("conflict", "MCP authorization metadata exceeds its storage limit");
-    const snapshot = JSON.parse(encoded) as Material;
-    const digest = fingerprint(snapshot);
-    const write = await database.client.begin(async (sql) => {
-      const db = drizzleTransaction(sql);
-      await db.execute(expression`SELECT pg_advisory_xact_lock(hashtext(${`mcp-secret:${id}`}))`);
-      const connection = await library.connectionIn(sql, id);
-      if (connection.state === "revoked" || connection.credentialEpoch !== epoch)
-        throw new CommandError("forbidden", "MCP connection was disconnected or replaced");
-      const [pending] = await db
-        .select({ id: mcpSecretWrite.id })
-        .from(mcpSecretWrite)
-        .where(and(eq(mcpSecretWrite.connectionId, id), eq(mcpSecretWrite.state, "intended")));
-      if (pending) throw new CommandError("conflict", "An MCP credential write needs recovery");
-      const secretKey = `mcp/${id}/${commandId}`;
-      await db.insert(mcpSecretWrite).values({
-        id: commandId,
-        connectionId: id,
-        baseKey: connection.secretKey,
-        credentialEpoch: epoch,
-        secretKey,
-        digest,
-        state: "intended",
-      });
-      return {
-        id: commandId,
-        connectionId: id,
-        baseKey: connection.secretKey,
-        credentialEpoch: epoch,
-        secretKey,
-        digest,
-        state: "intended",
-      };
-    });
-    await secrets.create(write.secretKey, {
-      commandId,
-      connectionId: id,
-      digest,
-      material: snapshot,
-    });
-    await settle(write);
-  }
-  async function oauthProvider(
-    id: string,
-    epoch: string,
-    beforeRequest: () => Promise<void>,
-    state?: string,
-  ) {
-    let data = await material(id, epoch);
-    let redirect: string | undefined;
-    let refreshId: string | undefined;
-    async function abandonRefresh() {
-      const pending = refreshId;
-      refreshId = undefined;
-      if (!pending) return;
-      await database.client.begin(async (sql) => {
-        const db = drizzleTransaction(sql);
-        const changed = await db
-          .update(mcpTokenRefresh)
-          .set({ state: "uncertain" })
-          .where(and(eq(mcpTokenRefresh.id, pending), ne(mcpTokenRefresh.state, "committed")))
-          .returning({ id: mcpTokenRefresh.id });
-        if (changed.length)
-          await db
-            .update(mcpConnection)
-            .set({ state: "reconnect" })
-            .where(
-              and(
-                eq(mcpConnection.id, id),
-                eq(mcpConnection.credentialEpoch, epoch),
-                ne(mcpConnection.state, "revoked"),
-              ),
-            );
-      });
-    }
-    const save = async () => persist(id, data, epoch);
-    const provider: OAuthClientProvider = {
-      redirectUrl: callback,
-      clientMetadata: {
-        client_name: "Factory",
-        redirect_uris: [callback],
-        response_types: ["code"],
-        grant_types: ["authorization_code", "refresh_token"],
-        token_endpoint_auth_method: "none",
-      },
-      state: () => {
-        if (!state) throw new CommandError("conflict", "Reconnect this MCP connection in Settings");
-        return state;
-      },
-      clientInformation: (context) => (context ? data.clients?.[context.issuer] : undefined),
-      saveClientInformation: async (info, context) => {
-        if (!context) throw new Error("OAuth client registration is missing its issuer");
-        data = { ...data, clients: { ...data.clients, [context.issuer]: info } };
-        await save();
-      },
-      tokens: (context) =>
-        !context || data.tokens?.issuer === context.issuer ? data.tokens : undefined,
-      saveTokens: async (tokens) => {
-        if (data.tokens?.scope && tokens.scope) {
-          const granted = new Set(data.tokens.scope.split(/\s+/).filter(Boolean));
-          if (tokens.scope.split(/\s+/).some((scope) => scope && !granted.has(scope))) {
-            if (refreshId)
-              await database.db
-                .update(mcpTokenRefresh)
-                .set({ state: "uncertain" })
-                .where(eq(mcpTokenRefresh.id, refreshId));
-            await database.db
-              .update(mcpConnection)
-              .set({ state: "reconnect" })
-              .where(
-                and(
-                  eq(mcpConnection.id, id),
-                  eq(mcpConnection.credentialEpoch, epoch),
-                  ne(mcpConnection.state, "revoked"),
-                ),
-              );
-            throw new CommandError(
-              "forbidden",
-              "OAuth permissions changed. Reconnect and review the connection in Settings",
-            );
-          }
-        }
-        data = { ...data, tokens };
-        delete data.verifier;
-        await persist(id, data, epoch, refreshId);
-        refreshId = undefined;
-      },
-      redirectToAuthorization: (url) => {
-        if (!state) throw new CommandError("conflict", "Reconnect this MCP connection in Settings");
-        if (url.protocol !== "https:" || url.username || url.password)
-          throw new Error("OAuth authorization requires a secure URL");
-        redirect = url.href;
-      },
-      saveCodeVerifier: async (verifier) => {
-        data = { ...data, verifier };
-        await save();
-      },
-      codeVerifier: () => {
-        if (!data.verifier) throw new CommandError("conflict", "OAuth authorization has expired");
-        return data.verifier;
-      },
-      saveDiscoveryState: async (discovery) => {
-        data = { ...data, discovery };
-        await save();
-      },
-      discoveryState: () => data.discovery,
-      validateResourceURL: async (endpoint, resource) => {
-        const expected = resourceUrlFromServerUrl(endpoint);
-        if (
-          resource &&
-          !checkResourceAllowed({ requestedResource: expected, configuredResource: resource })
-        )
-          throw new Error("OAuth resource does not match the MCP endpoint");
-        return expected;
-      },
-      invalidateCredentials: async (scope) => {
-        if (scope === "all" || scope === "tokens") delete data.tokens;
-        if (scope === "all" || scope === "client") delete data.clients;
-        if (scope === "all" || scope === "verifier") delete data.verifier;
-        if (scope === "all" || scope === "discovery") delete data.discovery;
-        await save();
-      },
-    };
-    const guardedFetch: FetchLike = async (input, options) => {
-      await beforeRequest();
-      const request = new Request(input instanceof URL ? input.href : input, options);
-      const registrationEndpoint =
-        data.discovery?.authorizationServerMetadata?.registration_endpoint;
-      if (
-        !state &&
-        request.method === "POST" &&
-        registrationEndpoint &&
-        request.url === new URL(registrationEndpoint).href
-      ) {
-        const registration: unknown = await request
-          .clone()
-          .json()
-          .catch(() => null);
-        if (
-          registration &&
-          typeof registration === "object" &&
-          "client_name" in registration &&
-          registration.client_name === "Factory" &&
-          "redirect_uris" in registration
-        ) {
-          await database.db
-            .update(mcpConnection)
-            .set({ state: "reconnect" })
-            .where(
-              and(
-                eq(mcpConnection.id, id),
-                eq(mcpConnection.credentialEpoch, epoch),
-                ne(mcpConnection.state, "revoked"),
-              ),
-            );
-          throw new CommandError(
-            "conflict",
-            "OAuth client registration changed. Reconnect explicitly in Settings",
-          );
-        }
-      }
-      if (request.method === "POST") {
-        const body = await request.clone().text();
-        if (new URLSearchParams(body).get("grant_type") === "refresh_token") {
-          const candidateId = crypto.randomUUID();
-          await database.client.begin(async (sql) => {
-            const db = drizzleTransaction(sql);
-            const current = await library.connectionIn(sql, id);
-            if (current.credentialEpoch !== epoch || current.state === "revoked")
-              throw new CommandError("forbidden", "MCP authorization was replaced or disconnected");
-            const [pending] = await db
-              .select({ id: mcpTokenRefresh.id })
-              .from(mcpTokenRefresh)
-              .where(
-                and(
-                  eq(mcpTokenRefresh.connectionId, id),
-                  eq(mcpTokenRefresh.credentialEpoch, epoch),
-                  inArray(mcpTokenRefresh.state, ["intended", "uncertain"]),
-                ),
-              );
-            if (pending)
-              throw new CommandError(
-                "conflict",
-                "MCP token renewal is pending or uncertain. Reconnect in Settings",
-              );
-            await db.insert(mcpTokenRefresh).values({
-              id: candidateId,
-              connectionId: id,
-              credentialEpoch: epoch,
-              state: "intended",
-            });
-          });
-          refreshId = candidateId;
-        }
-      }
-      try {
-        const response = await fetcher(request.url, {
-          method: request.method,
-          headers: request.headers,
-          signal: request.signal,
-          redirect: "error",
-          ...(request.body ? { body: await request.text() } : {}),
-        });
-        if (!response.ok && refreshId) await abandonRefresh();
-        return response;
-      } catch (cause) {
-        await abandonRefresh();
-        throw cause;
-      }
-    };
-    return { provider, fetch: guardedFetch, redirect: () => redirect, abandonRefresh };
-  }
-  async function remote(
-    id: string,
-    state: string | undefined,
-    expectedEpoch: string,
-    beforeRequest?: () => Promise<void>,
-    signal?: AbortSignal,
-  ) {
-    const connection = await database.client.begin((sql) => library.connectionIn(sql, id));
-    if (connection.credentialEpoch !== expectedEpoch || connection.state === "revoked")
-      throw new CommandError("forbidden", "MCP authorization was replaced or disconnected");
-    const guard =
-      beforeRequest ??
-      (() =>
-        database.client.begin(async (sql) => {
-          await library.authorizeIn(sql, id, connection.authorizedBy);
-          const current = await library.connectionIn(sql, id);
-          if (current.credentialEpoch !== expectedEpoch || current.state === "revoked")
-            throw new CommandError("forbidden", "MCP authorization was replaced or disconnected");
-        }));
-    const revision = await database.client.begin((sql) =>
-      library.revisionIn(sql, connection.revisionId),
-    );
-    if (revision.content.authentication === "oauth") {
-      const oauth = await oauthProvider(id, connection.credentialEpoch, guard, state);
-      const client = createRemoteMCP(
-        revision.content.endpoint,
-        oauth.provider,
-        oauth.fetch,
-        signal,
-      );
-      return {
-        ...client,
-        close: async () => {
-          try {
-            await client.close();
-          } finally {
-            await oauth.abandonRefresh();
-          }
-        },
-        redirect: oauth.redirect,
-      };
-    }
-    const data = await material(id, connection.credentialEpoch);
-    return {
-      ...createRemoteMCP(
-        revision.content.endpoint,
-        revision.content.authentication === "bearer"
-          ? { token: async () => data.bearer }
-          : undefined,
-        async (url, init) => {
-          await guard();
-          return fetcher(url, init);
-        },
-        signal,
-      ),
-      redirect: () => undefined,
-    };
-  }
+  const ctx: MCPConnectionContext = {
+    database,
+    secrets,
+    library,
+    fingerprint: (value: unknown) =>
+      createHmac("sha256", signingKey).update(canonicalMCPJSON(value)).digest("hex"),
+    callback: new URL("/api/mcp/oauth/callback", factoryOrigin).href,
+    fetcher,
+  };
+
   const authorizeAssignment = (assignment: MCPAssignment, projectId: string, userId: string) =>
     database.client.begin(async (sql) => {
       const connection = await library.connectionIn(sql, assignment.connectionId);
@@ -485,319 +48,14 @@ export function createMCPConnections(
       )
         throw new CommandError("forbidden", "MCP access was changed or revoked");
     });
+
   return {
     library,
     authorizeAssignment,
-    async recover() {
-      const writes = await database.db
-        .select({
-          id: mcpSecretWrite.id,
-          connectionId: mcpSecretWrite.connectionId,
-          baseKey: mcpSecretWrite.baseKey,
-          credentialEpoch: mcpSecretWrite.credentialEpoch,
-          secretKey: mcpSecretWrite.secretKey,
-          digest: mcpSecretWrite.digest,
-          state: mcpSecretWrite.state,
-        })
-        .from(mcpSecretWrite)
-        .where(eq(mcpSecretWrite.state, "intended"));
-      for (const write of writes) {
-        try {
-          await settle(write);
-        } catch (cause) {
-          if (
-            !(cause instanceof CommandError) ||
-            !["conflict", "forbidden", "not-found"].includes(cause.code)
-          )
-            throw cause;
-        }
-      }
-      // Never replay an authorization-code exchange or rotating refresh after a
-      // crash. A new explicit Connect creates a new authorization intent.
-    },
-    async connect(id: string, userId: string, value: unknown) {
-      const input = mcpConnectInput.parse(value);
-      const commandFingerprint = fingerprint({ id, userId, input });
-      const admission = await database.client.begin(async (sql) => {
-        const db = drizzleTransaction(sql);
-        await library.authorizeIn(sql, id, userId);
-        await db.execute(
-          expression`SELECT pg_advisory_xact_lock(hashtext(${`mcp-connect:${id}`}))`,
-        );
-        const [previous] = await db
-          .select({
-            connectionId: mcpConnectIntent.connectionId,
-            revisionId: mcpConnectIntent.revisionId,
-            createdBy: mcpConnectIntent.createdBy,
-            fingerprint: mcpConnectIntent.fingerprint,
-            state: mcpConnectIntent.state,
-            authorizationUrl: mcpConnectIntent.authorizationUrl,
-          })
-          .from(mcpConnectIntent)
-          .where(eq(mcpConnectIntent.id, input.commandId));
-        if (previous) {
-          if (
-            previous.connectionId !== id ||
-            previous.revisionId !== input.revisionId ||
-            previous.createdBy !== userId ||
-            previous.fingerprint !== commandFingerprint
-          )
-            throw new CommandError("conflict", "MCP command identity was reused");
-          if (previous.state !== "completed")
-            throw new CommandError(
-              "conflict",
-              "This connection attempt is incomplete. Start a new explicit connection",
-            );
-          const current = await library.connectionIn(sql, id);
-          if (
-            current.credentialEpoch !== input.commandId ||
-            ["reconnect", "revoked"].includes(current.state)
-          )
-            throw new CommandError(
-              "conflict",
-              "This authorization was replaced or failed. Start a new explicit connection",
-            );
-          return {
-            replay: true,
-            authorizationUrl: current.state === "authorizing" ? previous.authorizationUrl : null,
-            authentication: null,
-          };
-        }
-        const revision = await library.revisionIn(sql, input.revisionId);
-        if (revision.libraryId !== id)
-          throw new CommandError("conflict", "MCP revision belongs to another entry");
-        const [existing] = await db
-          .select({ version: mcpConnection.version })
-          .from(mcpConnection)
-          .where(eq(mcpConnection.id, id));
-        if ((existing?.version ?? 0) !== input.expectedVersion)
-          throw new CommandError(
-            "conflict",
-            "The MCP connection changed. Reload before connecting",
-          );
-        if (revision.content.authentication === "bearer" && !input.token)
-          throw new CommandError("conflict", "Enter the read-only access token");
-        if (revision.content.authentication !== "bearer" && input.token)
-          throw new CommandError("conflict", "This MCP connection does not accept a bearer token");
-        await db
-          .insert(mcpConnection)
-          .values({
-            id,
-            revisionId: input.revisionId,
-            state: "authorizing",
-            authorizedBy: userId,
-            credentialEpoch: input.commandId,
-          })
-          .onConflictDoUpdate({
-            target: mcpConnection.id,
-            set: {
-              revisionId: input.revisionId,
-              state: "authorizing",
-              version: expression<number>`${mcpConnection.version}+1`,
-              secretKey: null,
-              tools: [],
-              allowedTools: [],
-              authorizedBy: userId,
-              credentialEpoch: input.commandId,
-              updatedAt: expression<Date>`now()`,
-            },
-          });
-        await db
-          .update(mcpSecretWrite)
-          .set({ state: "superseded" })
-          .where(and(eq(mcpSecretWrite.connectionId, id), eq(mcpSecretWrite.state, "intended")));
-        await db
-          .update(mcpOauthFlow)
-          .set({ state: "failed" })
-          .where(
-            and(
-              eq(mcpOauthFlow.connectionId, id),
-              inArray(mcpOauthFlow.state, ["pending", "exchanging"]),
-            ),
-          );
-        await db
-          .update(mcpConnectIntent)
-          .set({ state: "uncertain" })
-          .where(and(eq(mcpConnectIntent.connectionId, id), eq(mcpConnectIntent.state, "running")));
-        await db
-          .update(mcpTokenRefresh)
-          .set({ state: "uncertain" })
-          .where(and(eq(mcpTokenRefresh.connectionId, id), eq(mcpTokenRefresh.state, "intended")));
-        await db.insert(mcpConnectIntent).values({
-          id: input.commandId,
-          connectionId: id,
-          revisionId: input.revisionId,
-          createdBy: userId,
-          fingerprint: commandFingerprint,
-          state: "running",
-        });
-        return {
-          replay: false,
-          authorizationUrl: null,
-          authentication: revision.content.authentication,
-        };
-      });
-      if (admission.replay) return { authorizationUrl: admission.authorizationUrl };
-      let client: Awaited<ReturnType<typeof remote>> | undefined;
-      try {
-        if (input.token) await persist(id, { bearer: input.token }, input.commandId);
-        const state =
-          admission.authentication === "oauth" ? randomBytes(32).toString("base64url") : undefined;
-        if (state)
-          await database.db.insert(mcpOauthFlow).values({
-            id: input.commandId,
-            connectionId: id,
-            createdBy: userId,
-            stateDigest: mcpDigest(state),
-            state: "pending",
-            expiresAt: expression<Date>`now()+interval '10 minutes'`,
-          });
-        client = await remote(id, state, input.commandId);
-        try {
-          await client.connect();
-          const tools = await client.tools();
-          await database.db
-            .update(mcpConnection)
-            .set({
-              state: "review",
-              tools,
-              version: expression<number>`${mcpConnection.version}+1`,
-            })
-            .where(
-              and(
-                eq(mcpConnection.id, id),
-                eq(mcpConnection.state, "authorizing"),
-                eq(mcpConnection.credentialEpoch, input.commandId),
-              ),
-            );
-        } catch (cause) {
-          if (!(cause instanceof UnauthorizedError) || !client.redirect()) throw cause;
-        }
-        const authorizationUrl = client.redirect() ?? null;
-        await database.db
-          .update(mcpConnectIntent)
-          .set({ state: "completed", authorizationUrl })
-          .where(eq(mcpConnectIntent.id, input.commandId));
-        return { authorizationUrl };
-      } catch {
-        await database.db
-          .update(mcpConnectIntent)
-          .set({ state: "failed" })
-          .where(eq(mcpConnectIntent.id, input.commandId));
-        await database.db
-          .update(mcpConnection)
-          .set({ state: "reconnect" })
-          .where(
-            and(
-              eq(mcpConnection.id, id),
-              eq(mcpConnection.state, "authorizing"),
-              eq(mcpConnection.credentialEpoch, input.commandId),
-            ),
-          );
-        throw new CommandError(
-          "unavailable",
-          "Could not connect to the MCP server. Check its endpoint, account access and OAuth callback allowlist",
-        );
-      } finally {
-        await client?.close().catch(() => {});
-      }
-    },
-    async callback(userId: string, params: URLSearchParams) {
-      const state = params.get("state");
-      if (!state || !params.get("code") || params.has("error"))
-        throw new CommandError("conflict", "MCP authorization was cancelled or is invalid");
-      const flow = await database.client.begin(async (sql) => {
-        const db = drizzleTransaction(sql);
-        const [flow] = await db
-          .select({ id: mcpOauthFlow.id, connectionId: mcpOauthFlow.connectionId })
-          .from(mcpOauthFlow)
-          .where(
-            and(
-              eq(mcpOauthFlow.stateDigest, mcpDigest(state)),
-              eq(mcpOauthFlow.createdBy, userId),
-              eq(mcpOauthFlow.state, "pending"),
-              gt(mcpOauthFlow.expiresAt, expression<Date>`now()`),
-            ),
-          )
-          .for("update");
-        if (!flow)
-          throw new CommandError(
-            "forbidden",
-            "MCP authorization has expired or belongs to another session",
-          );
-        await library.authorizeIn(sql, flow.connectionId, userId);
-        const connection = await library.connectionIn(sql, flow.connectionId);
-        if (connection.credentialEpoch !== flow.id || connection.state !== "authorizing")
-          throw new CommandError("conflict", "MCP authorization was replaced");
-        await db
-          .update(mcpOauthFlow)
-          .set({ state: "exchanging" })
-          .where(eq(mcpOauthFlow.id, flow.id));
-        return flow;
-      });
-      let client: Awaited<ReturnType<typeof remote>> | undefined;
-      try {
-        client = await remote(flow.connectionId, undefined, flow.id);
-        await client.transport.finishAuth(params);
-        const connected = await remote(flow.connectionId, undefined, flow.id);
-        try {
-          await connected.connect();
-          const tools = await connected.tools();
-          await database.client.begin(async (sql) => {
-            const db = drizzleTransaction(sql);
-            await library.authorizeIn(sql, flow.connectionId, userId);
-            const [active] = await db
-              .select({ id: mcpOauthFlow.id })
-              .from(mcpOauthFlow)
-              .where(and(eq(mcpOauthFlow.id, flow.id), eq(mcpOauthFlow.state, "exchanging")))
-              .for("update");
-            if (!active) throw new CommandError("conflict", "MCP authorization was replaced");
-            await db
-              .update(mcpConnection)
-              .set({
-                state: "review",
-                tools,
-                version: expression<number>`${mcpConnection.version}+1`,
-              })
-              .where(
-                and(
-                  eq(mcpConnection.id, flow.connectionId),
-                  eq(mcpConnection.state, "authorizing"),
-                  eq(mcpConnection.credentialEpoch, flow.id),
-                ),
-              );
-            await db
-              .update(mcpOauthFlow)
-              .set({ state: "completed" })
-              .where(eq(mcpOauthFlow.id, flow.id));
-          });
-        } finally {
-          await connected.close().catch(() => {});
-        }
-        return { connected: true };
-      } catch {
-        await database.db
-          .update(mcpOauthFlow)
-          .set({ state: "failed" })
-          .where(eq(mcpOauthFlow.id, flow.id));
-        await database.db
-          .update(mcpConnection)
-          .set({ state: "reconnect" })
-          .where(
-            and(
-              eq(mcpConnection.id, flow.connectionId),
-              eq(mcpConnection.state, "authorizing"),
-              eq(mcpConnection.credentialEpoch, flow.id),
-            ),
-          );
-        throw new CommandError(
-          "unavailable",
-          "MCP authorization could not be completed. Start a new connection in Settings",
-        );
-      } finally {
-        await client?.close().catch(() => {});
-      }
-    },
+    recover: () => recoverSecretWrites(ctx),
+    connect: (id: string, userId: string, value: unknown) => connectMCP(ctx, id, userId, value),
+    callback: (userId: string, params: URLSearchParams) =>
+      completeOAuthCallback(ctx, userId, params),
     async call(
       assignment: MCPAssignment,
       projectId: string,
@@ -815,55 +73,45 @@ export function createMCPConnections(
         await authorizeAssignment(assignment, projectId, userId);
         signal.throwIfAborted();
       };
-      await authorize();
-      await validate();
-      const client = await remote(
+      const checkAuthority = async () => {
+        await authorize();
+        await validate();
+      };
+      await checkAuthority();
+      const client = await createRemoteConnection(
+        ctx,
         assignment.connectionId,
         undefined,
         assignment.credentialEpoch,
-        async () => {
-          await authorize();
-          await validate();
-        },
+        checkAuthority,
         signal,
       );
       try {
         await client.connect();
         const tools = await client.tools();
         if (!tools.some((tool) => tool.name === name && tool.digest === expected.digest)) {
-          await authorize();
-          await validate();
-          await database.db
-            .update(mcpConnection)
-            .set({
-              state: "review",
-              tools,
-              allowedTools: [],
-              version: expression<number>`${mcpConnection.version}+1`,
-              updatedAt: expression<Date>`now()`,
-            })
-            .where(
-              and(
-                eq(mcpConnection.id, assignment.connectionId),
-                eq(mcpConnection.credentialEpoch, assignment.credentialEpoch),
-                eq(mcpConnection.state, "ready"),
-              ),
-            );
+          await checkAuthority();
+          await markConnectionReview(
+            database.db,
+            assignment.connectionId,
+            assignment.credentialEpoch,
+            tools,
+            "ready",
+            { clearAllowed: true, touchUpdatedAt: true },
+          );
           throw new CommandError(
             "conflict",
             "The MCP tool changed. Review the connection in Settings",
           );
         }
-        await authorize();
-        await validate();
+        await checkAuthority();
         const result = await client.client.callTool(
           { name, arguments: args },
           {
             signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
           },
         );
-        await authorize();
-        await validate();
+        await checkAuthority();
         // Tool results are untrusted source data, not instructions or authority.
         const text = result.content
           .filter((part) => part.type === "text")

@@ -13,7 +13,7 @@ import {
 } from "@solidjs/web/server-functions/client";
 import { agentActivityStream } from "../../apps/factory/src/agent/activity-stream";
 import { type AgentView, agentViewSchema } from "../../apps/factory/src/agent/contracts";
-import { type Bootstrap } from "../../apps/factory/src/bootstrap/contracts";
+import type { Bootstrap } from "../../apps/factory/src/bootstrap/contracts";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
 import {

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { requirementContentInput } from "../../requirement-domain/src/content";
-import { technicalDesignContentInput } from "../../requirement-domain/src/technical-design";
+import { requirementContentInput } from "#requirement-domain/content";
+import { technicalDesignContentInput } from "#requirement-domain/technical-design";
 import { epicProposalInput } from "./epic-proposal";
 
 export const planningIntentInput = z.enum([

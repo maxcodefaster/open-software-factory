@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import {
   browserBootstrap,
@@ -22,8 +22,8 @@ test.beforeEach(async ({ page }) => {
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   const { session } = await browserBootstrap(page);
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${projectID},${`demo-interaction-${projectID.slice(0, 8)}`},'Demo interactions','https://example.invalid/interaction.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES(${projectID},${`demo-interaction-${projectID.slice(0, 8)}`},'Demo interactions','https://example.invalid/interaction.git','main','.factory/actor-template.json',${session.user.id})`;
   await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
     VALUES(${projectID},${session.user.id},'developer',true,${session.user.id})`;
   await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)

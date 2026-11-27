@@ -5,8 +5,8 @@ import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { connect, createServer, type TLSSocket } from "node:tls";
 import { z } from "zod";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import { substrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { nativeRuntimeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
 import { requireNativeForgeOrigin } from "../factory/native-installation";
 import type { Cluster } from "./clean-room-cluster";
 import {

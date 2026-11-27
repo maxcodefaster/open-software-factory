@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import type { SystemContract } from "#system-contract/system-contract";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
-import type { SystemContract } from "../../packages/system-contract/src/system-contract";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
 import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
@@ -71,9 +71,9 @@ test.each(["ready", "paused", "unavailable"] as const)(
         await database.client`INSERT INTO auth."user"(id,name,email)
           VALUES(${id},'Mara',${`${id}@factory.local`})`;
       await database.client`INSERT INTO factory.project(
-        id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${project},${`labels-${project}`},'Owned App labels',${`${forge.url}owned/app.git`},
-          'main','.devcontainer/devcontainer.json',${owner})`;
+          'main','.factory/actor-template.json',${owner})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${owner},'developer',${owner})`;
       await database.client`INSERT INTO factory.development_workspace(
@@ -271,21 +271,23 @@ test.each([
         await database.client`INSERT INTO auth."user"(id,name,email)
           VALUES(${id},'Owned preview reader',${`${id}@factory.local`})`;
       await database.client`INSERT INTO factory.project(
-        id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${project},${`apps-${project}`},'Owned ACME Preview',
-          'https://owned-app-preview.invalid/owned/acme.git','main','.devcontainer/devcontainer.json',${owner})`;
+          'https://owned-app-preview.invalid/owned/acme.git','main','.factory/actor-template.json',${owner})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${owner},'developer',${owner}),
           (${project},${contributor},'product-contributor',${owner})`;
       if (state !== "unconfigured")
-        await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-          VALUES(${project},'configuration',${state === "configuring" ? "pending" : "ready"},${crypto.randomUUID()})`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+          VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${project},${`projects.setup_readiness:${project}:configuration`},${state === "configuring" ? "pending" : "ready"},${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${owner},CASE WHEN ${state === "configuring"} THEN NULL ELSE now() END)`;
       const hasAttempt = !["unconfigured", "configuring", "first-open", "not-started"].includes(
         state,
       );
       if (state !== "first-open")
-        await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id)
-          VALUES(${project},${revision},NULL)`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+          VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${project},
+            ${`delivery.staging_preview:${project}`},'pending',
+            ${JSON.stringify({ projectId: project, revision, runtimeAttemptId: null })}::jsonb)`;
       if (hasAttempt) {
         native = await nativeJobsFixture(database, project, contract);
         attempt = await native.startStaging(owner);
@@ -328,7 +330,7 @@ test.each([
         await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${project}`,
       ).toHaveLength(0);
       expect(
-        await database.client`SELECT project_id FROM factory.staging_preview WHERE project_id=${project}`,
+        await database.client`SELECT scope_id AS project_id FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id=${project}`,
       ).toHaveLength(state === "first-open" ? 0 : 1);
       if (hasAttempt) {
         const [retained] = await database.client<{ state: string }[]>`

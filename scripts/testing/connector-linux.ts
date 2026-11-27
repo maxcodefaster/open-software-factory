@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { runCommand } from "#runtime-kubernetes/command";
 import upstream from "../../upstream.json";
 
 // The host check cannot cover *_linux.go on macOS. Build/race/vet the same source
@@ -105,8 +105,6 @@ try {
         `type=bind,src=${resolve("services/runtime-connector")},dst=/source,readonly`,
         "--mount",
         `type=bind,src=${resolve("templates/starter-app")},dst=/templates/starter-app,readonly`,
-        "--mount",
-        `type=bind,src=${resolve("deploy/substrate/rootless")},dst=/opt/factory-rootless,readonly`,
         "--workdir",
         "/source",
         "--env",
@@ -118,7 +116,7 @@ try {
         upstream.go.testImage,
         "sh",
         "-ec",
-        "go test -p 2 -race ./... && CGO_ENABLED=0 go test -p 2 ./cmd/factory-runtime-connector -run '^TestNativeSourceServiceRunsAsDevelopmentUser$' -count=1 && CGO_ENABLED=0 go build -o /usr/local/bin/factory-runtime-connector ./cmd/factory-runtime-connector && FACTORY_NATIVE_INPUT_STOP_BOOTSTRAP_PROOF=1 go test -p 1 ./connector -run '^TestOwnedColdScriptsSelectStopBeforeDockerAndRejectPreviousModeMarker$' -count=1 && go vet -p 2 ./...",
+        "go test -p 2 -race ./... && CGO_ENABLED=0 go test -p 2 ./cmd/factory-runtime-connector -run '^TestNativeSourceServiceRunsAsDevelopmentUser$' -count=1 && go vet -p 2 ./...",
       ],
       { stdout: "inherit", stderr: "inherit" },
     );

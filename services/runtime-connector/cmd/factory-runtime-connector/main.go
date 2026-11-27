@@ -8,14 +8,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/connector"
 )
 
 // takeConnectorToken reads the inherited token and removes it from the process
-// environment so no child process (Dev Container hooks, Git, process manager)
+// environment so no child process (Project preparation, Git, process manager)
 // inherits it. Children that need a token receive it explicitly.
 func takeConnectorToken() string {
 	token := os.Getenv("FACTORY_CONNECTOR_TOKEN")
@@ -29,7 +28,7 @@ func main() {
 		fail("protect Connector process: " + err.Error())
 	}
 	if len(os.Args) < 2 {
-		fail("usage: factory-runtime-connector <parent|child>")
+		fail("usage: factory-runtime-connector <native entrypoint|child>")
 	}
 	if os.Args[1] == "opencode-manifest" {
 		if len(os.Args) != 2 {
@@ -73,11 +72,13 @@ func main() {
 		}
 		return
 	}
-	if os.Args[1] == "native-bootstrap-mode" {
+	if os.Args[1] == "native-project" {
 		if len(os.Args) != 2 {
-			fail("native cold mode accepts no arguments")
+			fail("native Project entry accepts only its Factory configuration")
 		}
-		if err := connector.RunSubstrateBootstrapMode(os.Stdout); err != nil {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.RunSubstrateProject(ctx); err != nil {
 			fail(err.Error())
 		}
 		return
@@ -140,24 +141,12 @@ func main() {
 		}
 		return
 	}
-	if os.Args[1] == "browser-client" {
-		if len(os.Args) != 3 {
-			fail("usage: factory-runtime-connector browser-client <Build turn ID>; one fixed JSON tool call on stdin")
-		}
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
-		if err := connector.RunBuildBrowserClient(ctx, os.Args[2], os.Stdin, os.Stdout); err != nil {
-			fail(err.Error())
-		}
-		return
-	}
-	if os.Args[1] != "parent" && os.Args[1] != "child" {
-		fail("mode must be parent or child")
+	if os.Args[1] != "child" {
+		fail("mode must be a native entrypoint or child")
 	}
 	flags := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	assignmentPath := flags.String("assignment", "", "path to the runtime assignment")
 	tokenPath := flags.String("token-file", "", "path to a short-lived Factory connector token")
-	childTokenPath := flags.String("child-token-file", "", "path to a short-lived child connector token")
 	tokenStdin := flags.Bool("token-stdin", false, "read a short-lived Factory connector token from stdin")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		fail(err.Error())
@@ -200,22 +189,7 @@ func main() {
 		token = credentials.Token
 		assignment.RuntimeEnvironment = credentials.Environment
 	}
-	childToken := ""
-	if *childTokenPath != "" {
-		content, readErr := os.ReadFile(*childTokenPath)
-		if readErr != nil {
-			fail("read child connector token: " + readErr.Error())
-		}
-		childToken = strings.TrimSpace(string(content))
-	}
-	switch os.Args[1] {
-	case "child":
-		err = connector.RunChild(ctx, assignment, token)
-	case "parent":
-		err = connector.RunParent(ctx, assignment, token, childToken)
-	default:
-		fail("mode must be parent or child")
-	}
+	err = connector.RunChild(ctx, assignment, token)
 	if err != nil {
 		fail(err.Error())
 	}

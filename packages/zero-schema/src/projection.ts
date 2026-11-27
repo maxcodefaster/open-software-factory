@@ -9,8 +9,8 @@ import {
   readVersion,
   ticket,
   ticketDependency,
-} from "../../db/src/schema";
-import type { DesktopBackgroundKey } from "../../interface-domain/src/background";
+} from "#db/schema";
+import type { DesktopBackgroundKey } from "#interface-domain/background";
 
 // Build-time allowlist. Source provenance, credentials and execution rows never enter Zero.
 const tables = drizzleZeroConfig(
@@ -34,7 +34,7 @@ const tables = drizzleZeroConfig(
         desktopBackgroundKey: enumeration<DesktopBackgroundKey>().from("desktop_background_key"),
         repositoryUrl: true,
         defaultBranch: true,
-        devcontainerPath: true,
+        actorTemplatePath: true,
         createdAt: number().from("created_at"),
         updatedAt: number().from("updated_at"),
       },

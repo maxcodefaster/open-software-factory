@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
-import { monitoringFixture } from "../fixtures/monitoring";
 import { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
+import { monitoringFixture } from "../fixtures/monitoring";
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_PROJECT_INPUT_LIVE"] !== "1")(
@@ -99,7 +99,8 @@ test.skipIf(process.env["FACTORY_PROJECT_INPUT_LIVE"] !== "1")(
       const rows = await f.database
         .client`SELECT diagnosis,skill_assignment,model_id FROM factory.monitoring_incident WHERE id=${event.id}`;
       const observations = await f.database
-        .client`SELECT kind,digest FROM factory.monitoring_evidence WHERE incident_id=${event.id}`;
+        .client`SELECT payload->>'kind' AS kind,payload->>'digest' AS digest FROM factory.audit_event
+        WHERE kind='monitoring.evidence' AND scope_type='incident' AND scope_id=${event.id}`;
       const usage = await f.database
         .client`SELECT outcome,source,counters FROM factory.usage_entry WHERE operation_id=${`monitoring:${event.id}`}`;
       await writeFile(

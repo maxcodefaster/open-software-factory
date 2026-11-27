@@ -2,6 +2,7 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
 import { ownedPostgresServer, ownedTestDatabase } from "./postgres-server";
+import { controlledStarterInput } from "./starter";
 
 // A fresh authored checkout, build output and database for every proof.
 // No retained Factory process, repository, user or runtime is touched.
@@ -32,7 +33,7 @@ export async function starterApplication() {
       BETTER_AUTH_SECRET: `owned-starter-${id}`,
       NODE_ENV: "development",
     };
-    for (const file of await starterFiles()) {
+    for (const file of await starterFiles(controlledStarterInput)) {
       const path = resolve(directory, file.path);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, file.content);

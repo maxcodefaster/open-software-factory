@@ -4,9 +4,9 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { expect, type WebSocketRoute } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
+import { zeroStorageKey } from "#zero-solid/lifecycle";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
-import { zeroStorageKey } from "../../packages/zero-solid/src/lifecycle";
 import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -81,8 +81,8 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
       ticket = crypto.randomUUID(),
       conversation = crypto.randomUUID();
     const oldTicket = "00000100-0000-4000-8000-000000000000";
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`zero-${project}`},'Shared Zero proof','https://example.invalid/owned-zero.git','main','.devcontainer/devcontainer.json',${fixtureValue(administrator, "administrator").id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`zero-${project}`},'Shared Zero proof','https://example.invalid/owned-zero.git','main','.factory/actor-template.json',${fixtureValue(administrator, "administrator").id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${fixtureValue(administrator, "administrator").id},'developer',${fixtureValue(administrator, "administrator").id})`;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
@@ -206,7 +206,9 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await expect(
       colleague.getByRole("button", { name: "Create Project Wiki", exact: true }),
     ).toBeEnabled();
-    expect(await database.client`SELECT id FROM factory.knowledge_generation`).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.operation WHERE kind='knowledge.generation'`,
+    ).toHaveLength(0);
     const wikiA = crypto.randomUUID(),
       wikiB = crypto.randomUUID();
     for (const [id, title, body, slug] of [

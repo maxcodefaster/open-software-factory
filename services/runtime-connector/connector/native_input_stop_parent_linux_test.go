@@ -16,16 +16,28 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func ownedInputStop() nativeInputStop {
+	return nativeInputStop{
+		StopID:    "3e19c23e-b909-4564-8eb9-6804617f3b3e",
+		AttemptID: "695b38cf-a84c-51f7-8107-15c7f5a78503",
+		SessionID: "ses_owned_native_stop",
+		PromptID:  "msg_owned_native_input",
+		ModelID:   "owned-factory-model",
+		Version:   "2.0.27",
+		Mode:      "interrupt",
+	}
+}
+
 func TestInputStopSourceOnlyParentKeepsItsResultReadableAfterDrainAndReconnect(t *testing.T) {
 	assignment := validAssignment()
 	input := ownedInputStop()
-	result := nativeInputStopResult{nativeInputStopWorkerResult: nativeInputStopWorkerResult{nativeInputStop: input, Confirmed: true, EngineExited: true}, ProcessTreeExited: true}
+	result := nativeInputStopResult{WorkerResult: nativeInputStopWorkerResult{Assignment: input, Confirmed: true, EngineExited: true}, ProcessTreeExited: true}
 	workspace := "owned-workspace"
 	var exports, connections atomic.Int32
-	assignment.nativeSource = inputStopSourceHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	assignment.SetNativeSource(inputStopSourceHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		exports.Add(1)
 		_, _ = io.WriteString(w, "owned-checkpoint")
-	}), workspace)
+	}), workspace))
 	observed := make(chan error, 1)
 	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +145,7 @@ func TestNativeInputStopRecordRetainsExactAdmissionAndJoinedOutcome(t *testing.T
 	assignment.ConnectorStateDir = t.TempDir()
 	input := ownedInputStop()
 	source := sourceRestored{AttemptID: input.AttemptID, Generation: 1, ActorUID: input.StopID, WriterEpoch: 3, ChangeWriterEpoch: 42, ReadOnly: true, InputStop: &input}
-	result := nativeInputStopResult{nativeInputStopWorkerResult: nativeInputStopWorkerResult{nativeInputStop: input, Confirmed: true, EngineExited: true}, ProcessTreeExited: true}
+	result := nativeInputStopResult{WorkerResult: nativeInputStopWorkerResult{Assignment: input, Confirmed: true, EngineExited: true}, ProcessTreeExited: true}
 	path := filepath.Join(assignment.ConnectorStateDir, "input-stop-"+input.StopID+".json")
 	record := nativeInputStopRecord{Source: source, Result: &result}
 	if err := syncInputStopRecord(path, record, true); err != nil {

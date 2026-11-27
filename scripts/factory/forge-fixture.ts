@@ -1,7 +1,8 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { parseSubstrateProjectTemplate } from "#runtime-kubernetes/substrate-project-template";
 import { type DisposableInstallation, installationDirectory } from "./installation";
-import { localStarterCompose } from "./starter-images";
+import { nativeStarterImages } from "./starter-images";
 
 export function requireForgeFixtureInstallation(
   installation: DisposableInstallation | null,
@@ -25,7 +26,8 @@ export async function prepareForgejoFixture(options: {
   installation: DisposableInstallation | null;
   confirmation: string | undefined;
   token: string;
-  starterImages: Parameters<typeof localStarterCompose>[1];
+  platform: string;
+  starterImages: unknown;
   fetch?: (url: string, options: RequestInit) => Promise<Response>;
   command: (
     args: string[],
@@ -34,6 +36,7 @@ export async function prepareForgejoFixture(options: {
 }) {
   const installation = requireForgeFixtureInstallation(options.installation, options.confirmation);
   if (!options.token.trim()) throw new Error("Retained Forgejo fixture token is unavailable");
+  const images = nativeStarterImages(options.platform, options.starterImages);
   const stateDirectory = installationDirectory(options.root, installation.name);
   const forgejoBaseURL = `http://127.0.0.1:${installation.ports.forgejo}`;
   const username = "factory-mutation";
@@ -42,11 +45,39 @@ export async function prepareForgejoFixture(options: {
   const request = options.fetch ?? fetch;
   const command = options.command;
   const source = resolve(options.root, "test/fixtures/runtime-project");
+  const legacy = await readdir(resolve(source, ".devcontainer")).catch(
+    (cause: NodeJS.ErrnoException) => {
+      if (cause.code === "ENOENT") return [];
+      throw cause;
+    },
+  );
+  if (legacy.length)
+    throw new Error("Runtime fixture source must use native ActorTemplates, not Dev Containers");
+  // The fixture is authored natively; only its explicit catalog image selections
+  // are materialized. No legacy recipe, service DNS or mount is translated here.
+  const contents = new Map<string, string>();
+  const messages = [
+    [".factory/actor-template.json", "Use published native Starter images"],
+    [".forgejo/workflows/factory-verification.yml", "Update Factory Verification workflow"],
+    [".factory/system.json", "Update Factory System Contract"],
+    ["src/worker.mjs", "Add Factory fixture worker"],
+  ] as const;
+  for (const [path] of messages) {
+    let content = await readFile(resolve(source, path), "utf8");
+    if (path === ".factory/actor-template.json") {
+      const template = parseSubstrateProjectTemplate(content);
+      for (const container of template.containers) {
+        if (container.name === "work") container.image = images.development;
+        if (container.name === "postgres") container.image = images.postgres;
+      }
+      content = `${JSON.stringify(template, null, 2)}\n`;
+    }
+    contents.set(path, content);
+  }
   const fixtureContent = async (path: string) => {
-    const content = await readFile(resolve(source, path), "utf8");
-    return path === ".devcontainer/compose.yaml"
-      ? localStarterCompose(content, options.starterImages)
-      : content;
+    const content = contents.get(path);
+    if (content === undefined) throw new Error(`Unknown native fixture file: ${path}`);
+    return content;
   };
   async function ensureFixtureFile(path: string, message: string) {
     const expected = await fixtureContent(path);
@@ -91,22 +122,13 @@ export async function prepareForgejoFixture(options: {
     if (!created.ok) throw new Error(`Forgejo fixture creation failed with ${created.status}`);
   }
   async function ensureFixtureFiles() {
-    await ensureFixtureFile(
-      ".devcontainer/compose.yaml",
-      "Use locally published exact Starter images",
-    );
-    await ensureFixtureFile(
-      ".forgejo/workflows/factory-verification.yml",
-      "Update Factory Verification workflow",
-    );
-    await ensureFixtureFile(".factory/system.json", "Update Factory System Contract");
-    await ensureFixtureFile("src/worker.mjs", "Add Factory fixture worker");
+    for (const [path, message] of messages) await ensureFixtureFile(path, message);
   }
   async function ensureLocalFixtureFiles() {
     const destination = resolve(stateDirectory, "runtime-fixture-repository");
     const repository = await stat(resolve(destination, ".git")).catch(() => null);
     if (!repository?.isDirectory()) return;
-    const paths = [".factory/system.json", "src/worker.mjs", ".devcontainer/compose.yaml"];
+    const paths = messages.map(([path]) => path);
     for (const path of paths) {
       const content = await fixtureContent(path);
       const target = resolve(destination, path);
@@ -153,6 +175,15 @@ export async function prepareForgejoFixture(options: {
   }
   const main = await request(`${repositoryAPI}/branches/main`, { headers: { authorization } });
   if (main.ok) {
+    const legacy = await request(`${repositoryAPI}/contents/.devcontainer?ref=main`, {
+      headers: { authorization },
+    });
+    if (legacy.ok)
+      throw new Error(
+        "Recreate the owned disposable fixture repository with native source; existing Dev Containers are not migrated",
+      );
+    if (legacy.status !== 404)
+      throw new Error(`Forgejo legacy fixture lookup failed with ${legacy.status}`);
     await ensureFixtureFiles();
     await ensureLocalFixtureFiles();
     return;
@@ -163,8 +194,8 @@ export async function prepareForgejoFixture(options: {
   await mkdir(destination, { recursive: true });
   await command(["cp", "-R", `${source}/.`, destination]);
   await writeFile(
-    resolve(destination, ".devcontainer/compose.yaml"),
-    await fixtureContent(".devcontainer/compose.yaml"),
+    resolve(destination, ".factory/actor-template.json"),
+    await fixtureContent(".factory/actor-template.json"),
   );
   await command(["git", "init", "--initial-branch=main", destination]);
   await command(["git", "-C", destination, "add", "."]);

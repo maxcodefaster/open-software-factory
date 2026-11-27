@@ -23,19 +23,19 @@ func TestCommitControlFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer control.close()
-	if err := control.write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation}); err != nil {
+	defer control.Close()
+	if err := control.Write(Message{Type: "hello", Role: "parent", AttemptID: assignment.RuntimeAttemptID, Generation: assignment.Generation}); err != nil {
 		t.Fatal(err)
 	}
 	for {
 		var message Message
-		if err := control.read(&message); err != nil {
+		if err := control.Read(&message); err != nil {
 			return
 		}
 		if message.Type != "operation-request" {
 			t.Fatal("owned commit fixture accepts only parent operations")
 		}
-		if err := control.write(handleParentOperation(context.Background(), assignment, message)); err != nil {
+		if err := control.Write(handleParentOperation(context.Background(), assignment, message)); err != nil {
 			return
 		}
 	}

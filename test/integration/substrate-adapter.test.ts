@@ -1,18 +1,15 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
-import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
-import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import {
-  hashConnectorToken,
-  runtimeConnectorTokens,
-} from "../../packages/runtime-domain/src/identity";
+import { hashConnectorToken, runtimeConnectorTokens } from "#runtime-domain/identity";
 import {
   type NativeActor,
   nativeActor,
   SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+} from "#runtime-kubernetes/substrate-control";
+import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
+import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
+import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
+import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
 import { substrateFixture } from "../fixtures/substrate";
 
 test("native Source forwarding uses current personal grants and the Source owner lock without waking compute", async () => {
@@ -110,7 +107,7 @@ test("native Source forwarding uses current personal grants and the Source owner
       .client`UPDATE factory.runtime_attempt SET state='pausing' WHERE id=${f.attemptID}`;
     const before = [...calls];
     await expect(source.forward(f.workspaceID, f.userID, "read", request())).rejects.toThrow(
-      "compute was not started",
+      "Compute is changing state. Keep your editor buffer and retry after it settles.",
     );
     expect(calls).toEqual(before);
     expect(forwarded).toHaveLength(2);
@@ -145,7 +142,7 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
     if (method === "CreateActor") {
       creates++;
       const [saved] = await f.database
-        .client`SELECT b.create_attempted_at FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
+        .client`SELECT create_attempted_at FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       expect(saved?.["create_attempted_at"]).not.toBeNull();
       actor = await f.createdActor();
       throw new SubstrateRPCError("Unavailable", "lost Create reply");
@@ -229,8 +226,7 @@ test("Factory Start retains native binding before gRPC; lost Create and Delete r
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("retired");
     await expect(
       Promise.resolve(
-        f.database
-          .client`DELETE FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`,
+        f.database.client`DELETE FROM factory.runtime_attempt WHERE id=${f.attemptID}`,
       ),
     ).rejects.toThrow("cannot be reused");
   } finally {
@@ -323,7 +319,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     expect(checkpoints).toBe(1);
     await expect(c.resumeForApp(f.attemptID, f.userID)).rejects.toThrow();
     const [unconfirmed] = await f.database
-      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(unconfirmed?.["checkpoint"]).toBeNull();
     for (const value of pending.status.snapshots ?? []) {
       const snapshot = value as { durableSnapshot: { state: string } };
@@ -338,7 +334,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     expect((await c.pause(f.attemptID))?.state).toBe("paused");
     expect(suspends).toBe(1);
     const [good] = await f.database
-      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(good?.["checkpoint"].generation).toBe(1);
     await c.resumeForApp(f.attemptID, f.userID);
     durable = false;
@@ -347,7 +343,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     expect(
       (
         await f.database
-          .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`
+          .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`
       )[0]?.["checkpoint"],
     ).toEqual(good?.["checkpoint"]);
     durable = true;
@@ -362,7 +358,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     actor = completed;
     await c.resumeForApp(f.attemptID, f.userID);
     const [next] = await f.database
-      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(next?.["checkpoint"].generation).toBe(2);
     expect(suspends).toBe(2);
     mismatch = true;
@@ -370,7 +366,7 @@ test("Factory Suspend rejects local-only/async snapshots, independently checks g
     expect(
       (
         await f.database
-          .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`
+          .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`
       )[0]?.["checkpoint"],
     ).toEqual(next?.["checkpoint"]);
   } finally {
@@ -461,7 +457,7 @@ test("Factory refuses preexisting Actors, unauthorized users and changed templat
     f.template.metadata.uid = crypto.randomUUID();
     await expect(c.start(f.projectID, f.userID)).rejects.toThrow("original identity");
     const [saved] = await f.database
-      .client`SELECT create_attempted_at,actor_uid FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT create_attempted_at,actor_uid FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(saved?.["create_attempted_at"]).toBeNull();
     expect(saved?.["actor_uid"]).toBeNull();
   } finally {

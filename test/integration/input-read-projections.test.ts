@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
+import { zeroQueries, zeroSchema } from "#zero-schema";
 import { monitoringFixture } from "../fixtures/monitoring";
 
 test("Input activity and shared source metadata invalidate independently without replicating private contents", async () => {
@@ -57,9 +57,26 @@ test("Input activity and shared source metadata invalidate independently without
     const releaseMarker = () => database.client<{ revision: string }[]>`
       SELECT revision FROM factory.read_version WHERE project_id=${projectId} AND scope='releases'`;
     const previousRelease = await releaseMarker();
-    await database.client`INSERT INTO factory.release_attempt
-      (id,release_id,command_id,ordinal,runner_token)
-      VALUES(${crypto.randomUUID()},${release},${crypto.randomUUID()},1,'owned-private-runner-token')`;
+    const attemptID = crypto.randomUUID(),
+      attemptCommandID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.operation
+      (id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${attemptID},'releases.attempt','project_release',${release},
+        ${`releases.attempt:${attemptCommandID}`},${`releases.attempt.ordinal:${release}:1`},'pending',
+        ${JSON.stringify({
+          id: attemptID,
+          releaseId: release,
+          commandId: attemptCommandID,
+          ordinal: 1,
+          dispatchIntendedAt: null,
+          runId: null,
+          runnerId: null,
+          runnerUuid: null,
+          runnerToken: "owned-private-runner-token",
+          jobHandle: null,
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::jsonb,${fixture.userId})`;
     expect(await releaseMarker()).not.toEqual(previousRelease);
     const replicated = await database.client`SELECT * FROM factory.read_version`;
     expect(JSON.stringify(replicated)).not.toContain("Invoice exception");

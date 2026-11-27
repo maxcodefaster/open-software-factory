@@ -4,7 +4,7 @@ import {
   repositoryMirrorCommand,
   repositoryMirrorCreate,
   repositoryMirrorRemove,
-} from "../../../../packages/project-domain/src/repository-mirror";
+} from "#project-domain/repository-mirror";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

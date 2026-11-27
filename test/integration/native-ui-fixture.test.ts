@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 import { deleteFactoryProject } from "../support/factory-fixture";
@@ -22,14 +22,14 @@ test("UI cleanup refuses retained database names and native dispatch, and only r
   const native = await substrateFixture();
   try {
     await startSubstrateFixtureWorkspace(native);
-    const before = await native.database.client`SELECT * FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${native.attemptID}`;
+    const before = await native.database.client`SELECT * FROM factory.runtime_attempt
+      WHERE id=${native.attemptID}`;
     await expect(deleteFactoryProject(native.projectID, native.database)).rejects.toThrow(
       "no product history or Source was deleted",
     );
     expect(
-      await native.database.client`SELECT * FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${native.attemptID}`,
+      await native.database.client`SELECT * FROM factory.runtime_attempt
+      WHERE id=${native.attemptID}`,
     ).toEqual(before);
     expect(
       await native.database.client`SELECT id FROM factory.project WHERE id=${native.projectID}`,
@@ -39,14 +39,14 @@ test("UI cleanup refuses retained database names and native dispatch, and only r
   }
   const intended = await substrateFixture();
   try {
-    await intended.database.client`INSERT INTO factory.substrate_workspace(workspace_id,intent)
-      VALUES(${intended.workspaceID},'{}')`;
+    await intended.database.client`INSERT INTO factory.substrate_provision(owner_id,kind,intent)
+      VALUES(${intended.workspaceID},'workspace','{}')`;
     await expect(deleteFactoryProject(intended.projectID, intended.database)).rejects.toThrow(
       "no product history or Source was deleted",
     );
     expect(
-      await intended.database.client`SELECT workspace_id FROM factory.substrate_workspace
-      WHERE workspace_id=${intended.workspaceID}`,
+      await intended.database.client`SELECT owner_id FROM factory.substrate_provision
+      WHERE owner_id=${intended.workspaceID} AND kind='workspace'`,
     ).toHaveLength(1);
   } finally {
     await intended.dispose();

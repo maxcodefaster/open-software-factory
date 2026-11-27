@@ -1,11 +1,6 @@
 import { eq } from "drizzle-orm";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  change,
-  developmentWorkspace,
-  runtimeAttempt,
-  ticket,
-} from "../../../../packages/db/src/schema";
+import type { createDatabase } from "#db/client";
+import { change, developmentWorkspace, runtimeAttempt, ticket } from "#db/schema";
 import { CommandError } from "../command-error";
 import {
   administratorIn,

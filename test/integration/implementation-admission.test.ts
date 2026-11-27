@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -71,8 +71,8 @@ test("Implement atomically freezes requirements and Build before branch create; 
       acceptanceCriteria: ["Use the exact scope"],
       nonGoals: [],
     });
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`commission-${projectID}`}, 'Commission', ${`http://127.0.0.1:${forge.port}/owned/starter.git`}, 'main', '.devcontainer/devcontainer.json', ${userID})`;
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`commission-${projectID}`}, 'Commission', ${`http://127.0.0.1:${forge.port}/owned/starter.git`}, 'main', '.factory/actor-template.json', ${userID})`;
     await database.client`INSERT INTO factory.ticket(id, project_id, title, state, created_by)
       VALUES (${ticketID}, ${projectID}, 'Commission', 'ready', ${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id, user_id, role, updated_by)
@@ -158,7 +158,8 @@ test("Implement atomically freezes requirements and Build before branch create; 
     if (!first) throw new Error("Owned Change missing");
     await eventually(
       () =>
-        database.client`SELECT state FROM factory.branch_create_operation WHERE change_id=${first.id}`,
+        database.client`SELECT state FROM factory.operation
+          WHERE kind='delivery.branch_create' AND scope_type='change' AND scope_id=${first.id}`,
       (rows) => rows[0]?.["state"] === "ambiguous",
       "Protection failure must retain recoverable branch intent",
       30_000,

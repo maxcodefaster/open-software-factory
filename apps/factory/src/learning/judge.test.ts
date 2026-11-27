@@ -3,11 +3,8 @@ import {
   type LearningResult,
   LearningResultRejected,
   validateLearningResult,
-} from "../../../../packages/conversation-domain/src/learning";
-import {
-  comparisonCases,
-  learningComparisonPlan,
-} from "../../../../packages/conversation-domain/src/learning-comparison";
+} from "#conversation-domain/learning";
+import { comparisonCases, learningComparisonPlan } from "#conversation-domain/learning-comparison";
 import { calibratedResult } from "../../../../test/fixtures/learning";
 import {
   comparisonAfter,

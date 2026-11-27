@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { sourceWorkspaceViewSchema } from "../../apps/factory/src/workspace/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -198,9 +198,9 @@ test("current Starter Main-Preview retains the promoted instance across Ticket a
   });
   try {
     const [project] = await database.client<Array<{ slug: string; attemptID: string }>>`
-      SELECT project.slug,preview.runtime_attempt_id AS "attemptID" FROM factory.project project
-      JOIN factory.staging_preview preview ON preview.project_id=project.id
-      JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id AND attempt.state='ready'
+      SELECT project.slug,preview.payload->>'runtimeAttemptId' AS "attemptID" FROM factory.project project
+      JOIN factory.operation preview ON preview.kind='delivery.staging_preview' AND preview.scope_type='project' AND preview.scope_id=project.id::text
+      JOIN factory.runtime_attempt attempt ON attempt.id::text=preview.payload->>'runtimeAttemptId' AND attempt.state='ready'
       WHERE project.id=${projectID}
     `;
     if (!project) throw new Error("Selected Starter does not have a ready promoted Main-Preview");

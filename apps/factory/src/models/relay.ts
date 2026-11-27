@@ -2,17 +2,17 @@ import { and, eq, sql as expression, gt, inArray, isNotNull, isNull, not } from 
 import {
   type ModelConnectionReference,
   modelConnectionReference,
-} from "../../../../packages/conversation-domain/src/model-connection";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+} from "#conversation-domain/model-connection";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
   changeAgentSession,
   changeAgentTurnIntent,
-  codingPause,
+  operation,
   runtimeAttempt,
-} from "../../../../packages/db/src/schema";
-import { runtimeModelToken } from "../../../../packages/runtime-domain/src/identity";
+} from "#db/schema";
+import { runtimeModelToken } from "#runtime-domain/identity";
 import { createAgentTurnStore } from "../agent/turns-api";
 import { json } from "../http";
 import { codingAllowanceDenial, codingBudgetIn } from "../usage/api";
@@ -154,19 +154,49 @@ export function createModelRelay(
         if (!current) return;
         const budget = await codingBudgetIn(sql, active.projectID, true);
         const hold = await db
-          .select({ turnID: codingPause.turnId })
-          .from(codingPause)
-          .where(and(eq(codingPause.turnId, active.id), isNull(codingPause.resumedByTurnId)));
+          .select({ id: operation.id })
+          .from(operation)
+          .where(
+            and(
+              eq(operation.kind, "usage.coding_pause"),
+              eq(operation.scopeType, "agent_turn"),
+              eq(operation.scopeId, active.id),
+              eq(operation.state, "paused"),
+              expression`(${operation.payload}->>'resumedByTurnId') IS NULL`,
+            ),
+          );
         if (!budget.allowed || hold.length) {
           paused = true;
           if (!hold.length) {
-            const reason = budget.reason as typeof codingPause.$inferInsert.reason;
+            const reason = budget.reason;
+            if (
+              reason !== "accounting-incomplete" &&
+              reason !== "coding-budget-used" &&
+              reason !== "finish-reserve-used"
+            )
+              throw new Error("Coding allowance denial has no valid pause reason");
+            const pausePayload = { turnId: active.id, reason, resumedByTurnId: null };
             await db
-              .insert(codingPause)
-              .values({ turnId: active.id, reason })
+              .insert(operation)
+              .values({
+                id: crypto.randomUUID(),
+                kind: "usage.coding_pause",
+                scopeType: "agent_turn",
+                scopeId: active.id,
+                idempotencyKey: `usage.coding_pause:${active.id}`,
+                activeKey: null,
+                state: "paused",
+                payload: pausePayload,
+              })
               .onConflictDoUpdate({
-                target: codingPause.turnId,
-                set: { reason, resumedByTurnId: null, createdAt: expression`now()` },
+                target: operation.idempotencyKey,
+                set: {
+                  state: "paused",
+                  payload: pausePayload,
+                  createdAt: expression`now()`,
+                  updatedAt: expression`now()`,
+                  completedAt: null,
+                },
               });
           }
           return;

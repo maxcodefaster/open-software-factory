@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import type { ProjectSetupView } from "#project-domain/setup";
 import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import type { ProjectSetupView } from "../../packages/project-domain/src/setup";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import { verifyCodingSource } from "../fixtures/coding-source";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
@@ -267,8 +267,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
         const initialWiki = await eventually(
           async () => {
             const [generation] = await database.client<{ state: string; failure: string | null }[]>`
-              SELECT state,failure FROM factory.knowledge_generation
-              WHERE project_id=${projectID} ORDER BY created_at LIMIT 1`;
+              SELECT state,error AS failure FROM factory.operation
+              WHERE kind='knowledge.generation' AND scope_type='project' AND scope_id=${projectID}
+              ORDER BY created_at LIMIT 1`;
             return generation;
           },
           (generation) => !!generation && ["succeeded", "failed"].includes(generation.state),
@@ -534,14 +535,14 @@ for (const requirementsPath of ["manual", "interview"] as const)
             ),
           ),
         );
-        const imageReads = agent.messages.filter(
+        const screenshots = agent.messages.filter(
           (message) =>
+            message.role === "tool" &&
             message.activity?.status === "completed" &&
-            ((message.activity.name === "browser" && message.text === "screenshot") ||
-              (message.text.startsWith("Read /tmp/factory-build-browser-") &&
-                message.text.endsWith("/screenshot.jpg"))),
+            message.activity.name === "browser" &&
+            message.text === "screenshot",
         );
-        expect(imageReads.length).toBeGreaterThan(0);
+        expect(screenshots.length).toBeGreaterThan(0);
         const sessions = await database.client<
           Array<{ state: string; context: unknown; cleaned: boolean; kind: string }>
         >`
@@ -592,10 +593,11 @@ for (const requirementsPath of ["manual", "interview"] as const)
             const [row] = await database.client<
               Array<{ id: string; state: string; revision: string; changeState: string }>
             >`
-            SELECT attempt.id,attempt.state,preview.revision,change.state AS "changeState"
-            FROM factory.staging_preview preview JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id
-            JOIN factory.change change ON change.project_id=preview.project_id
-            WHERE change.id=${changeID}`;
+            SELECT attempt.id,attempt.state,preview.payload->>'revision' AS revision,change.state AS "changeState"
+            FROM factory.operation preview
+            JOIN factory.runtime_attempt attempt ON attempt.id::text=preview.payload->>'runtimeAttemptId'
+            JOIN factory.change change ON change.project_id::text=preview.scope_id
+            WHERE preview.kind='delivery.staging_preview' AND preview.scope_type='project' AND change.id=${changeID}`;
             return row;
           },
           (row) => row?.state === "ready" && row.changeState === "delivered",
@@ -613,7 +615,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
         result["turns"] = turns;
         result["reviews"] = reviews;
         result["browserSessions"] = sessions;
-        result["nativeImageReads"] = imageReads.map(({ id, text }) => ({ id, text }));
+        result["nativeScreenshots"] = screenshots.map(({ id, text }) => ({ id, text }));
         result["outsideSourceEdits"] = 0;
         result["stagingSHA"] = staging.revision;
         // Wiki is an independent background feature, not a Coding prerequisite.
@@ -625,9 +627,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
           );
         await eventually(
           async () =>
-            database.client<
-              { state: string }[]
-            >`SELECT state FROM factory.knowledge_generation WHERE project_id=${projectID} AND source_commit_sha=${staging.revision}`,
+            database.client<{ state: string }[]>`SELECT state FROM factory.operation
+              WHERE kind='knowledge.generation' AND scope_type='project' AND scope_id=${projectID}
+                AND payload->>'sourceCommitSha'=${staging.revision}`,
           (rows) => rows.some((row) => row.state === "succeeded"),
           "Delivered source did not finish its Wiki update",
           remainingJourneyMS(),
@@ -652,7 +654,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
         // Preserve secret-free lifecycle evidence before cleanup obscures it.
         if (projectID) {
           result["failureRuntime"] = await database.client`
-            SELECT id,workspace_id,state,failure,create_intended_at,create_observed_at,updated_at
+            SELECT id,workspace_id,state,failure,create_intended_at,updated_at
             FROM factory.runtime_attempt WHERE project_id=${projectID}`.catch(() => ({
             unavailable: true,
           }));
@@ -698,8 +700,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
           await browser.close();
           if (!projectID && typeof result["setupID"] === "string") {
             const [intent] = await database.client<{ projectID: string; state: string }[]>`
-              SELECT project_id AS "projectID",state FROM factory.project_repository_intent
-              WHERE setup_id=${result["setupID"]} AND slug=${slug}`;
+              SELECT scope_id AS "projectID",state FROM factory.operation
+              WHERE kind='projects.repository_intent' AND scope_type='project'
+                AND payload->>'setupId'=${result["setupID"]} AND payload->>'slug'=${slug}`;
             if (intent?.state !== "committed") {
               const cause = new Error(
                 "Owned repository setup is still unconfirmed. Its exact intent is retained; execution cleanup cannot yet be confirmed.",

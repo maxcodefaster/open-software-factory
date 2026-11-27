@@ -1,7 +1,9 @@
 import type { TreeNode } from "@theia/core/lib/browser/tree/tree";
 import type { NodeProps } from "@theia/core/lib/browser/tree/tree-widget";
 import { injectable } from "@theia/core/shared/inversify";
+
 import type React = require("@theia/core/shared/react");
+
 import { FileNode } from "@theia/filesystem/lib/browser/file-tree";
 import { FileNavigatorWidget } from "@theia/navigator/lib/browser/navigator-widget";
 import { isTreeTouchClick, treeTouchGesture } from "./factory-tree-touch";

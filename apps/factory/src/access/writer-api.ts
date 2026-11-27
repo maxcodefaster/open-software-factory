@@ -1,1 +1,1 @@
-export { type createChangeWriterController } from "./writer-controller";
+export type { createChangeWriterController } from "./writer-controller";

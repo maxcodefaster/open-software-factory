@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
-import { DeveloperIDEWorkspace } from "../../apps/factory/src/developer-ide-workspace";
+import { DeveloperIDEWorkspace } from "../../apps/factory/src/workspace/developer-ide-workspace";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/runtime-workspace.css";

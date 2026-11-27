@@ -1,15 +1,15 @@
 import { and, desc, eq, exists, inArray, isNull, sql } from "drizzle-orm";
-import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
-import { turnObservationInput } from "../../../../packages/conversation-domain/src/turn-observation";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { agentTurnAuthorityInput } from "#conversation-domain/agent-turn";
+import { turnObservationInput } from "#conversation-domain/turn-observation";
+import type { createDatabase } from "#db/client";
 import {
   agentTurn,
-  agentTurnSkill,
   change,
   modelConnectionVersion,
+  operation,
   skillRevision,
   ticketConversation,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 
 type Database = ReturnType<typeof createDatabase>;
 type Target =
@@ -75,10 +75,18 @@ export async function readTurnObservation(database: Database, target: Target) {
       digest: skillRevision.contentDigest,
       loaded: exists(
         db
-          .select({ id: agentTurnSkill.revisionId })
-          .from(agentTurnSkill)
+          .select({ id: operation.id })
+          .from(operation)
           .where(
-            and(eq(agentTurnSkill.turnId, row.id), eq(agentTurnSkill.revisionId, skillRevision.id)),
+            and(
+              eq(operation.kind, "coding.turn_skill"),
+              eq(operation.scopeType, "agent_turn"),
+              eq(operation.scopeId, row.id),
+              eq(
+                operation.idempotencyKey,
+                sql`'coding.turn_skill:' || ${row.id}::text || ':' || ${skillRevision.id}::text`,
+              ),
+            ),
           ),
       ),
     })

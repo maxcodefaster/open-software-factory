@@ -4,8 +4,8 @@ import {
   feedbackDispatchInput,
   feedbackUpdateInput,
   visualReviewSchema,
-} from "../../../../packages/conversation-domain/src/visual-review";
-import { type createAccessController } from "../access/api";
+} from "#conversation-domain/visual-review";
+import type { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import type { createVisualReviewController } from "./controller";

@@ -1,27 +1,28 @@
-import { and, eq, sql as expression, gt, notExists, or } from "drizzle-orm";
+import { and, eq, sql as expression, gt, ne, notExists, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   developmentWorkspace,
   project,
   runtimeAttempt,
-  substrateBinding,
   substrateSource,
   ticket,
   workspaceSharedDocument,
-} from "../../../../packages/db/src/schema";
-import type { WorkspaceSourceState } from "../../../../packages/workspace-domain/src/source";
+} from "#db/schema";
+import { nativeLifecycleWindowMS } from "#runtime-domain/timing";
+import type { WorkspaceSourceState } from "#workspace-domain/source";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { workspaceAuthorityIn } from "../access/workspace";
+import { createAgentTurnStore } from "../agent/turns-api";
 import { CommandError } from "../command-error";
 import type { RuntimeHub } from "../runtime/transport-api";
 import { boundedSourceBody } from "./source-body";
 import { admitInitialSource } from "./source-initialization";
-import { initialSourceRoleIn, type SourceRoleFence } from "./source-role-fence";
+import {
+  initialSourceRoleIn,
+  retainedSourcePreparationIn,
+  type SourceRoleFence,
+} from "./source-role-fence";
 import type { createSubstrateSources } from "./substrate-source";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -42,13 +43,21 @@ export function createWorkspaceSourceController(
   hub: Pick<RuntimeHub, "sourceConnected" | "parentConnected">,
   sources: ReturnType<typeof createSubstrateSources>,
   options?: {
-    supportsInitialRole(attemptID: string, sql: DatabaseTransaction): Promise<boolean>;
+    supportsInitialRole?(attemptID: string, sql: DatabaseTransaction): Promise<boolean>;
+    // Await authenticated resume and this Actor's Source transport, not App health.
+    wakeForAccess?(
+      workspaceID: string,
+      userID: string,
+      signal?: AbortSignal,
+      write?: boolean,
+    ): Promise<void>;
   },
 ) {
   const streams = new Map<
     AbortController,
     { userID: string; projectID: string; workspaceID: string }
   >();
+  const pendingWakes = new Set<AbortController>();
   let closed = false;
   async function nativeRow(workspaceID: string, sql: SourceSQL = database.client) {
     const db = drizzleTransaction(sql);
@@ -63,13 +72,13 @@ export function createWorkspaceSourceController(
         runtimeState: runtimeAttempt.state,
         generation: expression<string | null>`${runtimeAttempt.generation}::text`,
         ready: expression<boolean>`(${runtimeAttempt.state}='ready'
-          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${substrateBinding.actorUid} IS NOT NULL
-          AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL
-          AND (${substrateSource.owner}='service' OR ${substrateSource.actorUid}=${substrateBinding.actorUid}))`,
+          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${runtimeAttempt.actorUid} IS NOT NULL
+          AND ${runtimeAttempt.deleteIntendedAt} IS NULL AND ${runtimeAttempt.deletedAt} IS NULL
+          AND (${substrateSource.owner}='service' OR ${substrateSource.actorUid}=${runtimeAttempt.actorUid}))`,
         readable: expression<boolean>`(${runtimeAttempt.state} IN ('starting','ready')
-          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${substrateBinding.actorUid} IS NOT NULL
-          AND ${substrateBinding.deleteIntendedAt} IS NULL AND ${substrateBinding.deletedAt} IS NULL
-          AND ${substrateSource.actorUid}=${substrateBinding.actorUid})`,
+          AND ${runtimeAttempt.stopIntendedAt} IS NULL AND ${runtimeAttempt.actorUid} IS NOT NULL
+          AND ${runtimeAttempt.deleteIntendedAt} IS NULL AND ${runtimeAttempt.deletedAt} IS NULL
+          AND ${substrateSource.actorUid}=${runtimeAttempt.actorUid})`,
         sourceOwner: substrateSource.owner,
         sourceWritable: substrateSource.writable,
         sourceEpoch: expression<string | null>`${substrateSource.writerEpoch}::text`,
@@ -94,7 +103,6 @@ export function createWorkspaceSourceController(
           ),
         ),
       )
-      .leftJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
       .leftJoin(substrateSource, eq(substrateSource.workspaceId, developmentWorkspace.id))
       .where(eq(developmentWorkspace.id, workspaceID));
     return current ?? null;
@@ -113,21 +121,25 @@ export function createWorkspaceSourceController(
     // An admitted cold start is still preparing, not evidence that Source was
     // frozen. Keep the editor's observation alive until its original Parent
     // connects; reads do not require Child readiness or admit a new writer.
-    // The Actor's Parent still connects only after its private Docker starts.
+    // The native Parent serves Source independently of Project preparation.
     const preparing =
       current.sourceWritable &&
       (current.runtimeState === "starting" || current.sourceOwner === "service");
+    const paused =
+      current.sourceOwner === "actor" &&
+      current.sourceWritable &&
+      current.runtimeState === "paused";
     return {
       workspaceID: current.workspaceID,
       label:
         current.kind === "personal"
           ? `Personal · ${current.projectName}`
           : `Ticket · ${current.ticketTitle ?? current.projectName}`,
-      state: ready ? "ready" : "preparing",
+      state: ready ? "ready" : paused ? "paused" : "preparing",
       serviceID: `source-${current.workspaceID.replaceAll("-", "")}`,
       epoch: Number(current.sourceEpoch ?? current.generation ?? 1),
       failure:
-        ready || preparing
+        ready || preparing || paused
           ? null
           : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
     };
@@ -167,6 +179,39 @@ export function createWorkspaceSourceController(
       writable: boolean,
       commission?: SourceRoleFence,
     ) {
+      if (commission?.mode === "retained-preparation") {
+        const turns = createAgentTurnStore(database);
+        const deadline = Date.now() + nativeLifecycleWindowMS;
+        for (;;) {
+          if (closed) throw new CommandError("unavailable", "Factory Source is stopping");
+          const valid = await turns.validateExecution(
+            commission.turnID,
+            commission.ownerToken,
+            async (sql) => {
+              const retained = await retainedSourcePreparationIn(sql, commission.attemptID);
+              if (
+                writable ||
+                retained?.changeID !== changeID ||
+                retained.epoch !== epoch ||
+                retained.turnID !== commission.turnID ||
+                retained.ownerToken !== commission.ownerToken
+              )
+                throw new CommandError("conflict", "Retained Source preparation identity changed");
+            },
+          );
+          if (!valid)
+            throw new CommandError("conflict", "Build authority changed during Source preparation");
+          if (
+            hub.sourceConnected(commission.attemptID) &&
+            hub.parentConnected(commission.attemptID)
+          )
+            return;
+          if (Date.now() >= deadline)
+            throw new CommandError("unavailable", "Retained Source transport is unconfirmed");
+          // A cold Parent must finish restore and admission without these locks.
+          await Bun.sleep(100);
+        }
+      }
       const fence = async (sql: DatabaseTransaction) => {
         const [workspace] = await drizzleTransaction(sql)
           .select({ id: developmentWorkspace.id })
@@ -204,12 +249,11 @@ export function createWorkspaceSourceController(
             JOIN factory.change_agent_session session ON session.change_id=change.id
               AND session.runtime_attempt_id=a.id AND session.opencode_session_id=input.session_id
               AND session.active_turn_id=input.turn_id AND session.state='starting' AND NOT session.stop_pending
-            JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=a.id
-              AND binding.actor_uid IS NOT NULL AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
             JOIN factory.substrate_source source ON source.workspace_id=a.workspace_id
-              AND source.actor_uid=binding.actor_uid AND source.owner='actor' AND source.writable
+              AND source.actor_uid=a.actor_uid AND source.owner='actor' AND source.writable
             WHERE a.id=${commission.attemptID} AND a.workspace_id=${workspace.id}
               AND a.state='ready' AND a.stop_intended_at IS NULL
+              AND a.actor_uid IS NOT NULL AND a.delete_intended_at IS NULL AND a.deleted_at IS NULL
               AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt newer
                 WHERE newer.workspace_id=a.workspace_id AND newer.generation>a.generation)`;
           if (writable || !binding || current?.attemptID !== commission.attemptID || !current.ready)
@@ -224,7 +268,7 @@ export function createWorkspaceSourceController(
           !hub.parentConnected(current.attemptID) &&
           !hub.sourceConnected(current.attemptID) &&
           (await initialSourceRoleIn(sql, workspace.id, current.attemptID, epoch, commission)) &&
-          (await options?.supportsInitialRole(current.attemptID, sql))
+          (await options?.supportsInitialRole?.(current.attemptID, sql))
         )
           // There was no admitted human Source writer or dispatched input.
           // Authenticated cold restore initializes the read-only API role.
@@ -242,6 +286,7 @@ export function createWorkspaceSourceController(
       operation: string,
       request: Request,
       sharedSave = false,
+      wakeCompute = true,
     ) {
       if (closed) throw new CommandError("unavailable", "Factory Source is stopping");
       if (operation === "events" ? request.method !== "GET" : request.method !== "POST")
@@ -262,6 +307,54 @@ export function createWorkspaceSourceController(
           ...(content === undefined ? {} : { body: content }),
           signal: controller.signal,
         });
+        const mutation = ["write", "mkdir", "rename", "delete"].includes(operation);
+        let resumedAttemptID: string | undefined;
+        if (operation !== "events") {
+          controller.signal.throwIfAborted();
+          const before = await database.client.begin(async (sql) => {
+            if (mutation) await workspaceWriteAuthorityIn(sql, workspaceID, userID);
+            else await authority(workspaceID, userID, sql);
+            return nativeRow(workspaceID, sql);
+          });
+          if (
+            before?.runtimeState === "pausing" ||
+            (mutation && before?.runtimeState === "resuming")
+          )
+            throw new CommandError(
+              "unavailable",
+              "Compute is changing state. Keep your editor buffer and retry after it settles.",
+            );
+          if (
+            (before?.runtimeState === "paused" || before?.runtimeState === "resuming") &&
+            (mutation || before.sourceOwner === "actor")
+          ) {
+            if (!wakeCompute)
+              throw new CommandError(
+                "unavailable",
+                "Workspace compute is paused. Resume compute to synchronize shared editing. Your buffer is retained.",
+              );
+            if (!before.attemptID || !options?.wakeForAccess)
+              throw new CommandError(
+                "unavailable",
+                "Resume this Workspace to access its current files. Your editor buffer is retained.",
+              );
+            // The same native Actor retains Source. Hold neither Source nor
+            // membership/writer locks while its authenticated wake connects.
+            controller.signal.throwIfAborted();
+            if (closed) throw new CommandError("unavailable", "Factory Source is stopping");
+            pendingWakes.add(controller);
+            try {
+              await options.wakeForAccess(workspaceID, userID, controller.signal, mutation);
+            } finally {
+              pendingWakes.delete(controller);
+            }
+            resumedAttemptID = before.attemptID;
+          }
+          // Retired independent Source keeps its existing editing policy;
+          // saving never replaces explicit Stop or starts a new Attempt.
+          controller.signal.throwIfAborted();
+          if (closed) throw new CommandError("unavailable", "Factory Source is stopping");
+        }
         const result = await database.client.begin(async (sql) => {
           const [policy] = await sql<{ timeout: string }[]>`
             SELECT current_setting('lock_timeout') AS timeout`;
@@ -293,10 +386,7 @@ export function createWorkspaceSourceController(
                 .where(
                   and(
                     eq(workspaceSharedDocument.workspaceId, workspaceID),
-                    or(
-                      eq(workspaceSharedDocument.dirty, true),
-                      eq(workspaceSharedDocument.conflict, true),
-                    ),
+                    ne(workspaceSharedDocument.syncState, "clean"),
                     or(
                       ...paths.map((path) =>
                         or(
@@ -321,22 +411,52 @@ export function createWorkspaceSourceController(
               "unavailable",
               "Native Source is not initialized; compute was not started",
             );
+          if (resumedAttemptID && current.attemptID !== resumedAttemptID)
+            throw new CommandError(
+              "conflict",
+              "Workspace compute changed during file access. Your editor buffer was retained.",
+            );
           if (current.sourceOwner !== "service" && !current.readable)
             throw new CommandError(
               "unavailable",
               "Actor Source is not ready; compute was not started",
             );
-          if (["write", "mkdir", "rename", "delete"].includes(operation)) {
+          if (mutation) {
             const writer = await workspaceWriteAuthorityIn(sql, workspaceID, userID);
-            if (current.sourceOwner !== "service" && !current.ready)
+            if (
+              current.runtimeState === "paused" ||
+              current.runtimeState === "pausing" ||
+              current.runtimeState === "resuming"
+            )
               throw new CommandError(
                 "unavailable",
-                "The Workspace is still starting. Source is readable; writing authority has not changed.",
+                "Compute is not resumed. Keep your editor buffer and retry after it settles.",
+              );
+            if (
+              resumedAttemptID &&
+              (current.attemptID !== resumedAttemptID ||
+                !current.readable ||
+                !hub.sourceConnected(resumedAttemptID) ||
+                current.sourceOwner !== "actor")
+            )
+              throw new CommandError(
+                "conflict",
+                "Source resume is unconfirmed or Workspace compute changed. Keep your editor buffer.",
+              );
+            if (
+              current.sourceOwner !== "service" &&
+              (!current.readable || !current.attemptID || !hub.sourceConnected(current.attemptID))
+            )
+              throw new CommandError(
+                "unavailable",
+                "Current files are still connecting. Your editor buffer and writing authority are retained.",
               );
             admittedRequest.headers.set(
               "X-Factory-Writer-Epoch",
               writer.writerEpoch ?? current.sourceEpoch ?? "1",
             );
+            controller.signal.throwIfAborted();
+            if (closed) throw new CommandError("unavailable", "Factory Source is stopping");
           }
           streams.set(controller, { userID, workspaceID, projectID: workspace.projectID });
           return sources.forward(workspaceID, current.attemptID, operation, admittedRequest, sql);
@@ -421,6 +541,7 @@ export function createWorkspaceSourceController(
     },
     async close() {
       closed = true;
+      for (const controller of pendingWakes) controller.abort();
       for (const controller of streams.keys()) controller.abort();
       await sources.close();
     },

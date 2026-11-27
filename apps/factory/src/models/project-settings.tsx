@@ -5,7 +5,7 @@ import {
   modelRoles,
   type PersonalModelSettings,
   type ProjectModelSettings as ProjectSettings,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
+} from "#conversation-domain/model-inheritance";
 import { plainErrorMessage } from "../command-error";
 import {
   getProjectModels,

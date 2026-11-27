@@ -1,4 +1,4 @@
-import type { MCPLibraryView } from "../../../../packages/conversation-domain/src/mcp-library";
+import type { MCPLibraryView } from "#conversation-domain/mcp-library";
 
 export function monitoringSourceAvailable(
   entry: MCPLibraryView["entries"][number],

@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { substrateFixture } from "../fixtures/substrate";
 
@@ -78,12 +75,17 @@ async function capacityFixture() {
     throw Error(`Uncommissioned native operation ${method}`);
   });
   const facts = () =>
-    f.database.client<
-      ResumeFact[]
-    >`SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,
-      attempted_at::text,outcome FROM factory.substrate_actor_rpc
-      WHERE runtime_attempt_id=${f.attemptID} AND action='resume'
-      AND origin_key<>'initial'`;
+    f.database.client<ResumeFact[]>`
+      SELECT payload->>'actorUid' AS actor_uid,
+        payload->>'nativeVersion' AS native_version,
+        payload->>'originKey' AS origin_key,
+        NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+        payload->>'attemptedAt' AS attempted_at,
+        result AS outcome
+      FROM factory.operation
+      WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+        AND scope_id=${f.attemptID} AND payload->>'action'='resume'
+        AND payload->>'originKey'<>'initial'`;
   return {
     ...f,
     runtime,
@@ -101,8 +103,9 @@ async function capacityFixture() {
     creates: () => creates,
     resumes: () => resumes,
     wait: async () => [
-      ...(await f.database.client`SELECT reason FROM factory.runtime_compute_wait
-        WHERE attempt_id=${f.attemptID}`),
+      ...(await f.database.client`SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID}`),
     ],
   };
 }
@@ -249,8 +252,10 @@ test.each([
           });
           break;
         case "other-hold":
-          await f.database.client`UPDATE factory.runtime_compute_wait
-          SET reason='accounting-incomplete' WHERE attempt_id=${f.attemptID}`;
+          await f.database.client`UPDATE factory.operation
+          SET payload=jsonb_build_object('reason','accounting-incomplete'),updated_at=now()
+          WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+            AND scope_id=${f.attemptID}`;
           break;
       }
       const continuation = expect(f.runtime.resumeForApp(f.attemptID, f.userID)).rejects;
@@ -295,8 +300,9 @@ test("initial Workspace capacity continuation preserves its independent editable
     expect(f.calls.filter((call) => call.method === "CreateActor")).toHaveLength(1);
     expect(f.calls.filter((call) => call.method === "ResumeActor")).toHaveLength(2);
     expect([
-      ...(await f.database.client`SELECT reason FROM factory.runtime_compute_wait
-          WHERE attempt_id=${f.attemptID}`),
+      ...(await f.database.client`SELECT payload->>'reason' AS reason FROM factory.operation
+          WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+            AND scope_id=${f.attemptID}`),
     ]).toEqual([]);
   } finally {
     await f.dispose();

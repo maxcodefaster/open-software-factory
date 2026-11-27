@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { attachmentInput } from "../../../../packages/conversation-domain/src/attachments";
+import { attachmentInput } from "#conversation-domain/attachments";
 import { retainAttachmentDraftInput } from "../attachments/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

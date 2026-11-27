@@ -4,12 +4,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { loadEnvFile } from "node:process";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../packages/requirement-domain/src/requirement";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { requestFunction } from "../fixtures/server-functions";
@@ -62,10 +59,10 @@ test.beforeEach(async () => {
   });
   await database.client.begin(async (transaction) => {
     await transaction`
-      INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
       VALUES (${projectID}, ${projectSlug}, '11A live baseline',
         'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main',
-        '.devcontainer/devcontainer.json', ${userID})
+        '.factory/actor-template.json', ${userID})
     `;
     await transaction`
       INSERT INTO factory.knowledge_page(id, project_id, slug, title, current_body, generated_body,

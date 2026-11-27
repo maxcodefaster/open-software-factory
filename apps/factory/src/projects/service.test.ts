@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type postgres from "postgres";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import { createProjectService } from "./service";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -11,7 +11,7 @@ const input = {
   name: "Typed Project",
   repositoryUrl: "https://forge.test/factory/typed-project.git",
   defaultBranch: "main",
-  devcontainerPath: ".devcontainer/devcontainer.json",
+  actorTemplatePath: ".factory/actor-template.json",
 };
 const projectRow = [
   projectID,
@@ -20,7 +20,7 @@ const projectRow = [
   "moonlit-landscape",
   input.repositoryUrl,
   input.defaultBranch,
-  input.devcontainerPath,
+  input.actorTemplatePath,
   createdAt,
 ];
 
@@ -28,9 +28,11 @@ function fixture(
   projectRows: unknown[][] = [projectRow],
   failure?: Error,
   revoke?: "manager" | "account" | "directory",
+  defaultBranch: string | Error = "main",
 ) {
   const queries: Array<{ query: string; parameters: unknown[]; transaction: number }> = [];
   const callbacks: Array<{ projectID: string; userID: string; recovering: boolean }> = [];
+  const branchReads: Array<{ owner: string; name: string; queryIndex: number }> = [];
   const transactions: string[] = [];
   let transaction = 0;
   let revoked = false;
@@ -64,7 +66,7 @@ function fixture(
                   ["gulf-of-marseille", 1],
                   ["scene-on-the-ice", 1],
                 ]
-              : query.includes('"project_setup_readiness"')
+              : query.includes('"operation"')
                 ? [[projectID, userID]]
                 : projectRows;
           else if (query.includes('from "factory"."administrator"'))
@@ -74,7 +76,7 @@ function fixture(
             rows = projectRows;
           } else if (
             !query.startsWith('insert into "factory"."project_membership"') &&
-            !query.startsWith('insert into "factory"."project_setup_readiness"')
+            !query.startsWith('insert into "factory"."operation"')
           )
             throw new Error(`Unexpected query: ${query}`);
           return Object.assign(Promise.resolve(rows), { values: async () => rows });
@@ -101,15 +103,21 @@ function fixture(
     database,
     localRepositoryOrigin: "https://forge.test",
     forgeOwner: "factory",
+    readDefaultBranch: async (repository: { owner: string; name: string }) => {
+      expect(transactions.at(-1)).toMatch(/^commit:/);
+      branchReads.push({ ...repository, queryIndex: queries.length });
+      if (defaultBranch instanceof Error) throw defaultBranch;
+      return defaultBranch;
+    },
     onRegistered: async (projectID, userID, recovering) => {
       if (!recovering) expect(transactions.at(-1)).toMatch(/^commit:/);
       callbacks.push({ projectID, userID, recovering });
     },
   });
-  return { service, queries, callbacks, transactions };
+  return { service, queries, callbacks, branchReads, transactions };
 }
 
-test("project registration uses one locked transaction and preserves database defaults", async () => {
+test("project registration keeps Forge reads outside locked authorization and persistence transactions", async () => {
   const f = fixture();
   const saved = await f.service.register(userID, input);
   expect(saved).toEqual({
@@ -125,7 +133,9 @@ test("project registration uses one locked transaction and preserves database de
   const transaction = firstWrite.transaction;
   expect(transaction).toBeGreaterThan(0);
   expect(writes.every((write) => write.transaction === transaction)).toBe(true);
-  const lock = f.queries.findIndex(({ query }) => query.includes("factory-account-policy"));
+  const lock = f.queries.findIndex(
+    ({ query, transaction: id }) => query.includes("factory-account-policy") && id === transaction,
+  );
   expect(lock).toBeGreaterThanOrEqual(0);
   expect(f.queries[lock]?.transaction).toBe(transaction);
   expect(f.queries.indexOf(firstWrite)).toBeGreaterThan(lock);
@@ -135,6 +145,17 @@ test("project registration uses one locked transaction and preserves database de
   );
   expect(authority).toBeGreaterThan(lock);
   expect(authority).toBeLessThan(f.queries.indexOf(firstWrite));
+  expect(f.branchReads).toEqual([
+    { owner: "factory", name: input.slug, queryIndex: expect.any(Number) },
+  ]);
+  const initialAuthority = f.queries.findIndex(
+    ({ query, transaction: id }) =>
+      id !== transaction && query.startsWith('select "user_id" from "factory"."administrator"'),
+  );
+  expect(initialAuthority).toBeGreaterThanOrEqual(0);
+  expect(f.branchReads[0]?.queryIndex).toBeGreaterThan(initialAuthority);
+  expect(f.branchReads[0]?.queryIndex).toBeLessThanOrEqual(lock);
+  expect(f.transactions).toEqual(["begin:1", "commit:1", "begin:2", "commit:2"]);
   expect(writes[0]?.query).toContain("default");
   expect(writes[0]?.parameters).toContain("moonlit-landscape");
   expect(writes[0]?.parameters).not.toContain(createdAt);
@@ -159,8 +180,70 @@ test("project registration uses one locked transaction and preserves database de
     manage_project: true,
     updated_by: userID,
   });
-  expect(writes[2]?.parameters).toContain("configuration");
+  expect(writes[2]?.parameters).toContain("projects.setup_readiness");
+  expect(JSON.stringify(writes[2]?.parameters)).toContain("configuration");
   expect(f.callbacks).toEqual([{ projectID, userID, recovering: false }]);
+});
+
+test.each(["", ".git"])(
+  "project registration rejects a repository-name/slug mismatch before writes (suffix '%s')",
+  async (suffix) => {
+    const f = fixture();
+    await expect(
+      f.service.register(userID, {
+        ...input,
+        slug: "native-observation-4777f596",
+        repositoryUrl: `https://forge.test/factory/factory-source-perf-d6b1f748${suffix}`,
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      message: "Project repository name must match its slug.",
+    });
+    expect(f.queries.filter(({ query }) => query.startsWith("insert into"))).toHaveLength(0);
+    expect(f.callbacks).toHaveLength(0);
+    expect(f.branchReads).toHaveLength(0);
+    expect(f.transactions.at(-1)).toMatch(/^rollback:/);
+  },
+);
+
+test("project registration rejects a non-default branch before writes or setup", async () => {
+  const f = fixture();
+  await expect(
+    f.service.register(userID, { ...input, defaultBranch: "codex/alternate-branch" }),
+  ).rejects.toMatchObject({
+    code: "invalid",
+    message: "Project branch must match the repository default branch.",
+  });
+  expect(f.branchReads).toEqual([
+    { owner: "factory", name: input.slug, queryIndex: expect.any(Number) },
+  ]);
+  expect(f.queries.filter(({ query }) => query.startsWith("insert into"))).toHaveLength(0);
+  expect(f.callbacks).toHaveLength(0);
+  expect(f.transactions.at(-1)).toMatch(/^rollback:/);
+});
+
+test("project registration accepts a matching default branch other than main", async () => {
+  const row = [...projectRow];
+  row[5] = "trunk";
+  const f = fixture([row], undefined, undefined, "trunk");
+  expect(await f.service.register(userID, { ...input, defaultBranch: "trunk" })).toMatchObject({
+    defaultBranch: "trunk",
+  });
+  expect(f.branchReads).toHaveLength(1);
+  expect(f.callbacks).toHaveLength(1);
+});
+
+test("project registration refuses an unconfirmed default branch without persisting or leaking errors", async () => {
+  const f = fixture(undefined, undefined, undefined, new Error("private Forge transport detail"));
+  await expect(f.service.register(userID, input)).rejects.toMatchObject({
+    code: "unavailable",
+    message:
+      "Factory could not confirm the repository default branch. Check Forgejo access and try again.",
+  });
+  expect(f.branchReads).toHaveLength(1);
+  expect(f.queries.filter(({ query }) => query.startsWith("insert into"))).toHaveLength(0);
+  expect(f.callbacks).toHaveLength(0);
+  expect(f.transactions.at(-1)).toMatch(/^rollback:/);
 });
 
 test.each(["manager", "account", "directory"] as const)(
@@ -174,6 +257,7 @@ test.each(["manager", "account", "directory"] as const)(
     });
     expect(f.queries.filter(({ query }) => query.startsWith("insert into"))).toHaveLength(0);
     expect(f.callbacks).toHaveLength(0);
+    expect(f.branchReads).toHaveLength(0);
     expect(f.transactions.at(-1)).toMatch(/^rollback:/);
   },
 );
@@ -215,8 +299,14 @@ test("project recovery selects pending configuration without repository intent",
   expect(f.callbacks).toEqual([{ projectID, userID, recovering: true }]);
   expect(f.queries).toHaveLength(1);
   expect(f.queries[0]?.transaction).toBe(0);
-  expect(f.queries[0]?.query).toContain('inner join "factory"."project_setup_readiness"');
-  expect(f.queries[0]?.query).toContain('not exists (select "project_id"');
-  expect(f.queries[0]?.parameters).toEqual(["configuration", "pending"]);
+  expect(f.queries[0]?.query).toContain('inner join "factory"."operation"');
+  expect(f.queries[0]?.query).toContain('not exists (select "id"');
+  expect(f.queries[0]?.parameters).toEqual([
+    "projects.setup_readiness",
+    "project",
+    "pending",
+    "projects.repository_intent",
+    "project",
+  ]);
   expect(f.transactions).toHaveLength(0);
 });

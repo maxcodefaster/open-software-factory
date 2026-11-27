@@ -13,19 +13,38 @@ import {
 } from "./artifacts";
 import { createInstallation, loadInstallation } from "./installation";
 
-test("native installations require four artifacts and no separate Source image", async () => {
-  const names = ["runtime-host", "browser-tools", "developer-ide", "substrate-runtime"] as const;
+test("native installations require the complete six-role generation, including prepared Starter images", async () => {
+  const names = [
+    "runtime-host",
+    "browser-tools",
+    "developer-ide",
+    "substrate-runtime",
+    "starter-work",
+    "starter-postgres",
+  ] as const;
   const bundle = Object.fromEntries(
     names.map((name) => [name, `registry.example/${name}@sha256:${"a".repeat(64)}`]),
   );
   expect(runtimeArtifactsSchema.safeParse(bundle).success).toBe(true);
   const native = runtimeArtifactsSchema.parse(bundle);
   expect([...runtimeArtifactNames]).toEqual([...names]);
-  expect(runtimeArtifactEnvironment(native)).toEqual({
+  expect(runtimeArtifactEnvironment(native, "arm64")).toEqual({
     FACTORY_RUNTIME_HOST_IMAGE: native["runtime-host"],
     FACTORY_BROWSER_TOOLS_IMAGE: native["browser-tools"],
     FACTORY_DEVELOPER_IDE_IMAGE: native["developer-ide"],
+    FACTORY_STARTER_IMAGES: JSON.stringify({
+      platform: "linux/arm64",
+      development: native["starter-work"],
+      postgres: native["starter-postgres"],
+    }),
   });
+  expect(JSON.parse(runtimeArtifactEnvironment(native, "amd64").FACTORY_STARTER_IMAGES)).toEqual({
+    platform: "linux/amd64",
+    development: native["starter-work"],
+    postgres: native["starter-postgres"],
+  });
+  const { "starter-work": _work, "starter-postgres": _postgres, ...incomplete } = native;
+  expect(runtimeArtifactsSchema.safeParse(incomplete).success).toBe(false);
   expect(
     runtimeArtifactsSchema.safeParse({
       ...bundle,

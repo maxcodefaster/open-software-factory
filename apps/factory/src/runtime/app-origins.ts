@@ -1,4 +1,4 @@
-import type { SystemContract } from "../../../../packages/system-contract/src/system-contract";
+import type { SystemContract } from "#system-contract/system-contract";
 import { appRuntimeOrigin } from "../runtime-origins";
 
 export function runtimePublicFactoryOrigin(value: string | undefined) {

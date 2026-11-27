@@ -1,11 +1,8 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { implementationInput } from "../../../../packages/change-domain/src/implementation";
-import {
-  ticketDocumentInput,
-  ticketFollowUpInput,
-} from "../../../../packages/requirement-domain/src/document";
-import { saveTechnicalDesignInput } from "../../../../packages/requirement-domain/src/technical-design";
+import { implementationInput } from "#change-domain/implementation";
+import { ticketDocumentInput, ticketFollowUpInput } from "#requirement-domain/document";
+import { saveTechnicalDesignInput } from "#requirement-domain/technical-design";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

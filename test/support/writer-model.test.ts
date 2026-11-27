@@ -265,8 +265,8 @@ if (process.env["FACTORY_WRITER_MODEL_CHECK"] === "1") {
       const commit = "d".repeat(40),
         otherCommit = "e".repeat(40);
       await owned.database
-        .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,created_by)
-        VALUES(${verification},${owned.changeID},${commit},1,'owned-formal',${owned.userID})`;
+        .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,created_by)
+        VALUES(${verification},${owned.changeID},${commit},1,${owned.userID})`;
       await owned.database
         .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
         VALUES(${review},${verification},${owned.changeID},${commit},${"a".repeat(40)},${owned.userID})`;
@@ -308,18 +308,18 @@ if (process.env["FACTORY_WRITER_MODEL_CHECK"] === "1") {
       );
       const [decision] = await owned.database.client<
         { id: string }[]
-      >`SELECT command_id AS id FROM factory.change_editing_decision WHERE change_id=${owned.changeID} LIMIT 1`;
+      >`SELECT id FROM factory.audit_event WHERE kind='access.change_editing_decision' AND scope_type='change' AND scope_id=${owned.changeID} LIMIT 1`;
       if (!decision) throw new Error("Writer's retained human decision missing");
       await reject(
         "editing-decision",
         owned.database
-          .client`UPDATE factory.change_editing_decision SET writer_epoch=writer_epoch+1 WHERE command_id=${decision.id}`,
-        "change_editing_decision is immutable",
+          .client`UPDATE factory.audit_event SET payload=payload WHERE id=${decision.id}`,
+        "audit_event is immutable",
       );
       const otherVerification = crypto.randomUUID();
       await owned.database
-        .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,created_by,state,completed_at)
-        VALUES(${otherVerification},${owned.changeID},${otherCommit},1,'owned-formal',${owned.userID},'cancelled',now())`;
+        .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,created_by,state,completed_at)
+        VALUES(${otherVerification},${owned.changeID},${otherCommit},1,${owned.userID},'cancelled',now())`;
       await reject(
         "approval-exact-commit",
         owned.database

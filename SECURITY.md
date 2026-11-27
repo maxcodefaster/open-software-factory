@@ -16,7 +16,7 @@ reporter unless they ask otherwise.
 
 ## Scope
 
-Factory runs Project code in official Substrate Actors with private Docker and Dev Containers.
+Factory runs Project code in direct native containers within official Substrate Actors.
 Reports about escaping that isolation, reading another Project's source or secrets, or bypassing
 an approval are in scope. Findings that need an operator to disable the cluster policies the
 install guide asks for are not.

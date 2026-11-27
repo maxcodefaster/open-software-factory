@@ -37,6 +37,7 @@ type command struct {
 
 var factoryAtespace = regexp.MustCompile(`^fa-[a-f0-9]{32}$`)
 var factoryEditor = regexp.MustCompile(`^user:system:serviceaccount:[a-z0-9-]+:[a-z0-9-]+$`)
+var factoryBrowser = regexp.MustCompile(`^browser-[a-f0-9]{32}$`)
 
 func commandContext(parent context.Context, method string) (context.Context, context.CancelFunc) {
 	// Substrate bounds checkpoint/upload and wakeup work. A separate three-minute
@@ -110,8 +111,9 @@ func call(ctx context.Context, c command) (proto.Message, error) {
 			return nil, err
 		}
 		t := r.GetActorTemplate()
-		if !factoryAtespace.MatchString(t.GetMetadata().GetAtespace()) || t.GetMetadata().GetName() != "runtime" || t.GetSnapshotConfig().GetPreferredFidelity() != ate.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS || t.GetSnapshotConfig().GetGoldenSnapshotConfig().GetMode() != ate.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED {
-			return nil, errors.New("Factory ROOTFS runtime template with golden snapshots disabled required")
+		fidelity := t.GetSnapshotConfig().GetPreferredFidelity()
+		if !factoryAtespace.MatchString(t.GetMetadata().GetAtespace()) || (t.GetMetadata().GetName() != "runtime" && !factoryBrowser.MatchString(t.GetMetadata().GetName())) || (fidelity != ate.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY && fidelity != ate.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS) || t.GetSnapshotConfig().GetGoldenSnapshotConfig().GetMode() != ate.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED {
+			return nil, errors.New("Factory MEMORY or ROOTFS runtime template with golden snapshots disabled required")
 		}
 		return client.CreateActorTemplate(ctx, r)
 	case "GetAtespace":
@@ -126,6 +128,15 @@ func call(ctx context.Context, c command) (proto.Message, error) {
 			return nil, err
 		}
 		return client.GetActorTemplate(ctx, r)
+	case "DeleteActorTemplate":
+		r := &ate.DeleteActorTemplateRequest{}
+		if err := decode(r); err != nil {
+			return nil, err
+		}
+		if !factoryAtespace.MatchString(r.GetActorTemplate().GetAtespace()) || !factoryBrowser.MatchString(r.GetActorTemplate().GetName()) || r.GetOptions().GetUid() == "" || r.GetOptions().GetVersion() < 1 {
+			return nil, errors.New("owned Browser template with delete UID and version preconditions required")
+		}
+		return client.DeleteActorTemplate(ctx, r)
 	case "GetActor":
 		r := &ate.GetActorRequest{}
 		if err := decode(r); err != nil {

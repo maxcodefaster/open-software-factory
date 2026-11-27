@@ -25,7 +25,7 @@ const nativeCPUSchedulingQuantum = 250;
 export const nativeCapacityPool = z.object({
   metadata,
   spec: z.strictObject({
-    replicas: z.literal(1),
+    replicas: z.number().int().min(0),
     workerImage: image,
     sandboxClasses: z.tuple([
       z.strictObject({
@@ -55,6 +55,11 @@ export type NativeCapacityNode = {
   architecture: NativeArchitecture;
   resources: { cpuMilli: number; memoryMiB: number };
 };
+
+export function nativeCapacityReadyReplicas(pool: NativeCapacityPool) {
+  if (pool.spec.replicas <= 0) return 0;
+  return Math.max(0, Math.min(pool.spec.replicas, pool.status?.readyReplicas ?? 0));
+}
 
 export function nativeCapacityReservedPoolResources(pool: NativeCapacityPool) {
   const { requests, limits } = pool.spec.template.resources;
@@ -203,11 +208,12 @@ export function requireNativeCapacityBase(
     .object({ items: z.array(z.unknown()) })
     .parse(poolsInput)
     .items.map((value) => nativeCapacityPool.parse(value));
-  const base = pools.filter(
+  const matching = pools.filter(
     (pool) =>
       !pool.metadata.labels["factory.dev/native-capacity"] &&
       Object.entries(selector).every(([key, value]) => pool.metadata.labels[key] === value),
   );
+  const base = matching.length > 1 ? matching.filter((pool) => pool.spec.replicas > 0) : matching;
   if (base.length !== 1 || !base[0]?.metadata.namespace || base[0].metadata.deletionTimestamp)
     throw new Error("Native capacity requires its one original admitted WorkerPool");
   if (

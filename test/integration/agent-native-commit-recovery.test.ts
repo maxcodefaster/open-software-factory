@@ -1,4 +1,3 @@
-import { disableStarterSkillsIn } from "../fixtures/change-agent-turns";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -7,7 +6,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { fixture } from "../fixtures/change-agent-turns";
+import { disableStarterSkillsIn, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { nativeGitHTTP } from "../fixtures/native-git-http";
 import { observe } from "../fixtures/pinned-opencode";

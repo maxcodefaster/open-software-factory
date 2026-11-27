@@ -7,7 +7,7 @@ import "@fontsource/ibm-plex-mono/500.css";
 import { Factory } from "../factory-entry";
 import { FactoryNavigationProvider } from "../navigation/router";
 import "../tokens.css";
-import "../knowledge-workspace.css";
+import "../knowledge/knowledge-workspace.css";
 import "../runtime-workspace.css";
 import "../style.css";
 

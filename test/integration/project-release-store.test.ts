@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { operation, projectRelease } from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
+import type { createForgejoReleases } from "#forge/releases";
+import { releaseContract } from "#project-domain/release";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createReleaseController } from "../../apps/factory/src/releases/controller";
 import type { ReleaseCredential } from "../../apps/factory/src/releases/secrets";
 import { publicationWorkflow } from "../../apps/factory/src/releases/workflow";
-import { projectRelease, releaseAccess, releaseAttempt } from "../../packages/db/src/schema";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
-import type { createForgejoReleases } from "../../packages/forge/src/releases";
-import { releaseContract } from "../../packages/project-domain/src/release";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { nativeJobsFixture } from "../fixtures/native-jobs";
 
@@ -22,9 +22,9 @@ async function releaseStoreFixture() {
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userID},'Release store proof',${`${userID}@factory.invalid`},true)`;
     for (const id of [projectID, otherProjectID]) {
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${id},${`release-store-${id}`},'Release store proof','https://forge.example/factory/project.git',
-          'main','.devcontainer/devcontainer.json',${userID})`;
+          'main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${id},${userID},'developer',true,${userID})`;
     }
@@ -98,7 +98,10 @@ test("release admission commits frozen intent before dispatch and rolls back con
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by)
         VALUES(${changeID},${f.projectID},${ticketID},${approvalID},
           ${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${sha},'active',${f.userID})`;
-      await sql`INSERT INTO factory.staging_preview(project_id,revision) VALUES(${f.projectID},${sha})`;
+      await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+        VALUES(${crypto.randomUUID()},'delivery.staging_preview','project',${f.projectID},
+          ${`delivery.staging_preview:${f.projectID}`},'pending',
+          ${JSON.stringify({ projectId: f.projectID, revision: sha, runtimeAttemptId: null })}::jsonb)`;
     });
     jobs = await nativeJobsFixture(f.database, f.projectID);
     const staging = await jobs.startStaging(f.userID);
@@ -144,8 +147,8 @@ test("release admission commits frozen intent before dispatch and rolls back con
             .where(eq(projectRelease.id, attemptID));
           const [attempt] = await f.database.db
             .select()
-            .from(releaseAttempt)
-            .where(eq(releaseAttempt.id, attemptID));
+            .from(operation)
+            .where(and(eq(operation.id, attemptID), eq(operation.kind, "releases.attempt")));
           expect(intent).toMatchObject({
             commandId: command.commandID,
             commitSha: commit,
@@ -154,12 +157,12 @@ test("release admission commits frozen intent before dispatch and rolls back con
             workflow: publicationWorkflow,
             state: "dispatching",
           });
-          expect(attempt).toMatchObject({
+          expect(attempt?.payload).toMatchObject({
             releaseId: attemptID,
             commandId: command.commandID,
             ordinal: 1,
           });
-          expect(attempt?.dispatchIntendedAt).toBeInstanceOf(Date);
+          expect(typeof attempt?.payload["dispatchIntendedAt"]).toBe("string");
           atDispatch = true;
           await gate.promise;
           throw Error("Lost dispatch acknowledgement");
@@ -172,8 +175,19 @@ test("release admission commits frozen intent before dispatch and rolls back con
     await expect(controller.publish(f.userID, f.projectID, command)).rejects.toThrow("Staging");
     // Retained delivered projection. The staging owner still creates its own bound runtime.
     await f.database
-      .client`INSERT INTO factory.promotion_operation(id,change_id,project_id,commit_sha,state,completed_at)
-      VALUES(${crypto.randomUUID()},${changeID},${f.projectID},${sha},'succeeded',now())`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,completed_at)
+      VALUES(${crypto.randomUUID()},'delivery.promotion','change',${changeID},
+        ${`delivery.promotion:${changeID}:1`},'succeeded',
+        ${JSON.stringify({
+          changeId: changeID,
+          projectId: f.projectID,
+          commitSha: sha,
+          previousRuntimeAttemptId: null,
+          replacementRuntimeAttemptId: null,
+          ordinal: 1,
+          supersedesId: null,
+          retryCommandId: null,
+        })}::jsonb,now())`;
     head = "c".repeat(40);
     await expect(controller.publish(f.userID, f.projectID, command)).rejects.toThrow("Staging");
     head = sha;
@@ -205,7 +219,9 @@ test("release admission commits frozen intent before dispatch and rolls back con
     expect(conflict).toBeInstanceOf(CommandError);
     expect(conflict).toMatchObject({ code: "conflict" });
     expect(await f.database.db.select().from(projectRelease)).toHaveLength(1);
-    expect(await f.database.db.select().from(releaseAttempt)).toHaveLength(1);
+    expect(
+      await f.database.db.select().from(operation).where(eq(operation.kind, "releases.attempt")),
+    ).toHaveLength(1);
     gate.resolve();
     await controller.reconcile(f.userID, f.projectID, accepted.id);
     expect((await controller.view(f.userID, f.projectID)).releases[0]).toMatchObject({
@@ -224,8 +240,23 @@ test("release admission commits frozen intent before dispatch and rolls back con
     // The newest ordinal owns cleanup, even when an older attempt remains retained.
     const nextAttemptID = crypto.randomUUID();
     await f.database
-      .client`INSERT INTO factory.release_attempt(id,release_id,command_id,ordinal,runner_id,runner_uuid,runner_token)
-      VALUES(${nextAttemptID},${accepted.id},${nextAttemptID},2,${runnerID},'owned-runner','owned-token')`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${nextAttemptID},'releases.attempt','project_release',${accepted.id},
+        ${`releases.attempt:${nextAttemptID}`},${`releases.attempt.ordinal:${accepted.id}:2`},'pending',
+        ${JSON.stringify({
+          id: nextAttemptID,
+          releaseId: accepted.id,
+          commandId: nextAttemptID,
+          ordinal: 2,
+          dispatchIntendedAt: null,
+          runId: null,
+          runnerId: runnerID,
+          runnerUuid: "owned-runner",
+          runnerToken: "owned-token",
+          jobHandle: null,
+          runtimeAttemptId: null,
+          cleanedAt: null,
+        })}::jsonb,${f.userID})`;
     await controller.end(f.userID, f.projectID, accepted.id);
     const [ended] = await f.database.db
       .select()
@@ -241,15 +272,15 @@ test("release admission commits frozen intent before dispatch and rolls back con
     expect(removed).toEqual([runnerID, runnerID]);
     const [latest] = await f.database.db
       .select()
-      .from(releaseAttempt)
-      .where(eq(releaseAttempt.id, nextAttemptID));
-    expect(latest?.cleanedAt).toBeInstanceOf(Date);
-    expect(latest?.runnerToken).toBeNull();
+      .from(operation)
+      .where(and(eq(operation.id, nextAttemptID), eq(operation.kind, "releases.attempt")));
+    expect(latest?.completedAt).toBeInstanceOf(Date);
+    expect(latest?.payload["runnerToken"]).toBeNull();
     const [older] = await f.database.db
       .select()
-      .from(releaseAttempt)
-      .where(eq(releaseAttempt.id, accepted.id));
-    expect(older?.cleanedAt).toBeNull();
+      .from(operation)
+      .where(and(eq(operation.id, accepted.id), eq(operation.kind, "releases.attempt")));
+    expect(older?.completedAt).toBeNull();
     const reusedVersion = await controller
       .publish(f.userID, f.projectID, {
         ...command,
@@ -259,7 +290,9 @@ test("release admission commits frozen intent before dispatch and rolls back con
     expect(reusedVersion).toBeInstanceOf(CommandError);
     expect(reusedVersion).toMatchObject({ code: "conflict" });
     expect(await f.database.db.select().from(projectRelease)).toHaveLength(1);
-    expect(await f.database.db.select().from(releaseAttempt)).toHaveLength(2);
+    expect(
+      await f.database.db.select().from(operation).where(eq(operation.kind, "releases.attempt")),
+    ).toHaveLength(2);
   } finally {
     gate.resolve();
     try {
@@ -301,9 +334,10 @@ test("release access retains revocation intent after a lost native response and 
         expect(username).toBe(`fr-${id.replaceAll("-", "")}`);
         const [intent] = await f.database.db
           .select()
-          .from(releaseAccess)
-          .where(eq(releaseAccess.id, id));
-        expect(intent).toMatchObject({ commandId: id, state: "pending", scope: "packages" });
+          .from(operation)
+          .where(and(eq(operation.id, id), eq(operation.kind, "releases.access")));
+        expect(intent?.state).toBe("pending");
+        expect(intent?.payload).toMatchObject({ commandId: id, scope: "packages" });
       },
       async packageGrant(_owner: string, _username: string, publish: boolean) {
         expect(publish).toBe(false);
@@ -316,8 +350,8 @@ test("release access retains revocation intent after a lost native response and 
         revoked++;
         const [intent] = await f.database.db
           .select()
-          .from(releaseAccess)
-          .where(eq(releaseAccess.id, id));
+          .from(operation)
+          .where(and(eq(operation.id, id), eq(operation.kind, "releases.access")));
         expect(intent?.state).toBe("revoking");
         if (loseRevocation) throw Error("Lost revocation acknowledgement");
       },
@@ -329,9 +363,10 @@ test("release access retains revocation intent after a lost native response and 
     );
     const [active] = await f.database.db
       .select()
-      .from(releaseAccess)
-      .where(eq(releaseAccess.id, id));
-    expect(active).toMatchObject({ state: "active", tokenId: 4_294_967_298 });
+      .from(operation)
+      .where(and(eq(operation.id, id), eq(operation.kind, "releases.access")));
+    expect(active?.state).toBe("active");
+    expect(active?.payload["tokenId"]).toBe(4_294_967_298);
     expect(await controller.createAccess(f.userID, f.projectID, input)).toMatchObject({
       id,
       token: null,
@@ -352,7 +387,7 @@ test("release access retains revocation intent after a lost native response and 
     expect(view.access[0]?.createdAt).toEqual(
       (
         await f.database.client`
-      SELECT created_at::text AS created FROM factory.release_access WHERE id=${id}`
+      SELECT created_at::text AS created FROM factory.operation WHERE id=${id} AND kind='releases.access'`
       )[0]?.["created"],
     );
     expect(view.access[0]).not.toHaveProperty("tokenId");
@@ -361,15 +396,19 @@ test("release access retains revocation intent after a lost native response and 
     );
     const [unconfirmed] = await f.database.db
       .select()
-      .from(releaseAccess)
-      .where(eq(releaseAccess.id, id));
-    expect(unconfirmed).toMatchObject({ state: "revoking", revokedAt: null });
+      .from(operation)
+      .where(and(eq(operation.id, id), eq(operation.kind, "releases.access")));
+    expect(unconfirmed).toMatchObject({ state: "revoking", completedAt: null });
     loseRevocation = false;
     await controller.recover();
     await eventually(
       async () =>
-        (await f.database.db.select().from(releaseAccess).where(eq(releaseAccess.id, id)))[0]
-          ?.state,
+        (
+          await f.database.db
+            .select()
+            .from(operation)
+            .where(and(eq(operation.id, id), eq(operation.kind, "releases.access")))
+        )[0]?.state,
       (state) => state === "revoked",
       "Access revocation did not settle",
     );

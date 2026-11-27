@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { nativeActor } from "../../packages/runtime-kubernetes/src/substrate-control";
+import { nativeActor } from "#runtime-kubernetes/substrate-control";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 import { readNativeWorkspaceObservation } from "../fixtures/native-workspace-observation";
 import {
@@ -77,7 +77,7 @@ test("native fixture evidence reads the saved original Actor binding without wor
         readNativeWorkspaceObservation(f.database, { ...selected, [field]: crypto.randomUUID() }),
       ).rejects.toThrow("original saved binding");
     const [saved] = await f.database
-      .client`SELECT observation FROM factory.substrate_binding WHERE runtime_attempt_id=${started.id}`;
+      .client`SELECT observation FROM factory.runtime_attempt WHERE id=${started.id}`;
     if (!saved) throw Error("Saved native observation missing");
     for (const mutate of [
       (row: ReturnType<typeof nativeActor.parse>) => {
@@ -107,13 +107,13 @@ test("native fixture evidence reads the saved original Actor binding without wor
       const observation = nativeActor.parse(structuredClone(saved["observation"]));
       mutate(observation);
       await f.database
-        .client`UPDATE factory.substrate_binding SET observation=${JSON.stringify(observation)}::jsonb WHERE runtime_attempt_id=${started.id}`;
+        .client`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(observation)}::jsonb WHERE id=${started.id}`;
       await expect(readNativeWorkspaceObservation(f.database, selected)).rejects.toThrow(
         "original saved binding",
       );
     }
     await f.database
-      .client`UPDATE factory.substrate_binding SET observation=${JSON.stringify(saved["observation"])}::jsonb WHERE runtime_attempt_id=${started.id}`;
+      .client`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(saved["observation"])}::jsonb WHERE id=${started.id}`;
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${started.id}`;
     await expect(readNativeWorkspaceObservation(f.database, selected)).rejects.toThrow();

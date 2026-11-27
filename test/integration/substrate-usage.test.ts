@@ -1,13 +1,10 @@
 import { expect, test } from "bun:test";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
+import { nativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { drainNativeOperations } from "../../apps/factory/src/runtime/native-lock";
 import { admitComputeIn } from "../../apps/factory/src/usage/compute";
 import { computeAllocationIn } from "../../apps/factory/src/usage/journal-api";
 import { createUsageService } from "../../apps/factory/src/usage/service";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import {
-  nativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 test.each(
@@ -33,7 +30,7 @@ test.each(
       await f.database.client`INSERT INTO factory.execution_policy(scope,version,policy,updated_by)
       VALUES(${policyScope},1,${JSON.stringify(policy)}::jsonb,${f.userID})`;
       const [identity] = await f.database.client`
-      SELECT id,generation,revision,parent_connector_token_hash,child_connector_token_hash
+      SELECT id,generation,revision,parent_connector_token_hash
       FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       for (const state of [
         "starting",
@@ -73,16 +70,17 @@ test.each(
       expect(
         (
           await f.database.client`
-        SELECT id,generation,revision,parent_connector_token_hash,child_connector_token_hash
+        SELECT id,generation,revision,parent_connector_token_hash
         FROM factory.runtime_attempt WHERE id=${f.attemptID}`
         )[0],
       ).toEqual(identity);
       expect(
-        await f.database.client`SELECT runtime_attempt_id FROM factory.substrate_binding
-        WHERE runtime_attempt_id=${f.attemptID} AND deleted_at IS NULL`,
+        await f.database.client`SELECT id FROM factory.runtime_attempt
+        WHERE id=${f.attemptID} AND atespace IS NOT NULL AND deleted_at IS NULL`,
       ).toHaveLength(1);
       expect(
-        await f.database.client`SELECT attempt_id FROM factory.runtime_compute_wait`,
+        await f.database.client`SELECT scope_id FROM factory.operation
+          WHERE kind='runtime.compute_wait'`,
       ).toHaveLength(0);
       expect(
         (await f.database.client`SELECT to_regclass('factory.execution_slot') AS slot`)[0],

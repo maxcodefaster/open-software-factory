@@ -2,15 +2,15 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { callFactoryFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import {
   composeProject,
   installationDirectory,
   loadInstallation,
   requireOwnedResource,
 } from "../../scripts/factory/installation";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 const name = process.env["FACTORY_INSTALLATION_PROOF"];
 test.skipIf(!name)(

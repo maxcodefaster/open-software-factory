@@ -1,8 +1,5 @@
 import { Agent } from "@mastra/core/agent";
-import {
-  replayAnswers,
-  replayTasks,
-} from "../../../../packages/conversation-domain/src/learning-comparison";
+import { replayAnswers, replayTasks } from "#conversation-domain/learning-comparison";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
 import { createMastraUsage } from "../usage/model-api";

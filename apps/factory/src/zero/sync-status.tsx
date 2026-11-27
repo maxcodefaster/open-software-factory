@@ -1,6 +1,6 @@
 import type { ErroredQuery, ResultType } from "@rocicorp/zero";
 import { createEffect, createSignal, Show } from "solid-js";
-import { useZeroConnection } from "../../../../packages/zero-solid/src";
+import { useZeroConnection } from "#zero-solid";
 import { plainErrorMessage } from "../command-error";
 import { useFactoryReadStatus } from "./reads";
 

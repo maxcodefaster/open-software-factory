@@ -7,14 +7,10 @@ import {
   type LearningEdit,
   type LearningTarget,
   learningEdit,
-} from "../../../../packages/conversation-domain/src/learning";
-import type { LibraryChoice } from "../../../../packages/conversation-domain/src/skill-library";
-import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+} from "#conversation-domain/learning";
+import type { LibraryChoice } from "#conversation-domain/skill-library";
+import { skillContentInput } from "#conversation-domain/skills";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   administrator,
   knowledgePage,
@@ -22,9 +18,8 @@ import {
   monitoringHook,
   monitoringPolicy,
   skillLibrary,
-  skillLibraryRevision,
   skillRevision,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { editKnowledgeIn } from "../knowledge/edit";
@@ -66,13 +61,12 @@ export function createLearningTargets(database: Database) {
         })
         .from(skillLibrary)
         .innerJoin(
-          skillLibraryRevision,
+          skillRevision,
           and(
-            eq(skillLibraryRevision.libraryId, skillLibrary.id),
-            eq(skillLibraryRevision.revisionId, target.revisionId),
+            eq(skillRevision.libraryId, skillLibrary.id),
+            eq(skillRevision.id, target.revisionId),
           ),
         )
-        .innerJoin(skillRevision, eq(skillRevision.id, skillLibraryRevision.revisionId))
         .where(eq(skillLibrary.id, target.id));
       if (
         !entry ||

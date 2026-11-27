@@ -1,5 +1,6 @@
-import { and, desc, eq, exists, isNull, or, sql as expression } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
+import { and, desc, eq, exists, sql as expression, isNull, or } from "drizzle-orm";
+import { z } from "zod";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   change,
   epic,
@@ -8,8 +9,7 @@ import {
   ticket,
   ticketDependency,
   ticketDocumentRevision,
-} from "../../../../packages/db/src/schema";
-import { z } from "zod";
+} from "#db/schema";
 
 const ticketContext = z
   .object({
@@ -86,6 +86,7 @@ export async function admittedProjectContext(
       id: projectModel.id,
       name: projectModel.name,
       defaultBranch: projectModel.defaultBranch,
+      actorTemplatePath: projectModel.actorTemplatePath,
     })
     .from(projectModel)
     .where(eq(projectModel.id, projectID));

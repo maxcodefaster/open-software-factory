@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SystemContractError } from "../../../../../packages/system-contract/src/system-contract";
+import { SystemContractError } from "#system-contract/system-contract";
 import { CommandError } from "../../command-error";
 import { logFailure } from "../../failure-log";
 import { json } from "../../http";

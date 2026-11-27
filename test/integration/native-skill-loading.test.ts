@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { runCommand } from "#runtime-kubernetes/command";
 import {
   installedOpenCodeSkillIDs,
   promptRecordedOpenCodeInput,
 } from "../../apps/factory/src/agent/opencode-adapter";
 import { nativeSkillId, nativeSkillManifest } from "../../apps/factory/src/skills/native";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import upstream from "../../upstream.json";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
@@ -35,7 +35,6 @@ test("pinned native OpenCode discovers only admitted packages and retains explic
     published: true,
   };
   const processFixture = await pinnedOpenCode(
-    undefined,
     undefined,
     undefined,
     undefined,

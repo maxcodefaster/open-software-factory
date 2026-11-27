@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { defaultExecutionPolicy } from "#conversation-domain/execution-policy";
 import {
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
@@ -6,7 +7,6 @@ import {
 import { createUsageJournal, type UsageEntry } from "../../apps/factory/src/usage/journal";
 import { drainOpenCodeUsage, openCodeUsageEntry } from "../../apps/factory/src/usage/opencode";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
-import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import upstream from "../../upstream.json";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import {
@@ -104,8 +104,14 @@ test("recorded usage keeps native microsecond operation ordering, inclusive curs
           ELSE '2026-11-20T12:34:56.123457Z'::timestamptz END
       FROM factory.agent_turn WHERE id IN (${owned.initial.id},${review.id})`;
     await owned.database
-      .client`INSERT INTO factory.usage_replay_cursor(operation_id,session_id,sequence,start_sequence)
-      VALUES(${initialID},${owned.sessionID},5,5),(${nextID},${owned.sessionID},10,10)`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload)
+      VALUES
+        (${crypto.randomUUID()},'usage.replay_cursor','usage_operation',${initialID},
+          ${`usage.replay_cursor:${encodeURIComponent(initialID)}:${encodeURIComponent(owned.sessionID)}`},NULL,'active',
+          ${JSON.stringify({ operationId: initialID, sessionId: owned.sessionID, sequence: 5, startSequence: 5 })}::jsonb),
+        (${crypto.randomUUID()},'usage.replay_cursor','usage_operation',${nextID},
+          ${`usage.replay_cursor:${encodeURIComponent(nextID)}:${encodeURIComponent(owned.sessionID)}`},NULL,'active',
+          ${JSON.stringify({ operationId: nextID, sessionId: owned.sessionID, sequence: 10, startSequence: 10 })}::jsonb)`;
     await recorder.prepare(owned.initial.id, client, owned.sessionID);
     await recorder.prepare(review.id, client, review.sessionID);
     observing = true;
@@ -152,7 +158,6 @@ test("recorded usage keeps native microsecond operation ordering, inclusive curs
 
 test("pinned native OpenCode durable log exposes fresh per-step consumption and replay", async () => {
   const fixture = await pinnedOpenCode(
-    undefined,
     undefined,
     process.env["FACTORY_OPENCODE_SERVER_TEST_BINARY"],
   );
@@ -589,7 +594,9 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
     if (!turn) throw new Error("Owned native turn missing");
     await database.client`INSERT INTO factory.execution_policy(scope,version,policy,timezone,updated_by)
       VALUES('factory',1,${JSON.stringify({ ...defaultExecutionPolicy(), codingUSD: 0 })}::jsonb,'UTC',${owned.userID})`;
-    await database.client`INSERT INTO factory.coding_pause(turn_id,reason) VALUES(${turn.id},'finish-reserve-used')`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'usage.coding_pause','agent_turn',${turn.id},${`usage.coding_pause:${turn.id}`},'paused',
+        ${JSON.stringify({ turnId: turn.id, reason: "finish-reserve-used", resumedByTurnId: null })}::jsonb)`;
     await native.control("/deny", "POST");
     await native.control("/release", "POST");
     await observe(

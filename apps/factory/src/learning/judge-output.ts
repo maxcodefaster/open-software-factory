@@ -5,7 +5,7 @@ import {
   learningFinding,
   learningProposal,
   learningResult,
-} from "../../../../packages/conversation-domain/src/learning";
+} from "#conversation-domain/learning";
 
 function evidenceReferences(ids: string[]) {
   // An empty enum becomes JSON Schema `not`, which structured-output providers

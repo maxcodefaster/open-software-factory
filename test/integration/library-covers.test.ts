@@ -1,10 +1,7 @@
 import { expect, test } from "bun:test";
+import { defaultLibraryCover, libraryCoverCatalog } from "#conversation-domain/library-covers";
 import { createMCPLibrary } from "../../apps/factory/src/mcp/controller";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import {
-  defaultLibraryCover,
-  libraryCoverCatalog,
-} from "../../packages/conversation-domain/src/library-covers";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -24,8 +21,8 @@ test("library covers persist separately, enforce owning-scope authority and neve
     for (const id of [owner, other, manager])
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES (${id},'Cover author',${`${id}@covers.test`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES (${project},${`covers-${project}`},'Cover proof','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${admin})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES (${project},${`covers-${project}`},'Cover proof','https://example.invalid/owned.git','main','.factory/actor-template.json',${admin})`;
     for (const id of [owner, manager])
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES (${project},${id},'product-contributor',${id === manager},${admin})`;
@@ -98,7 +95,7 @@ test("library covers persist separately, enforce owning-scope authority and neve
       await database.client`SELECT * FROM factory.mcp_connection WHERE id=${libraryId}`;
     if (!connection) throw new Error("Owned MCP connection was not retained");
     const choices = [
-      ...(await database.client`SELECT * FROM factory.skill_library_choice WHERE library_id=${libraryId}`),
+      ...(await database.client`SELECT * FROM factory.operation WHERE kind='skills.choice' AND payload->>'libraryId'=${libraryId}`),
     ];
     const first = fixtureValue(
       libraryCoverCatalog.find((cover) => cover.key !== defaultLibraryCover(libraryId)),
@@ -138,7 +135,7 @@ test("library covers persist separately, enforce owning-scope authority and neve
       ...(await database.client`SELECT * FROM factory.mcp_connection WHERE id=${libraryId}`),
     ]).toEqual([connection]);
     expect([
-      ...(await database.client`SELECT * FROM factory.skill_library_choice WHERE library_id=${libraryId}`),
+      ...(await database.client`SELECT * FROM factory.operation WHERE kind='skills.choice' AND payload->>'libraryId'=${libraryId}`),
     ]).toEqual(choices);
     const skillCover = (await skillEntry()).cover,
       mcpCover = (await mcpEntry()).cover;

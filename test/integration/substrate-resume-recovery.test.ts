@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import {
+  type NativeActor,
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
 import { substrateTemplateSHA256 } from "../../apps/factory/src/runtime/substrate";
 import { substrateWorkspaceGrantIn } from "../../apps/factory/src/runtime/substrate-grant";
 import {
   createSubstrateWorkspaces,
   type SubstrateWorkspaceConfiguration,
 } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  type NativeActor,
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { substrateFixture } from "../fixtures/substrate";
 
 test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
@@ -45,12 +45,21 @@ test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
     const recoveryReads = new Set<string>();
     let recovering = false;
     const facts = () => f.database.client`
-    SELECT runtime_attempt_id::text AS "attemptID",action,origin_key,origin_checkpoint,
-      actor_uid::text,native_version,stop_id::text,intended_at::text,attempted_at::text,
-      outcome,outcome_recorded_at::text
-    FROM factory.substrate_actor_rpc
-    WHERE runtime_attempt_id IN (${f.attemptID},${secondAttemptID})
-    ORDER BY runtime_attempt_id,action,origin_key`;
+    SELECT scope_id AS "attemptID",
+      payload->>'action' AS action,
+      payload->>'originKey' AS origin_key,
+      NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+      payload->>'actorUid' AS actor_uid,
+      payload->>'nativeVersion' AS native_version,
+      payload->>'stopId' AS stop_id,
+      created_at::text AS intended_at,
+      payload->>'attemptedAt' AS attempted_at,
+      result AS outcome,
+      completed_at::text AS outcome_recorded_at
+    FROM factory.operation
+    WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+      AND scope_id IN (${f.attemptID},${secondAttemptID})
+    ORDER BY scope_id,payload->>'action',payload->>'originKey'`;
     const call: SubstrateCall = async (method, request) => {
       const input = request as {
         atespace?: { name: string };
@@ -133,7 +142,7 @@ test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
           intent: { configuration: SubstrateWorkspaceConfiguration; templateSHA256: string };
           policy: Policy;
         }>
-      >`SELECT intent,policy FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=1`;
+      >`SELECT intent,resources->'policy'->'value' AS policy FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace' AND generation=1`;
       if (!seed) throw Error("Original Workspace provisioning missing");
       policies.set(f.atespace, seed.policy);
       const createdAt = new Date().toISOString();
@@ -178,12 +187,13 @@ test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
         await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
         SELECT ${secondWorkspaceID},project_id,'personal',${secondUserID},source_branch,source_revision,${secondUserID}
         FROM factory.development_workspace WHERE id=${f.workspaceID}`;
-        await sql`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent,
-        atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
-        VALUES(${secondWorkspaceID},1,${JSON.stringify(secondIntent)}::text::jsonb,
-          ${createdAt},${JSON.stringify(secondSpace)}::text::jsonb,
-          ${createdAt},${JSON.stringify(secondPolicy)}::text::jsonb,
-          ${createdAt},${JSON.stringify(secondTemplate)}::text::jsonb)`;
+        await sql`INSERT INTO factory.substrate_provision(owner_id,kind,generation,intent,resources)
+        VALUES(${secondWorkspaceID},'workspace',1,${JSON.stringify(secondIntent)}::text::jsonb,
+          ${JSON.stringify({
+            atespace: { attemptedAt: createdAt, value: secondSpace },
+            policy: { attemptedAt: createdAt, value: secondPolicy },
+            template: { attemptedAt: createdAt, value: secondTemplate },
+          })}::text::jsonb)`;
       });
       const workspaces = createSubstrateWorkspaces(
         f.database,
@@ -281,8 +291,8 @@ test.each(["ACTOR_STATE_RESUMING", "ACTOR_STATE_RUNNING"] as const)(
       };
       expect(completedDispatch).toEqual(originalSecond);
       const bindings = await f.database.client`
-      SELECT runtime_attempt_id::text AS "attemptID",actor_uid::text,checkpoint
-      FROM factory.substrate_binding WHERE runtime_attempt_id IN (${f.attemptID},${secondAttemptID})`;
+      SELECT id::text AS "attemptID",actor_uid::text,checkpoint
+      FROM factory.runtime_attempt WHERE id IN (${f.attemptID},${secondAttemptID})`;
       expect(bindings).toHaveLength(2);
       for (const binding of bindings) {
         const original = originalFacts.find((row) => row["attemptID"] === binding["attemptID"]);

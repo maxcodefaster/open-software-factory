@@ -1,11 +1,11 @@
-import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
+import type { createDatabase } from "#db/client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/conversations/store";
-import type { createDatabase } from "../../packages/db/src/client";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
 
 async function until<T>(observe: () => Promise<T>, accepts: (value: T) => boolean) {
   const deadline = Date.now() + 45_000;
@@ -91,9 +91,9 @@ test("actual Factory startup recovers Project input and never replays dispatched
     expect(cookie.length).toBeGreaterThan(0);
     const projectID = crypto.randomUUID();
     await ownedDatabase.client`INSERT INTO factory.project (
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+      id, slug, name, repository_url, default_branch, actor_template_path, created_by
     ) VALUES (${projectID}, ${`owned-${id}`}, 'Owned process Project',
-      'https://example.invalid/owned-process.git', 'main', '.devcontainer/devcontainer.json', ${actor.id})`;
+      'https://example.invalid/owned-process.git', 'main', '.factory/actor-template.json', ${actor.id})`;
     controller = createProjectAgentController(ownedDatabase);
     const conversation = await controller.setMode(projectID, undefined, "investigate", actor.id);
     if (!conversation) throw new Error("Owned process Conversation missing");

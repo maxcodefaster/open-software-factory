@@ -1,30 +1,38 @@
 import { createHmac } from "node:crypto";
 import { and, asc, eq, sql as expression, inArray } from "drizzle-orm";
 import type { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  administrator,
-  project as projectTable,
-  repositoryMirrorCommand,
-} from "../../../../packages/db/src/schema";
-import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
-import { type createForgejoClient } from "../../../../packages/forge/src/forge";
-import { ForgeMirrorWriteError } from "../../../../packages/forge/src/mirrors";
-import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { administrator, operation as operationTable, project as projectTable } from "#db/schema";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
+import { ForgeMirrorWriteError } from "#forge/mirrors";
+import { boundForgeRepositoryFromURL } from "#forge/repository";
 import {
   type RepositoryMirror,
   type RepositoryMirrorProject,
   type RepositoryMirrorView,
   repositoryMirrorCreate,
   repositoryMirrorRemove,
-} from "../../../../packages/project-domain/src/repository-mirror";
-import { projectImportURL } from "../../../../packages/project-domain/src/setup";
+} from "#project-domain/repository-mirror";
+import { projectImportURL } from "#project-domain/setup";
 import { createAccessController } from "../access/api";
 import { requireActiveAccountIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
+const REPOSITORY_MIRROR_COMMAND_KIND = "releases.mirror_command";
+const REPOSITORY_MIRROR_SCOPE_TYPE = "project";
+const repositoryMirrorCommandIdempotencyKey = (commandID: string) =>
+  `${REPOSITORY_MIRROR_COMMAND_KIND}:${commandID}`;
+
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
+type MirrorCommandPayload = {
+  action: "create" | "remove" | "sync";
+  targetURL: string | null;
+  remoteName: string | null;
+  fingerprint: string;
+  beforeState: RepositoryMirror[];
+};
 type Command = {
   id: string;
   action: "create" | "remove" | "sync";
@@ -71,29 +79,34 @@ export function createRepositoryMirrorController(options: {
   async function commands(projectID: string, sql: SQL = database.client) {
     const rows = await drizzleTransaction(sql)
       .select({
-        id: repositoryMirrorCommand.id,
-        action: repositoryMirrorCommand.action,
-        targetURL: repositoryMirrorCommand.targetUrl,
-        remoteName: repositoryMirrorCommand.remoteName,
-        fingerprint: repositoryMirrorCommand.fingerprint,
-        createdBy: repositoryMirrorCommand.createdBy,
-        state: repositoryMirrorCommand.state,
-        before: repositoryMirrorCommand.beforeState,
+        id: operationTable.id,
+        createdBy: operationTable.createdBy,
+        state: operationTable.state,
+        payload: operationTable.payload,
       })
-      .from(repositoryMirrorCommand)
+      .from(operationTable)
       .where(
         and(
-          eq(repositoryMirrorCommand.projectId, projectID),
-          inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+          eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+          eq(operationTable.scopeType, REPOSITORY_MIRROR_SCOPE_TYPE),
+          eq(operationTable.scopeId, projectID),
+          inArray(operationTable.state, ["executing", "uncertain"]),
         ),
       )
-      .orderBy(asc(repositoryMirrorCommand.createdAt));
-    return rows.map((row) => ({
-      ...row,
-      action: row.action as Command["action"],
-      state: row.state as Command["state"],
-      before: row.before as RepositoryMirror[],
-    }));
+      .orderBy(asc(operationTable.createdAt));
+    return rows.map((row) => {
+      const payload = row.payload as MirrorCommandPayload;
+      return {
+        id: row.id,
+        action: payload.action,
+        targetURL: payload.targetURL ?? null,
+        remoteName: payload.remoteName ?? null,
+        fingerprint: payload.fingerprint,
+        createdBy: row.createdBy ?? "",
+        state: row.state as Command["state"],
+        before: payload.beforeState,
+      };
+    });
   }
   async function observe(projectID: string, mirrors: RepositoryMirror[]) {
     for (const command of await commands(projectID)) {
@@ -120,18 +133,20 @@ export function createRepositoryMirrorController(options: {
               );
       if (completed)
         await drizzleTransaction(database.client)
-          .update(repositoryMirrorCommand)
+          .update(operationTable)
           .set({
             state:
               command.action === "sync" && mirrors.some((item) => item.failed)
                 ? "failed"
                 : "completed",
+            updatedAt: expression`now()`,
             completedAt: expression`now()`,
           })
           .where(
             and(
-              eq(repositoryMirrorCommand.id, command.id),
-              inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+              eq(operationTable.id, command.id),
+              eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+              inArray(operationTable.state, ["executing", "uncertain"]),
             ),
           );
     }
@@ -179,15 +194,20 @@ export function createRepositoryMirrorController(options: {
         const db = drizzleTransaction(tx);
         const [previous] = await db
           .select({
-            id: repositoryMirrorCommand.id,
-            createdBy: repositoryMirrorCommand.createdBy,
-            fingerprint: repositoryMirrorCommand.fingerprint,
-            state: repositoryMirrorCommand.state,
+            id: operationTable.id,
+            createdBy: operationTable.createdBy,
+            payload: operationTable.payload,
+            state: operationTable.state,
           })
-          .from(repositoryMirrorCommand)
-          .where(eq(repositoryMirrorCommand.id, commandID));
+          .from(operationTable)
+          .where(
+            and(
+              eq(operationTable.id, commandID),
+              eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+            ),
+          );
         if (previous) {
-          if (previous.createdBy !== actor || previous.fingerprint !== fingerprint)
+          if (previous.createdBy !== actor || previous.payload["fingerprint"] !== fingerprint)
             throw new CommandError("conflict", "This mirror command belongs to different input.");
           if (previous.state === "failed" || previous.state === "acknowledged")
             throw new CommandError(
@@ -218,16 +238,25 @@ export function createRepositoryMirrorController(options: {
           throw new CommandError("conflict", "Mirror identity changed. Reload before removing it.");
         if (action === "sync" && before.mirrors.length === 0)
           throw new CommandError("conflict", "Configure a mirror before synchronizing.");
-        await db.insert(repositoryMirrorCommand).values({
+        await db.insert(operationTable).values({
           id: commandID,
-          projectId: projectID,
-          createdBy: actor,
-          action,
-          targetUrl: value.targetURL ?? null,
-          remoteName: value.remoteName ?? null,
-          fingerprint,
-          beforeState: before.mirrors,
+          kind: REPOSITORY_MIRROR_COMMAND_KIND,
+          scopeType: REPOSITORY_MIRROR_SCOPE_TYPE,
+          scopeId: projectID,
+          idempotencyKey: repositoryMirrorCommandIdempotencyKey(commandID),
+          activeKey: null,
           state: "executing",
+          payload: {
+            action,
+            targetURL: value.targetURL ?? null,
+            remoteName: value.remoteName ?? null,
+            fingerprint,
+            beforeState: before.mirrors,
+          },
+          result: null,
+          error: null,
+          createdBy: actor,
+          completedAt: null,
         });
         return true;
       });
@@ -238,15 +267,17 @@ export function createRepositoryMirrorController(options: {
       } catch (cause) {
         const uncertain = !(cause instanceof ForgeMirrorWriteError) || cause.unconfirmed;
         await db
-          .update(repositoryMirrorCommand)
+          .update(operationTable)
           .set({
             state: uncertain ? "uncertain" : "failed",
+            updatedAt: expression`now()`,
             completedAt: uncertain ? null : new Date(),
           })
           .where(
             and(
-              eq(repositoryMirrorCommand.id, commandID),
-              eq(repositoryMirrorCommand.state, "executing"),
+              eq(operationTable.id, commandID),
+              eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+              eq(operationTable.state, "executing"),
             ),
           );
         throw new CommandError(
@@ -257,12 +288,17 @@ export function createRepositoryMirrorController(options: {
         );
       }
       await db
-        .update(repositoryMirrorCommand)
-        .set({ state: "completed", completedAt: expression`now()` })
+        .update(operationTable)
+        .set({
+          state: "completed",
+          updatedAt: expression`now()`,
+          completedAt: expression`now()`,
+        })
         .where(
           and(
-            eq(repositoryMirrorCommand.id, commandID),
-            eq(repositoryMirrorCommand.state, "executing"),
+            eq(operationTable.id, commandID),
+            eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+            eq(operationTable.state, "executing"),
           ),
         );
       return get(actor, projectID);
@@ -322,13 +358,19 @@ export function createRepositoryMirrorController(options: {
         await sql.begin(async (tx) => {
           await manager(tx, actor);
           await drizzleTransaction(tx)
-            .update(repositoryMirrorCommand)
-            .set({ state: "acknowledged", completedAt: expression`now()` })
+            .update(operationTable)
+            .set({
+              state: "acknowledged",
+              updatedAt: expression`now()`,
+              completedAt: expression`now()`,
+            })
             .where(
               and(
-                eq(repositoryMirrorCommand.id, commandID),
-                eq(repositoryMirrorCommand.projectId, projectID),
-                inArray(repositoryMirrorCommand.state, ["executing", "uncertain"]),
+                eq(operationTable.id, commandID),
+                eq(operationTable.kind, REPOSITORY_MIRROR_COMMAND_KIND),
+                eq(operationTable.scopeType, REPOSITORY_MIRROR_SCOPE_TYPE),
+                eq(operationTable.scopeId, projectID),
+                inArray(operationTable.state, ["executing", "uncertain"]),
               ),
             );
         });

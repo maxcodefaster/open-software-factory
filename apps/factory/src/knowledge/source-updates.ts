@@ -1,16 +1,16 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, sql as expression, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, sql as expression, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  knowledgeGeneration,
-  project as projectTable,
-  wikiSourceUpdate,
-} from "../../../../packages/db/src/schema";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import type { createDatabase } from "#db/client";
+import { operation, project as projectTable } from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
 import { factoryForgeSource } from "./forge-source";
+
+const SOURCE_UPDATE_KIND = "knowledge.source_update";
+const SOURCE_UPDATE_SCOPE_TYPE = "project";
+const sourceUpdateKey = (projectID: string) => `${SOURCE_UPDATE_KIND}:${projectID}`;
 
 type Database = ReturnType<typeof createDatabase>;
 type Forge = Pick<
@@ -36,7 +36,6 @@ export function createWikiSourceUpdates(options: {
   receiverURL: string;
   signingKey: string;
   reconcile(projectID: string): Promise<void>;
-  prepareProject?(projectID: string): Promise<void>;
 }) {
   const db = options.database.db;
   const receiver = new URL(options.receiverURL);
@@ -62,28 +61,46 @@ export function createWikiSourceUpdates(options: {
   async function ensure(projectID: string) {
     const current = await project(projectID);
     const target = new URL(`/api/wiki/source-events/${projectID}`, receiver).href;
+    const key = sourceUpdateKey(projectID);
     // Persist deterministic external intent before querying or creating a hook.
     await db
-      .insert(wikiSourceUpdate)
-      .values({ projectId: projectID, targetUrl: target })
+      .insert(operation)
+      .values({
+        id: crypto.randomUUID(),
+        kind: SOURCE_UPDATE_KIND,
+        scopeType: SOURCE_UPDATE_SCOPE_TYPE,
+        scopeId: projectID,
+        idempotencyKey: key,
+        state: "create-intended",
+        payload: expression<Record<string, unknown>>`jsonb_build_object(
+          'projectId', ${projectID}::text,
+          'targetUrl', ${target}::text,
+          'hookId', NULL,
+          'eventVersion', '0',
+          'handledVersion', '0',
+          'nextAttemptAt', now()
+        )`,
+      })
       .onConflictDoUpdate({
-        target: wikiSourceUpdate.projectId,
-        set: { targetUrl: target, updatedAt: expression`now()` },
+        target: operation.idempotencyKey,
+        set: {
+          payload: expression`${operation.payload} || jsonb_build_object('targetUrl', ${target}::text)`,
+          updatedAt: expression`now()`,
+        },
       });
     const lease = crypto.randomUUID();
     const claimed = await db
-      .update(wikiSourceUpdate)
-      .set({ hookLease: lease, hookLeaseUntil: expression`now()+interval '60 seconds'` })
+      .update(operation)
+      .set({ leaseOwner: lease, leaseExpiresAt: expression`now()+interval '60 seconds'` })
       .where(
         and(
-          eq(wikiSourceUpdate.projectId, projectID),
-          or(
-            isNull(wikiSourceUpdate.hookLeaseUntil),
-            lt(wikiSourceUpdate.hookLeaseUntil, expression`now()`),
-          ),
+          eq(operation.kind, SOURCE_UPDATE_KIND),
+          eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+          eq(operation.idempotencyKey, key),
+          or(isNull(operation.leaseExpiresAt), lt(operation.leaseExpiresAt, expression`now()`)),
         ),
       )
-      .returning({ projectId: wikiSourceUpdate.projectId });
+      .returning({ projectId: operation.scopeId });
     if (!claimed.length) return;
     try {
       const matches = (await options.forge.listPushHooks(current.repository)).filter(
@@ -101,25 +118,44 @@ export function createWikiSourceUpdates(options: {
           )
         : await options.forge.createPushHook(current.repository, target, secret, current.branch);
       await db
-        .update(wikiSourceUpdate)
-        .set({ hookId: id, hookState: "ready", failure: null })
+        .update(operation)
+        .set({
+          state: "ready",
+          error: null,
+          payload: expression`${operation.payload} || jsonb_build_object('hookId', ${id}::bigint)`,
+        })
         .where(
-          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+          and(
+            eq(operation.kind, SOURCE_UPDATE_KIND),
+            eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+            eq(operation.idempotencyKey, key),
+            eq(operation.leaseOwner, lease),
+          ),
         );
     } catch {
       // Never blind-retry an ambiguous create. The next ensure discovers the exact target first.
       await db
-        .update(wikiSourceUpdate)
-        .set({ hookState: "failed", failure: "Wiki source hook setup needs retry." })
+        .update(operation)
+        .set({ state: "failed", error: "Wiki source hook setup needs retry." })
         .where(
-          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+          and(
+            eq(operation.kind, SOURCE_UPDATE_KIND),
+            eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+            eq(operation.idempotencyKey, key),
+            eq(operation.leaseOwner, lease),
+          ),
         );
     } finally {
       await db
-        .update(wikiSourceUpdate)
-        .set({ hookLease: null, hookLeaseUntil: null })
+        .update(operation)
+        .set({ leaseOwner: null, leaseExpiresAt: null })
         .where(
-          and(eq(wikiSourceUpdate.projectId, projectID), eq(wikiSourceUpdate.hookLease, lease)),
+          and(
+            eq(operation.kind, SOURCE_UPDATE_KIND),
+            eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+            eq(operation.idempotencyKey, key),
+            eq(operation.leaseOwner, lease),
+          ),
         );
     }
   }
@@ -177,18 +213,25 @@ export function createWikiSourceUpdates(options: {
     if (parsed.data.ref !== `refs/heads/${current.branch}` || /^0+$/.test(parsed.data.after))
       return new Response(null, { status: 204 });
     const rows = await db
-      .update(wikiSourceUpdate)
+      .update(operation)
       .set({
-        eventVersion: expression`${wikiSourceUpdate.eventVersion}+1`,
-        nextAttemptAt: expression`CASE WHEN ${wikiSourceUpdate.handledVersion}=${wikiSourceUpdate.eventVersion}
-          THEN now()+interval '1 second' ELSE LEAST(${wikiSourceUpdate.nextAttemptAt},now()+interval '1 second') END`,
+        payload: expression`${operation.payload} || jsonb_build_object(
+          'eventVersion', ((${operation.payload}->>'eventVersion')::bigint + 1)::text,
+          'nextAttemptAt', CASE WHEN (${operation.payload}->>'handledVersion')::bigint=(${operation.payload}->>'eventVersion')::bigint
+            THEN now()+interval '1 second'
+            ELSE LEAST((${operation.payload}->>'nextAttemptAt')::timestamptz,now()+interval '1 second') END
+        )`,
         updatedAt: expression`now()`,
       })
-      .where(eq(wikiSourceUpdate.projectId, projectID))
-      .returning({ projectId: wikiSourceUpdate.projectId });
+      .where(
+        and(
+          eq(operation.kind, SOURCE_UPDATE_KIND),
+          eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+          eq(operation.idempotencyKey, sourceUpdateKey(projectID)),
+        ),
+      )
+      .returning({ projectId: operation.scopeId });
     if (!rows.length) return new Response(null, { status: 503 });
-    // The same signed event admits image preparation independently of Wiki inference.
-    await options.prepareProject?.(projectID);
     // This wake-up is expendable. Persisted versions recover after restart and before acknowledgement.
     void drain().catch(reportFailure("Wiki event reconciliation needs retry"));
     return new Response(null, { status: 202 });
@@ -198,17 +241,19 @@ export function createWikiSourceUpdates(options: {
     const task = (async () => {
       const pending = await db
         .select({
-          id: wikiSourceUpdate.projectId,
-          version: expression<string>`${wikiSourceUpdate.eventVersion}::text`,
+          id: operation.scopeId,
+          version: expression<string>`((${operation.payload}->>'eventVersion')::bigint)::text`,
         })
-        .from(wikiSourceUpdate)
+        .from(operation)
         .where(
           and(
-            lt(wikiSourceUpdate.handledVersion, wikiSourceUpdate.eventVersion),
-            lte(wikiSourceUpdate.nextAttemptAt, expression`now()`),
+            eq(operation.kind, SOURCE_UPDATE_KIND),
+            eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+            expression`(${operation.payload}->>'handledVersion')::bigint < (${operation.payload}->>'eventVersion')::bigint`,
+            expression`(${operation.payload}->>'nextAttemptAt')::timestamptz <= now()`,
           ),
         )
-        .orderBy(asc(wikiSourceUpdate.updatedAt))
+        .orderBy(asc(operation.updatedAt))
         .limit(20);
       for (const row of pending) {
         try {
@@ -217,12 +262,18 @@ export function createWikiSourceUpdates(options: {
           const head = await options.forge.getDefaultBranch(current.repository);
           const [generation] = await db
             .select({
-              state: knowledgeGeneration.state,
-              commit: knowledgeGeneration.sourceCommitSha,
+              state: operation.state,
+              commit: expression<string>`${operation.payload}->>'sourceCommitSha'`,
             })
-            .from(knowledgeGeneration)
-            .where(eq(knowledgeGeneration.projectId, row.id))
-            .orderBy(desc(knowledgeGeneration.createdAt))
+            .from(operation)
+            .where(
+              and(
+                eq(operation.kind, "knowledge.generation"),
+                eq(operation.scopeType, "project"),
+                eq(operation.scopeId, row.id),
+              ),
+            )
+            .orderBy(desc(operation.createdAt))
             .limit(1);
           if (
             generation?.state !== "succeeded" ||
@@ -230,26 +281,48 @@ export function createWikiSourceUpdates(options: {
             head.name !== current.branch
           ) {
             await db
-              .update(wikiSourceUpdate)
-              .set({ nextAttemptAt: expression`now()+interval '15 seconds'` })
-              .where(eq(wikiSourceUpdate.projectId, row.id));
+              .update(operation)
+              .set({
+                payload: expression`${operation.payload} || jsonb_build_object('nextAttemptAt', now()+interval '15 seconds')`,
+              })
+              .where(
+                and(
+                  eq(operation.kind, SOURCE_UPDATE_KIND),
+                  eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+                  eq(operation.idempotencyKey, sourceUpdateKey(row.id)),
+                ),
+              );
             continue;
           }
           await db
-            .update(wikiSourceUpdate)
+            .update(operation)
             .set({
-              handledVersion: expression`GREATEST(${wikiSourceUpdate.handledVersion},${row.version}::bigint)`,
-              failure: null,
+              payload: expression`${operation.payload} || jsonb_build_object(
+                'handledVersion', GREATEST((${operation.payload}->>'handledVersion')::bigint,${row.version}::bigint)::text
+              )`,
+              error: null,
             })
-            .where(eq(wikiSourceUpdate.projectId, row.id));
+            .where(
+              and(
+                eq(operation.kind, SOURCE_UPDATE_KIND),
+                eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+                eq(operation.idempotencyKey, sourceUpdateKey(row.id)),
+              ),
+            );
         } catch {
           await db
-            .update(wikiSourceUpdate)
+            .update(operation)
             .set({
-              nextAttemptAt: expression`now()+interval '30 seconds'`,
-              failure: "Wiki source update will retry.",
+              payload: expression`${operation.payload} || jsonb_build_object('nextAttemptAt', now()+interval '30 seconds')`,
+              error: "Wiki source update will retry.",
             })
-            .where(eq(wikiSourceUpdate.projectId, row.id));
+            .where(
+              and(
+                eq(operation.kind, SOURCE_UPDATE_KIND),
+                eq(operation.scopeType, SOURCE_UPDATE_SCOPE_TYPE),
+                eq(operation.idempotencyKey, sourceUpdateKey(row.id)),
+              ),
+            );
         }
       }
     })();
@@ -268,7 +341,6 @@ export function createWikiSourceUpdates(options: {
     for (const row of projects) {
       try {
         await ensure(row.id);
-        await options.prepareProject?.(row.id);
       } catch {
         /* Unsupported source is rejected, never read through Forgejo. */
       }

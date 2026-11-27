@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillRevision } from "#conversation-domain/skills";
 import { nativeInputSkills, nativeSkillId, observedNativeSkillIds } from "./native";
 import { requirementsInterviewSkill } from "./reviewed";
 

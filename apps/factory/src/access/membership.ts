@@ -1,7 +1,7 @@
 import { and, eq, sql as expression, isNull, ne } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { accountAccess, authUser, projectMembership } from "../../../../packages/db/src/schema";
-import type { ProjectRole } from "../../../../packages/project-domain/src/access";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { accountAccess, authUser, projectMembership } from "#db/schema";
+import type { ProjectRole } from "#project-domain/access";
 import { CommandError } from "../command-error";
 import { projectAuthorityIn, requireActiveAccountIn } from "./authority";
 

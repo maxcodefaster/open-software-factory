@@ -3,7 +3,7 @@ import {
   type ProjectSetupFields,
   type ProjectSetupView,
   projectSetupFields,
-} from "../../../../packages/project-domain/src/setup";
+} from "#project-domain/setup";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
 import { serverCall } from "../server-functions/result";

@@ -1,13 +1,7 @@
 import { and, eq } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  accountAccess,
-  administrator,
-  authUser,
-  project,
-  projectMembership,
-} from "../../../../packages/db/src/schema";
-import { projectCapabilities } from "../../../../packages/project-domain/src/access";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { accountAccess, administrator, authUser, project, projectMembership } from "#db/schema";
+import { projectCapabilities } from "#project-domain/access";
 import { CommandError } from "../command-error";
 
 export async function requireActiveAccountIn(sql: DatabaseTransaction, userID: string) {

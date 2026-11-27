@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
+import { createForgejoClient, ForgeAmbiguousWriteError } from "#forge/forge";
 import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
-import { createForgejoClient, ForgeAmbiguousWriteError } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
+import { installControlledStarterCatalog } from "../fixtures/starter";
 
 test("authenticated setup persists its own Project identity and recovers exact Starter initialization", async () => {
   const process = await factoryProcess();
   const database = process.connect();
   const manager = crypto.randomUUID();
   const outsider = crypto.randomUUID();
+  let restoreStarterCatalog = () => {};
   let creates = 0;
   let initializes = 0;
   let ready = 0;
@@ -68,6 +70,7 @@ test("authenticated setup persists its own Project identity and recovers exact S
     },
   };
   try {
+    restoreStarterCatalog = await installControlledStarterCatalog(process.nativeConfiguration);
     for (const id of [manager, outsider])
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned user',${`${id}@native-setup.test`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
@@ -91,7 +94,7 @@ test("authenticated setup persists its own Project identity and recovers exact S
     expect(initializes).toBe(1);
     expect(initialized).toEqual(await starterFiles());
     const [intent] =
-      await database.client`SELECT project_id FROM factory.project_repository_intent WHERE setup_id=${draft.id}`;
+      await database.client`SELECT scope_id AS project_id FROM factory.operation WHERE kind='projects.repository_intent' AND payload->>'setupId'=${draft.id}`;
     const projectID = intent?.["project_id"];
     if (typeof projectID !== "string") throw new Error("Missing persisted Project identity");
     await expect(
@@ -110,6 +113,7 @@ test("authenticated setup persists its own Project identity and recovers exact S
     expect(initializes).toBe(1);
     expect((await restarted.begin(manager))?.id).not.toBe(draft.id);
   } finally {
+    restoreStarterCatalog();
     await database.client.end({ timeout: 2 });
     await process.dispose();
   }
@@ -148,7 +152,7 @@ test("independent setup drafts allocate different Project identities without ado
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned manager',${`${id}@native-setup.test`})`;
       await database.client`INSERT INTO factory.administrator(user_id) VALUES(${id})`;
     }
-    await database.client`INSERT INTO factory.project(id,name,slug,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},'Retained','retained','https://git.native.test/owned/retained','main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,name,slug,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},'Retained','retained','https://git.native.test/owned/retained','main','.factory/actor-template.json',${manager})`;
     const controller = createProjectSetupController(options);
     for (const id of [manager, otherManager]) {
       const draft = await controller.begin(id);
@@ -168,7 +172,7 @@ test("independent setup drafts allocate different Project identities without ado
       });
     }
     const intents = await database.client<{ projectID: string }[]>`
-      SELECT project_id AS "projectID" FROM factory.project_repository_intent`;
+      SELECT scope_id AS "projectID" FROM factory.operation WHERE kind='projects.repository_intent'`;
     expect(intents).toHaveLength(2);
     expect(new Set(intents.map((intent) => intent.projectID)).size).toBe(2);
     expect(intents.every((intent) => intent.projectID !== projectID)).toBe(true);

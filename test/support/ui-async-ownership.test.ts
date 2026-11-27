@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import * as documentModel from "../../apps/factory/src/document-model";
-import * as documentSlash from "../../apps/factory/src/document-slash";
-import * as board from "../../packages/interface-domain/src/ticket-board";
-import * as progress from "../../packages/interface-domain/src/ticket-progress";
-import * as document from "../../packages/requirement-domain/src/document";
+import * as document from "#requirement-domain/document";
+import * as ticketWorkspaceTypes from "../../apps/factory/src/tickets/ticket-workspace-types";
 import { editorCallbacks, editorSolid as solid } from "../fixtures/editor-callbacks";
 
 const root = new URL("../../apps/factory/src/", import.meta.url).pathname;
@@ -108,7 +105,7 @@ for (const scenario of [
       expose: ["publishTicketDraft"],
       storage: localStorage,
       imports: {
-        "../../../../packages/zero-schema/src": {
+        "#zero-schema": {
           zeroMutators: { tickets: { create: (input: unknown) => input } },
         },
       },
@@ -182,8 +179,7 @@ for (const scenario of [
 
 type Draft = import("../../apps/factory/src/change/contracts").TicketDraft;
 type Callbacks = {
-  richTextHandlers: (options: { field: "description"; update: (value: string) => void }) => {
-    onFocus: () => void;
+  richTextHandlers: (options: { update: (value: string) => void }) => {
     onInput: (value: string, element: HTMLElement) => void;
   };
   updateDescription: (value: string) => void;
@@ -200,53 +196,63 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>, restor
   const drafts = new Map<string, Draft>();
   const timers = new Map<number, () => void>();
   let scheduled = 0;
-  const path = `${root}ticket-workspace.tsx`;
-  const component = editorCallbacks<Callbacks>({
+  const fakeTimers = {
+    setTimeout: (callback: () => void) => {
+      timers.set(++scheduled, callback);
+      return scheduled;
+    },
+    clearTimeout: (id: number | undefined) => {
+      if (id !== undefined) timers.delete(id);
+    },
+  };
+  const createTicketDraft = editorCallbacks<Record<string, unknown>>({
+    path: `${root}tickets/ticket-workspace-draft.ts`,
+    component: "createTicketDraft",
+    storage: localStorage,
+    timers: fakeTimers,
+    imports: {
+      "solid-js": solid,
+      "#requirement-domain/document": document,
+      "./ticket-workspace-types": ticketWorkspaceTypes,
+    },
+  });
+  const path = `${root}tickets/ticket-workspace.tsx`;
+  const component = editorCallbacks<{
+    richTextHandlers: Callbacks["richTextHandlers"];
+    draft: {
+      updateDescription: Callbacks["updateDescription"];
+      description: Callbacks["draftDescription"];
+      hasChanges: Callbacks["hasChanges"];
+      saveChanges: Callbacks["saveChanges"];
+      scheduleAutosave: Callbacks["scheduleAutosave"];
+      conflict: Callbacks["conflict"];
+    };
+  }>({
     path,
     component: "TicketDocument",
-    expose: [
-      "richTextHandlers",
-      "updateDescription",
-      "draftDescription",
-      "hasChanges",
-      "saveChanges",
-      "scheduleAutosave",
-      "conflict",
-    ],
+    expose: ["richTextHandlers", "draft"],
     storage: localStorage,
     imports: {
       "solid-js": solid,
-      "../../../packages/requirement-domain/src/document": document,
-      "../../../packages/interface-domain/src/ticket-board": board,
-      "../../../packages/interface-domain/src/ticket-progress": progress,
-      "./document-model": documentModel,
-      "./document-slash": documentSlash,
-    },
-    timers: {
-      setTimeout: (callback) => {
-        timers.set(++scheduled, callback);
-        return scheduled;
+      "./ticket-workspace-draft": { createTicketDraft },
+      "./ticket-workspace-types": ticketWorkspaceTypes,
+      "./ticket-workspace-slash": {
+        createTicketEditorPopovers: () => ({
+          resetTicketPopovers: () => {},
+          clearPopovers: () => {},
+          updateSlashMenu: () => {},
+          editorKeyDown: () => {},
+          updateSelectionToolbar: () => {},
+          registerEditor: () => {},
+        }),
+        TicketEditorPopovers: () => null,
       },
-      clearTimeout: (id) => {
-        if (id !== undefined) timers.delete(id);
+      "./ticket-workspace-actions": {
+        createTicketWorkspaceActions: () => ({}),
       },
     },
-    stubs: [
-      "./document-link-editor",
-      "./editor-popover-position",
-      "./requirement-document",
-      "./review/panel",
-      "./rich-document-surface",
-      "./source-review",
-      "./ticket-action-bar",
-      "./ticket-checks",
-      "./ticket-dependencies",
-      "./ticket-document-notice",
-      "./ticket-planning",
-      "./ticket-secondary-actions",
-      "./ui/feedback",
-      "./version-history",
-    ],
+    timers: fakeTimers,
+    stubs: ["./ticket-document-notice", "./ticket-planning", "./ticket-workspace-sections"],
   });
   let current = {
     ticket: { id: "ticket-a", title: "A", description: "Original A", state: "ready", version: 1 },
@@ -254,9 +260,8 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>, restor
     revisions: [],
   };
   const [observation, setObservation] = solid.createSignal(0);
-  const owned = solid.createRoot((dispose) => ({
-    dispose,
-    callbacks: component({
+  const owned = solid.createRoot((dispose) => {
+    const exposed = component({
       get current() {
         observation();
         return current;
@@ -264,11 +269,22 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>, restor
       storageKey: "ticket-edit:user:ticket-a",
       drafts,
       onSaveDocument,
-    }),
-  }));
+    });
+    return {
+      dispose,
+      callbacks: {
+        richTextHandlers: exposed.richTextHandlers,
+        updateDescription: exposed.draft.updateDescription,
+        draftDescription: exposed.draft.description,
+        hasChanges: exposed.draft.hasChanges,
+        saveChanges: exposed.draft.saveChanges,
+        scheduleAutosave: exposed.draft.scheduleAutosave,
+        conflict: exposed.draft.conflict,
+      } satisfies Callbacks,
+    };
+  });
   solid.flush();
   const input = owned.callbacks.richTextHandlers({
-    field: "description",
     update: owned.callbacks.updateDescription,
   });
   return {
@@ -280,7 +296,7 @@ function editor(onSaveDocument: (...args: unknown[]) => Promise<unknown>, restor
       current = { ...current, ticket: { ...current.ticket, id, version, description } };
       setObservation((value) => value + 1);
     },
-    focus: input.onFocus,
+    focus: () => {},
     edit: (value: string) => {
       input.onInput(value, {} as HTMLElement);
       solid.flush();
@@ -369,7 +385,6 @@ test("a first input and fresh hydration in the same settle retain the actual inp
   try {
     owned.callbacks
       .richTextHandlers({
-        field: "description",
         update: owned.callbacks.updateDescription,
       })
       .onInput("Input ahead of hydration", {} as HTMLElement);
@@ -551,7 +566,6 @@ test("settled input work cannot schedule autosave after synchronous disposal", a
     const scheduled = owned.scheduled();
     owned.callbacks
       .richTextHandlers({
-        field: "description",
         update: owned.callbacks.updateDescription,
       })
       .onInput("Queued A", {} as HTMLElement);
@@ -585,7 +599,7 @@ test("document commands use explicit A identity and bases while B is selected", 
     },
     stubs: [
       "zod",
-      "../../../../packages/conversation-domain/src/model-settings",
+      "#conversation-domain/model-settings",
       "../command-error",
       "../server-functions/conversations",
       "../server-functions/delivery",

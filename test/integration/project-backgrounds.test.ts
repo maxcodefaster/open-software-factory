@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
+import { desktopBackgroundKeys } from "#interface-domain/background";
+import { zeroQueries, zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { createProjectService } from "../../apps/factory/src/projects/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
-import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { factoryProcess } from "../fixtures/factory-process";
 import {
   compiledFactoryEndpoint,
@@ -26,6 +26,7 @@ test("new Projects spread persistent backgrounds across the catalogue, including
       database,
       localRepositoryOrigin: "https://forge.test",
       forgeOwner: "factory",
+      readDefaultBranch: async () => "main",
       onRegistered: async () => {},
     });
     const origin = "https://factory.test";
@@ -50,7 +51,7 @@ test("new Projects spread persistent backgrounds across the catalogue, including
           name: `Background ${index}`,
           repositoryUrl: `https://forge.test/factory/background-${index}`,
           defaultBranch: "main",
-          devcontainerPath: ".devcontainer/devcontainer.json",
+          actorTemplatePath: ".factory/actor-template.json",
         },
       ]);
     };
@@ -125,9 +126,9 @@ test("only active Project managers can change a shared background and unrelated 
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${administrator})`;
     for (const id of [projectId, otherProjectId])
       await database.client`INSERT INTO factory.project(
-        id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
+        id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
         VALUES(${id},${`background-${id}`},'Shared background','https://example.invalid/background.git',
-          'main','.devcontainer/devcontainer.json',${manager},'river-landscape')`;
+          'main','.factory/actor-template.json',${manager},'river-landscape')`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectId},${manager},'product-contributor',true,${manager}),
         (${projectId},${developer},'developer',false,${manager})`;
@@ -176,7 +177,9 @@ test("only active Project managers can change a shared background and unrelated 
     );
     expect(shared).toBe("moonlit-landscape");
     expect(other).toBe("river-landscape");
-    expect(await database.client`SELECT * FROM factory.user_ui_preference`).toHaveLength(0);
+    expect(
+      await database.client`SELECT * FROM factory.operation WHERE kind='user.ui_preference'`,
+    ).toHaveLength(0);
   } finally {
     await database.client.end();
     await owned.dispose();
@@ -194,19 +197,24 @@ test("new Projects receive catalogue backgrounds without changing identities or 
     for (const id of [creator, anotherCreator])
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${id},'Existing owner',${`${id}@background.test`})`;
-    await database.client`INSERT INTO factory.user_ui_preference(user_id,desktop_background_key)
-      VALUES(${creator},'the-harvesters')`;
+    await database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'user.ui_preference','user',${creator},
+        ${`user.ui_preference:${creator}`},NULL,'saved',
+        jsonb_build_object('userId',${creator}::text,'desktopBackgroundKey','the-harvesters'),
+        ${creator})`;
     for (const [id, user] of [
       [projectId, creator],
       [otherProjectId, anotherCreator],
     ] as const)
       await database.client`INSERT INTO factory.project(
-        id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${id},${`existing-${id}`},'Existing Project','https://example.invalid/existing.git',
-          'main','.devcontainer/devcontainer.json',${user})`;
+          'main','.factory/actor-template.json',${user})`;
     const before = await database.client<{ project: { id: string; created_by: string } }[]>`
       SELECT to_jsonb(project) AS project FROM factory.project project ORDER BY id`;
-    const preferences = await database.client`SELECT * FROM factory.user_ui_preference`;
+    const preferences =
+      await database.client`SELECT * FROM factory.operation WHERE kind='user.ui_preference'`;
     const backgrounds: string[] = [];
     for (const id of [projectId, otherProjectId]) {
       const [row] = await database.client<{ key: string }[]>`
@@ -229,7 +237,9 @@ test("new Projects receive catalogue backgrounds without changing identities or 
       await database.client`SELECT to_jsonb(project) AS project
         FROM factory.project project ORDER BY id`,
     ).toEqual(before);
-    expect(await database.client`SELECT * FROM factory.user_ui_preference`).toEqual(preferences);
+    expect(
+      await database.client`SELECT * FROM factory.operation WHERE kind='user.ui_preference'`,
+    ).toEqual(preferences);
   } finally {
     await database.client.end();
     await owned.dispose();

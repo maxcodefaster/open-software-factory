@@ -1,13 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { changeIdentity } from "#change-domain/change";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../packages/requirement-domain/src/requirement";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -74,10 +71,10 @@ async function createRuntimeConsoleFixture() {
     await database.client.begin(async (transaction) => {
       await transaction`
         INSERT INTO factory.project(
-          id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+          id, slug, name, repository_url, default_branch, actor_template_path, created_by
         ) VALUES (
           ${projectID}, ${slug}, 'Runtime console fixture', ${repositoryURL}, 'main',
-          '.devcontainer/devcontainer.json', ${userID}
+          '.factory/actor-template.json', ${userID}
         )
       `;
       await transaction`
@@ -109,13 +106,24 @@ async function createRuntimeConsoleFixture() {
         )
       `;
       await transaction`
-        INSERT INTO factory.branch_create_operation(
-          id, change_id, repository_owner, repository_name, branch_name, start_sha,
-          idempotency_key, state, observed_head_sha, completed_at
+        INSERT INTO factory.operation(
+          id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+          payload, result, created_by, completed_at
         ) VALUES (
-          ${identity.branchOperationID}, ${identity.changeID}, ${repository.owner}, ${repository.name},
-          ${identity.branchName}, ${base.headSha}, ${`runtime-console:${identity.changeID}`},
-          'succeeded', ${base.headSha}, now()
+          ${identity.branchOperationID}, 'delivery.branch_create', 'change', ${identity.changeID},
+          ${`delivery.branch_create:change:${identity.changeID}:create-branch`}, NULL, 'succeeded',
+          ${JSON.stringify({
+            changeId: identity.changeID,
+            repositoryOwner: repository.owner,
+            repositoryName: repository.name,
+            branchName: identity.branchName,
+            startSha: base.headSha,
+            attemptCount: 1,
+            leaseGeneration: 1,
+            reconcileAfter: null,
+          })}::jsonb,
+          ${JSON.stringify({ observedHeadSha: base.headSha })}::jsonb,
+          ${userID}, now()
         )
       `;
     });

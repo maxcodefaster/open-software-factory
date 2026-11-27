@@ -23,7 +23,7 @@ BEGIN
     END IF;
   END IF;
 
-  IF TG_TABLE_NAME IN ('inbox_receipt','account_access','administrator') THEN
+  IF TG_TABLE_NAME IN ('account_access','administrator') THEN
     person := (record->>'user_id')::uuid;
     FOR project IN
       SELECT id FROM factory.project WHERE EXISTS(
@@ -32,9 +32,7 @@ BEGIN
       ORDER BY id
     LOOP
       PERFORM factory.touch_read_version(project,'inbox',project,person::text);
-      IF TG_TABLE_NAME<>'inbox_receipt' THEN
-        PERFORM factory.touch_read_version(project,'inbox',project);
-      END IF;
+      PERFORM factory.touch_read_version(project,'inbox',project);
     END LOOP;
     RETURN NULL;
   END IF;
@@ -45,20 +43,53 @@ BEGIN
   conversation := (record->>'conversation_id')::uuid;
   IF TG_TABLE_NAME='project' THEN project := (record->>'id')::uuid; END IF;
   IF TG_TABLE_NAME='ticket' THEN ticket := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='audit_event' THEN
+    IF record->>'kind'='tickets.responsibility_event' AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='access.change_editing_decision' AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='review.feedback_message' AND record->>'scope_type'='review_feedback' THEN
+      SELECT change_id INTO change FROM factory.review_feedback WHERE id=(record->>'scope_id')::uuid;
+    ELSE
+      RETURN NULL;
+    END IF;
+  END IF;
+  IF TG_TABLE_NAME='operation' THEN
+    IF record->>'kind'='inbox.receipt' AND record->>'scope_type'='user' THEN
+      person := (record->>'scope_id')::uuid;
+      FOR project IN
+        SELECT id FROM factory.project WHERE EXISTS(
+          SELECT 1 FROM factory.project_membership WHERE project_id=id AND user_id=person)
+          OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=person)
+        ORDER BY id
+      LOOP
+        PERFORM factory.touch_read_version(project,'inbox',project,person::text);
+      END LOOP;
+      RETURN NULL;
+    ELSIF record->>'kind' IN ('delivery.merge','delivery.pull_request','delivery.promotion') AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='access.change_editing_request' AND record->>'scope_type'='change' THEN
+      change := (record->>'scope_id')::uuid;
+      audience := record->'payload'->>'ownerId';
+    ELSIF record->>'kind'='review.scenario' AND record->>'scope_type'='candidate_review' THEN
+      SELECT change_id INTO change FROM factory.candidate_review WHERE id=(record->>'scope_id')::uuid;
+    ELSIF record->>'kind' IN ('project.delivery_queue','delivery.staging_preview','knowledge.generation') AND record->>'scope_type'='project' THEN
+      project := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind' IN ('tickets.responsibility','tickets.implementation_order') AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='tickets.follow' AND record->>'scope_type'='ticket' THEN
+      ticket := (record->>'scope_id')::uuid;
+      audience := record->'payload'->>'userId';
+    ELSIF record->>'kind'='usage.coding_pause' AND record->>'scope_type'='agent_turn' THEN
+      SELECT change_id INTO change FROM factory.agent_turn WHERE id=(record->>'scope_id')::uuid;
+    ELSIF record->>'kind'='runtime.compute_wait' AND record->>'scope_type'='runtime_attempt' THEN
+      SELECT project_id,change_id INTO project,change FROM factory.runtime_attempt WHERE id=(record->>'scope_id')::uuid;
+    ELSE
+      RETURN NULL;
+    END IF;
+  END IF;
   IF TG_TABLE_NAME='change' THEN change := (record->>'id')::uuid; END IF;
   IF TG_TABLE_NAME='ticket_conversation' THEN conversation := (record->>'id')::uuid; END IF;
-  IF TG_TABLE_NAME='coding_pause' THEN
-    SELECT change_id INTO change FROM factory.agent_turn WHERE id=(record->>'turn_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='runtime_compute_wait' THEN
-    SELECT project_id,change_id INTO project,change FROM factory.runtime_attempt WHERE id=(record->>'attempt_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='review_feedback_message' THEN
-    SELECT change_id INTO change FROM factory.review_feedback WHERE id=(record->>'feedback_id')::uuid;
-  END IF;
-  IF TG_TABLE_NAME='review_scenario' THEN
-    SELECT change_id INTO change FROM factory.candidate_review WHERE id=(record->>'review_id')::uuid;
-  END IF;
   IF change IS NOT NULL THEN
     SELECT project_id,ticket_id INTO project,ticket FROM factory.change WHERE id=projection.change;
   ELSIF conversation IS NOT NULL THEN
@@ -68,8 +99,6 @@ BEGIN
     SELECT project_id INTO project FROM factory.ticket WHERE id=projection.ticket;
   END IF;
   IF TG_TABLE_NAME='agent_turn' AND ticket IS NULL THEN audience := record->>'created_by'; END IF;
-  IF TG_TABLE_NAME='ticket_follow' THEN audience := record->>'user_id'; END IF;
-  IF TG_TABLE_NAME='change_editing_request' THEN audience := record->>'owner_id'; END IF;
   IF audience='shared' AND (
     TG_TABLE_NAME='technical_design_revision' OR
     (TG_TABLE_NAME='conversation_entry' AND record->'payload'->>'visibility'='developer') OR
@@ -92,14 +121,16 @@ BEGIN
   IF change IS NOT NULL THEN
     PERFORM factory.touch_read_version(project,'review',change,audience);
   END IF;
-  IF TG_TABLE_NAME IN ('change','runtime_attempt','runtime_compute_wait','staging_preview','verification','candidate_review',
-    'change_agent_session','change_writer','change_editing_decision',
-    'coding_pause','delivery_approval','merge_operation','promotion_operation',
-    'pull_request_operation','review_feedback','review_feedback_message','review_media','review_scenario','implementation_order','project_delivery_queue')
-    OR (TG_TABLE_NAME='agent_turn' AND change IS NOT NULL) THEN
+  IF TG_TABLE_NAME IN ('change','runtime_attempt','verification','candidate_review',
+    'change_agent_session','change_writer',
+    'delivery_approval',
+    'review_feedback','review_media')
+    OR (TG_TABLE_NAME='agent_turn' AND change IS NOT NULL)
+    OR (TG_TABLE_NAME='audit_event' AND record->>'kind' IN ('access.change_editing_decision','review.feedback_message'))
+    OR (TG_TABLE_NAME='operation' AND record->>'kind' IN ('delivery.merge','delivery.pull_request','delivery.promotion','delivery.staging_preview','project.delivery_queue','runtime.compute_wait','review.scenario','tickets.implementation_order','usage.coding_pause')) THEN
     PERFORM factory.touch_read_version(project,'lifecycle',project);
   END IF;
-  IF TG_TABLE_NAME IN ('knowledge_generation','knowledge_page') THEN
+  IF TG_TABLE_NAME='knowledge_page' OR (TG_TABLE_NAME='operation' AND record->>'kind'='knowledge.generation') THEN
     PERFORM factory.touch_read_version(project,'knowledge',project);
   END IF;
   RETURN NULL;
@@ -135,20 +166,24 @@ BEGIN
   ELSIF TG_TABLE_NAME IN ('monitoring_hook','monitoring_incident') THEN
     project := (record->>'project_id')::uuid;
     target_scope := 'inputs';
-  ELSIF TG_TABLE_NAME IN ('project_release','release_access') THEN
+  ELSIF TG_TABLE_NAME='project_release' THEN
     project := (record->>'project_id')::uuid;
     target_scope := 'releases';
-  ELSIF TG_TABLE_NAME='release_attempt' THEN
-    SELECT project_id INTO project FROM factory.project_release WHERE id=(record->>'release_id')::uuid;
-    IF project IS NULL THEN RETURN NULL; END IF;
-    target_scope := 'releases';
-  ELSIF TG_TABLE_NAME='mcp_project_grant' THEN
-    project := (record->>'project_id')::uuid;
-    target_scope := 'sources';
-  ELSIF TG_TABLE_NAME='mcp_choice' THEN
-    IF record->>'scope'='personal' THEN RETURN NULL; END IF;
-    IF record->>'scope'='project' THEN project := (record->>'context_id')::uuid; END IF;
-    target_scope := 'sources';
+  ELSIF TG_TABLE_NAME='operation' THEN
+    IF record->>'kind'='releases.access' AND record->>'scope_type'='project' THEN
+      project := (record->>'scope_id')::uuid;
+      target_scope := 'releases';
+    ELSIF record->>'kind'='releases.attempt' AND record->>'scope_type'='project_release' THEN
+      SELECT project_id INTO project FROM factory.project_release WHERE id=(record->>'scope_id')::uuid;
+      IF project IS NULL THEN RETURN NULL; END IF;
+      target_scope := 'releases';
+    ELSIF record->>'kind'='mcp.choice' THEN
+      IF record->>'scope_type'='personal' THEN RETURN NULL; END IF;
+      IF record->>'scope_type'='project' THEN project := (record->>'scope_id')::uuid; END IF;
+      target_scope := 'sources';
+    ELSE
+      RETURN NULL;
+    END IF;
   ELSE
     library := COALESCE((record->>'library_id')::uuid,(record->>'id')::uuid);
     IF TG_TABLE_NAME='mcp_library' THEN
@@ -156,6 +191,20 @@ BEGIN
       library_scope := record->>'scope';
     ELSE
       SELECT scope,project_id INTO library_scope,project FROM factory.mcp_library WHERE id=library;
+    END IF;
+    IF TG_TABLE_NAME='mcp_connection' AND library_scope='personal' THEN
+      FOR project IN
+        SELECT DISTINCT key::uuid FROM (
+          SELECT jsonb_object_keys(COALESCE(CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN OLD.project_grants END,'{}'::jsonb)) AS key
+          UNION
+          SELECT jsonb_object_keys(COALESCE(CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN NEW.project_grants END,'{}'::jsonb)) AS key
+        ) keys
+        WHERE key ~ '^[0-9a-f-]{36}$'
+        ORDER BY 1
+      LOOP
+        PERFORM factory.touch_read_version(project,'sources',project);
+      END LOOP;
+      RETURN NULL;
     END IF;
     IF library_scope IS NULL OR library_scope='personal' THEN RETURN NULL; END IF;
     target_scope := 'sources';

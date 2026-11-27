@@ -1,4 +1,4 @@
-import type { CandidateReviewResult } from "../../packages/conversation-domain/src/candidate-review";
+import type { CandidateReviewResult } from "#conversation-domain/candidate-review";
 
 export type DeliveryFixtureState = {
   change: {

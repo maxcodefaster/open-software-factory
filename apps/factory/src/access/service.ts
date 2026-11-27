@@ -1,17 +1,8 @@
 import { and, asc, eq, exists, isNotNull, sql as query } from "drizzle-orm";
 import type { z } from "zod";
-import {
-  emergencyAdministratorID,
-  PasswordChangeError,
-} from "../../../../packages/auth/src/policy";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  accountAccess,
-  administrator,
-  authAccount,
-  authUser,
-  projectMembership,
-} from "../../../../packages/db/src/schema";
+import { emergencyAdministratorID, PasswordChangeError } from "#auth/policy";
+import type { createDatabase } from "#db/client";
+import { accountAccess, administrator, authAccount, authUser, projectMembership } from "#db/schema";
 import { CommandError } from "../command-error";
 import { createAccountCommands } from "./accounts";
 import type { managedUserInput, memberInput, passwordChangeInput } from "./commands";

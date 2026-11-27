@@ -25,13 +25,13 @@ func TestConnectorTokenIsRemovedFromChildEnvironments(t *testing.T) {
 }
 
 func TestConnectorRejectsRetiredExecutionModesBeforeReadingAssignments(t *testing.T) {
-	for _, mode := range []string{"reserve", "prepared-child", "prepared-control", "native-source-preserve", "native-source-preserve-reconcile", "unknown"} {
+	for _, mode := range []string{"parent", "reserve", "prepared-child", "prepared-control", "native-source-preserve", "native-source-preserve-reconcile", "native-bootstrap-mode", "unknown"} {
 		t.Run(mode, func(t *testing.T) {
 			child := exec.Command(os.Args[0], "-test.run=^TestRetiredConnectorModeSubprocess$")
 			child.Env = append(os.Environ(), "FACTORY_RETIRED_MODE_TEST="+mode)
 			output, err := child.CombinedOutput()
 			exit, ok := err.(*exec.ExitError)
-			if !ok || exit.ExitCode() != 1 || strings.TrimSpace(string(output)) != "mode must be parent or child" {
+			if !ok || exit.ExitCode() != 1 || strings.TrimSpace(string(output)) != "mode must be a native entrypoint or child" {
 				t.Fatalf("retired mode reached assignment, token or preparation handling: %v: %s", err, output)
 			}
 		})

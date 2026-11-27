@@ -1,1 +1,1 @@
-export { type createProjectAppPreviews } from "./previews";
+export type { createProjectAppPreviews } from "./previews";

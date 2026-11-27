@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { createHash } from "node:crypto";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction } from "../fixtures/server-functions";
 
@@ -65,8 +65,8 @@ test("Implement freezes developer reasoning atomically, rejects changed replays 
         acceptanceCriteria: ["Freeze the selected effort with the first Build"],
         nonGoals: [],
       });
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${`reasoning-${projectID}`},'Reasoning',${`${forge.url.origin}/owned/starter.git`},'main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`reasoning-${projectID}`},'Reasoning',${`${forge.url.origin}/owned/starter.git`},'main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${userID},${role},${userID})`;
       await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)

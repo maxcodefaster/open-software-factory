@@ -1,15 +1,15 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql as expression } from "drizzle-orm";
 import type { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { projectRepositoryIntent } from "../../../../packages/db/src/schema";
+import type { createDatabase } from "#db/client";
+import { operation } from "#db/schema";
 import type {
   ProjectSetupView,
   projectSetupCreate,
   projectSetupSave,
   SetupInspectionView,
   SetupTask,
-} from "../../../../packages/project-domain/src/setup";
-import { setupReadiness } from "../../../../packages/project-domain/src/setup";
+} from "#project-domain/setup";
+import { setupReadiness } from "#project-domain/setup";
 import { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 import type { createProjectSetupController } from "./controller";
@@ -79,9 +79,15 @@ export function createSetupService(options: {
     async retryTask(userID: string, projectID: string, task: SetupTask) {
       await access.requireProject(userID, projectID);
       const [intent] = await options.database.db
-        .select({ kind: projectRepositoryIntent.kind })
-        .from(projectRepositoryIntent)
-        .where(eq(projectRepositoryIntent.projectId, projectID))
+        .select({ kind: expression<string>`${operation.payload}->>'kind'` })
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, "projects.repository_intent"),
+            eq(operation.scopeType, "project"),
+            eq(operation.idempotencyKey, `projects.repository_intent:${projectID}`),
+          ),
+        )
         .limit(1);
       await options.readiness.retry(projectID, userID, task, intent?.kind === "starter");
       return setupReadiness.parse(await options.readiness.status(projectID, userID));

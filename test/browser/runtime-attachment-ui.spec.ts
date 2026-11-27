@@ -3,14 +3,14 @@ import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
 import { previewAttachmentFailure } from "../../apps/factory/src/runtime/preview-attachment-failure";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { protocolFailure } from "../../apps/factory/src/server/protocols/failure";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
 import { test } from "../fixtures/browser-test";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFunctionRequestMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
 
@@ -37,9 +37,9 @@ test.beforeAll(async () => {
           if (
             importer?.endsWith("/workspace-sharing.tsx") &&
             [
-              "./server-functions/workspaces",
-              "./server-functions/runtime",
-              "./server-functions/writer",
+              "../server-functions/workspaces",
+              "../server-functions/runtime",
+              "../server-functions/writer",
             ].includes(source)
           )
             return resolve("test/fixtures/workspace-sharing-commands.ts");
@@ -229,25 +229,31 @@ test("a later unavailable writer read withdraws Ticket actions without changing 
   });
 });
 
-async function unavailableSourceFixture(page: Page) {
+async function sourceAccessFixture(page: Page, initialState: "preparing" | "paused" = "preparing") {
   const workspaceID = "10000000-0000-4000-8000-000000000003";
   let reachable = false;
   let checks = 0;
+  let sourceReads = 0;
   const source = () => ({
     workspaceID,
     label: "Owned source",
     serviceID: "owned-source",
     epoch: 1,
-    state: reachable ? ("ready" as const) : ("preparing" as const),
+    state: reachable ? ("ready" as const) : initialState,
     failure: reachable
       ? null
-      : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
+      : initialState === "paused"
+        ? null
+        : "The current Source owner is frozen or unavailable. Compute was not started; keep your editor buffer.",
   });
   const editor = { serviceID: "owned-editor", epoch: 1, state: "ready" as const, failure: null };
   await mockFactoryFunctions(page, {
     workspaces: {
       ensurePersonalSource: async () => source(),
-      getSource: async () => source(),
+      getSource: async () => {
+        sourceReads++;
+        return source();
+      },
       async ensureSource() {
         checks++;
         return source();
@@ -283,6 +289,7 @@ async function unavailableSourceFixture(page: Page) {
   return {
     workspaceID,
     checks: () => checks,
+    sourceReads: () => sourceReads,
     editorLoads: () => editorLoads,
     makeReachable: () => {
       reachable = true;
@@ -290,10 +297,65 @@ async function unavailableSourceFixture(page: Page) {
   };
 }
 
+test("paused Source metadata keeps retained-file guidance without asserting current compute state", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const commissions: string[] = [];
+  const commission = await factoryFunctionRequestMatcher([
+    "startPersonalWorkspace",
+    "startTicketWorkspace",
+    "startCoding",
+    "resumeCoding",
+  ]);
+  page.on("request", (request) => {
+    const name = commission(request);
+    if (name) commissions.push(name);
+  });
+  // Keep the cached Source metadata paused even after the iframe is selected
+  // and used; neither observation establishes the Actor's current compute state.
+  const fixture = await sourceAccessFixture(page, "paused");
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator(".runtime-frame")).toHaveJSProperty("inert", false);
+  const notice = page.locator(".editor-paused-status");
+  await expect(notice).toContainText("Files and unsaved edits are kept.");
+  await expect(notice).toContainText("Opening current files may resume compute, not Coding.");
+  await expect(page.getByText(/\b(?:Workspace|Compute) (?:is )?paused\b/i)).toHaveCount(0);
+  await expect(page.getByText("Opening Workspace…", { exact: true })).toHaveCount(0);
+  const buffer = page
+    .frameLocator('iframe[title="Factory IDE"]')
+    .getByLabel("Retained editor buffer");
+  await buffer.fill("unsaved current draft");
+  await page.getByRole("button", { name: "Hide editor", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Show editor", exact: true }).press("Enter");
+  await page.clock.fastForward(5000);
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await expect(buffer).toHaveValue("unsaved current draft");
+  await expect(page.getByText(/\b(?:Workspace|Compute) (?:is )?paused\b/i)).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(notice).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({
+      path: `${evidence}/source-cached-paused-${width}.png`,
+      fullPage: true,
+    });
+  }
+  expect(fixture.editorLoads()).toBe(1);
+  expect(fixture.sourceReads()).toBe(1);
+  expect(fixture.checks()).toBe(0);
+  expect(commissions).toEqual([]);
+});
+
 test("unavailable Source Retry reports every check without claiming a freeze or replacing the editor", async ({
   page,
 }) => {
-  const fixture = await unavailableSourceFixture(page);
+  const fixture = await sourceAccessFixture(page);
   await expect(
     page.getByText("The Workspace may still be starting or reconnecting", { exact: false }),
   ).toBeVisible();
@@ -361,7 +423,7 @@ test("unavailable Source actions and independent Retry remain clear on touch", a
       path: `${evidence}/source-actions-writer-unavailable-touch.png`,
       fullPage: true,
     });
-    const fixture = await unavailableSourceFixture(page);
+    const fixture = await sourceAccessFixture(page);
     const retry = page.getByRole("button", { name: "Retry file access", exact: true });
     await expect(retry).toBeEnabled();
     expect(

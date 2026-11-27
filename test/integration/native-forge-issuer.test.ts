@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createPublicKey, verify } from "node:crypto";
 import { z } from "zod";
-import { forgeClientID, forgeClientSecret } from "../../packages/auth/src/forge-issuer";
-import { createFactoryAuth } from "../../packages/auth/src/server";
+import { forgeClientID, forgeClientSecret } from "#auth/forge-issuer";
+import { createFactoryAuth } from "#auth/server";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("Factory native OIDC issuer registers one intended client and signs developer-only PKCE login", async () => {
@@ -49,10 +49,10 @@ test("Factory native OIDC issuer registers one intended client and signs develop
       "Owned client creation was not acknowledged",
     );
     expect(
-      (await database.client`SELECT state,observed_at FROM factory.forge_identity_intent`).map(
-        (row) => ({ state: row["state"], observed_at: row["observed_at"] }),
-      ),
-    ).toEqual([expect.objectContaining({ state: "create-intended", observed_at: null })]);
+      (
+        await database.client`SELECT state,completed_at FROM factory.operation WHERE kind='forge.identity'`
+      ).map((row) => ({ state: row["state"], completed_at: row["completed_at"] })),
+    ).toEqual([expect.objectContaining({ state: "create-intended", completed_at: null })]);
     expect(await database.client`SELECT id FROM auth."oauthClient"`).toHaveLength(0);
     Object.assign(identity.auth.api, {
       adminCreateOAuthClient: async (input: Parameters<typeof nativeCreateClient>[0]) => {
@@ -63,21 +63,24 @@ test("Factory native OIDC issuer registers one intended client and signs develop
     expect(await identity.ensureForgeClient(headers, callback)).toBe(forgeClientID);
     Object.assign(identity.auth.api, { adminCreateOAuthClient: nativeCreateClient });
     // Recover a lost outcome from the exact native client, including after auth restart.
-    await database.client`UPDATE factory.forge_identity_intent SET state='create-intended',
-      observed_at='2026-11-20 00:00:00.123456+00'::timestamptz`;
+    await database.client`UPDATE factory.operation SET state='create-intended',
+      completed_at='2026-11-20 00:00:00.123456+00'::timestamptz
+      WHERE kind='forge.identity'`;
     const [intended] = await database.client`
-      SELECT client_id,redirect_uri,intended_by,created_at::text,observed_at::text
-      FROM factory.forge_identity_intent`;
+      SELECT scope_id AS client_id,payload->>'redirectUri' AS redirect_uri,created_by AS intended_by,
+        created_at::text,completed_at::text
+      FROM factory.operation WHERE kind='forge.identity'`;
     expect(await createFactoryAuth(database).ensureForgeClient(headers, callback)).toBe(
       forgeClientID,
     );
     expect(
-      await database.client`SELECT client_id FROM factory.forge_identity_intent WHERE state='ready'`,
+      await database.client`SELECT scope_id FROM factory.operation WHERE kind='forge.identity' AND state='ready'`,
     ).toHaveLength(1);
     expect(
       (
-        await database.client`SELECT client_id,redirect_uri,intended_by,created_at::text,observed_at::text
-          FROM factory.forge_identity_intent`
+        await database.client`SELECT scope_id AS client_id,payload->>'redirectUri' AS redirect_uri,created_by AS intended_by,
+          created_at::text,completed_at::text
+          FROM factory.operation WHERE kind='forge.identity'`
       )[0],
     ).toEqual(intended);
     expect(await database.client`SELECT id FROM auth."oauthClient"`).toHaveLength(1);
@@ -102,7 +105,7 @@ test("Factory native OIDC issuer registers one intended client and signs develop
     });
     if (!developer) throw new Error("Developer missing");
     const projectID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`issuer-${projectID}`},'Owned issuer','https://example.invalid/project.git','main','.devcontainer/devcontainer.json',${developer.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},${`issuer-${projectID}`},'Owned issuer','https://example.invalid/project.git','main','.factory/actor-template.json',${developer.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${developer.id},'developer',${developer.id})`;
     const cookie = await login(developer.email, password);
     const verifier = crypto.randomUUID() + crypto.randomUUID();

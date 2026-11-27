@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
-import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
+import { isDesktopBackgroundKey } from "#interface-domain/background";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "./ui-controls.css";

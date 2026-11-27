@@ -55,15 +55,12 @@ func TestLanguageBackpressureCannotBlockControlClose(t *testing.T) {
 	defer reader.Close()
 	input := &blockedLanguageInput{pipe: writer, started: make(chan struct{}), closed: make(chan struct{})}
 	manager := newLanguageManager(ctx, validAssignment(), func(Message) error { return nil })
-	session := &languageSession{command: exec.Command("unused"), input: input, scope: languageURIs{"workspace-a", "/workspace"}, writes: make(chan any, 16), done: make(chan struct{})}
-	manager.sessions["owned-language"] = session
-	defer manager.closeAll()
-	manager.readers.Add(1)
-	go func() { defer manager.readers.Done(); manager.writeLoop("owned-language", session) }()
+	manager.RegisterSession("owned-language", "workspace-a", "/workspace", exec.Command("unused"), input)
+	defer manager.CloseAll()
 	runtime := &childRuntime{languages: manager}
 	finished := make(chan error, 1)
 	go func() {
-		finished <- runtime.readLoop(ctx, &controlConnection{connection: client, done: make(chan struct{})})
+		finished <- runtime.readLoop(ctx, newControlConnection(client))
 	}()
 	defer func() { client.Close(); <-finished }()
 	body := `{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"factory-workspace://workspace-a/main.ts","languageId":"typescript","version":1,"text":"const n = 1;"}}}`
@@ -82,28 +79,7 @@ func TestLanguageBackpressureCannotBlockControlClose(t *testing.T) {
 	case <-input.closed:
 	case <-time.After(time.Second):
 		// Unblock the red-case reader before its test cleanup waits on it.
-		manager.close("owned-language")
+		manager.Close("owned-language")
 		t.Fatal("language stdin backpressure blocked the control stream-close")
-	}
-}
-
-func TestLanguageInputQueueIsOrderedBoundedAndFencedAfterClose(t *testing.T) {
-	session := &languageSession{writes: make(chan any, 16), done: make(chan struct{})}
-	for index := 0; index < cap(session.writes); index++ {
-		if err := session.write(index); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if session.write("overflow") == nil {
-		t.Fatal("unbounded language queue")
-	}
-	close(session.done)
-	if session.write("after close") == nil {
-		t.Fatal("closed session admitted another input")
-	}
-	for index := 0; index < cap(session.writes); index++ {
-		if value := <-session.writes; value != index {
-			t.Fatalf("language input reordered: %v != %d", value, index)
-		}
 	}
 }

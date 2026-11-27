@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
-import { type createAccessController } from "../access/api";
+import { knowledgeEditInput } from "#knowledge-domain/knowledge";
+import type { createAccessController } from "../access/api";
 import {
   knowledgeGenerationSchema,
   knowledgeHistorySchema,

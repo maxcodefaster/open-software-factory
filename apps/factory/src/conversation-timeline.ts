@@ -1,4 +1,4 @@
-import { supersedesClarification } from "../../../packages/conversation-domain/src/clarification";
+import { supersedesClarification } from "#conversation-domain/clarification";
 
 export type ConversationTimelineItem<TEntry, TMessage> =
   | { kind: "conversation"; id: string; at: number; order: number; entry: TEntry }

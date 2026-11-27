@@ -1,15 +1,17 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
 import {
   nativeActor,
   type SubstrateCall,
   SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+} from "#runtime-kubernetes/substrate-control";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
+import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
+import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
+import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/source-api";
+import { nativeProjectTemplate } from "./native-project";
 import { substrateFixture } from "./substrate";
 
 // Actual Factory owners/PostgreSQL with controlled official RPC responses.
@@ -22,8 +24,9 @@ export async function nativeRuntimeFixture(
   const repository = join(directory, "repository");
   await Bun.$`git init -b main ${repository}`.quiet();
   await writeFile(join(repository, "README"), "Owned native Runtime fixture\n");
+  await mkdir(join(repository, ".factory"));
+  await writeFile(join(repository, nativeProjectTemplate.path), nativeProjectTemplate.content);
   if (contract) {
-    await mkdir(join(repository, ".factory"));
     await writeFile(
       join(repository, ".factory/system.json"),
       JSON.stringify({
@@ -50,7 +53,45 @@ export async function nativeRuntimeFixture(
   const previousSecret = process.env["FACTORY_AUTH_SECRET"];
   const signingSecret = "owned-native-runtime-private-signing-secret-0123456789";
   process.env["FACTORY_AUTH_SECRET"] = signingSecret;
-  const sources = createSubstrateSources(f.database, f.hub);
+  type SourceSQL = Parameters<SubstrateSourceHandoff["attach"]>[2];
+  const controlledWorkspaces = new Set([
+    f.workspaceID,
+    personalWorkspaceIdentity(f.projectID, f.userID).workspaceID,
+  ]);
+  async function requireIndependentSource(workspaceID: string, sql: SourceSQL) {
+    if (!controlledWorkspaces.has(workspaceID)) throw Error("Foreign controlled Source Workspace");
+    const [source] = await sql`
+      SELECT workspace_id FROM factory.substrate_source
+      WHERE workspace_id=${workspaceID} AND owner='service' AND writable
+        AND actor_uid IS NULL AND service_base IS NOT NULL
+        AND seed->>'projectID'=${f.projectID} AND seed->>'revision'=${revision}`;
+    if (!source) throw Error("Owned controlled Source seed is unavailable");
+  }
+  async function requireSourceActor(workspaceID: string, actorUID: string, sql: SourceSQL) {
+    await requireIndependentSource(workspaceID, sql);
+    const [actor] = await sql`
+      SELECT attempt.id FROM factory.runtime_attempt attempt
+      WHERE attempt.workspace_id=${workspaceID} AND attempt.project_id=${f.projectID}
+        AND attempt.actor_uid=${actorUID}`;
+    if (!actor) throw Error("Foreign controlled Source Actor");
+  }
+  async function requireSourceAttempt(workspaceID: string, attemptID: string, sql: SourceSQL) {
+    await requireIndependentSource(workspaceID, sql);
+    const [attempt] = await sql`
+      SELECT id FROM factory.runtime_attempt
+      WHERE id=${attemptID} AND workspace_id=${workspaceID} AND project_id=${f.projectID}`;
+    if (!attempt) throw Error("Foreign controlled Source Runtime Attempt");
+  }
+  // These controller fixtures leave their admitted seed independently owned.
+  // Model only the explicit handoff boundary, never start the real Linux Source
+  // service or claim that a controlled Actor imported/restored checkout bytes.
+  const sources: SubstrateSourceHandoff = {
+    attach: requireSourceActor,
+    freezeActor: requireSourceAttempt,
+    makeIndependent: requireIndependentSource,
+    resume: requireSourceAttempt,
+    requireIndependent: requireSourceActor,
+  };
   const ca = join(directory, "ca.pem");
   await writeFile(
     ca,
@@ -179,7 +220,6 @@ export async function nativeRuntimeFixture(
       before = callback;
     },
     async dispose() {
-      await sources.close();
       for (const row of await f.database.client<
         { id: string }[]
       >`SELECT id FROM factory.runtime_attempt WHERE project_id=${f.projectID}`)

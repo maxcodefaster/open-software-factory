@@ -28,10 +28,10 @@ test("retained proposal text remains inside the existing model input bound", asy
         uncertainty: [],
         questions: [],
         files: [
-          ".devcontainer/devcontainer.json",
-          ".devcontainer/Dockerfile",
-          ".devcontainer/compose.yaml",
-          ".devcontainer/compose.yml",
+          ".factory/actor-template.json",
+          ".factory/images/work/Dockerfile",
+          ".factory/images/postgres/Dockerfile",
+          ".factory/images/tools/Dockerfile",
           ".factory/system.json",
           ".forgejo/workflows/factory-verification.yml",
         ].map((path) => ({ path, content: "x".repeat(64000) })),
@@ -120,7 +120,7 @@ test("native setup inspection has a final-output step after sequential source re
     questions: [],
     files: [
       {
-        path: ".devcontainer/Dockerfile" as const,
+        path: ".factory/images/work/Dockerfile" as const,
         content: "FROM node:24\n# preserve-this-retained-installer\n",
       },
     ],
@@ -150,12 +150,16 @@ test("native setup inspection has a final-output step after sequential source re
             : message.content.map((part) => part.text),
         )
         .join("\n");
-      expect(instructions).toContain("private runtime-only override");
-      expect(instructions).toContain("preserve any existing stronger drops");
+      expect(instructions).toContain("pinned native JSON subset");
+      expect(instructions).toContain(
+        "Do not generate, translate or retain Dev Containers or Compose",
+      );
       expect(instructions).not.toContain("--cap-drop=NET_RAW");
-      expect(JSON.stringify(body.messages)).toContain("sleep");
-      expect(JSON.stringify(body.messages)).toContain("postCreateCommand");
-      expect(JSON.stringify(body.messages)).toContain("Factory starts App commands");
+      expect(JSON.stringify(body.messages)).toContain("source durableDir volume");
+      expect(JSON.stringify(body.messages)).not.toContain("postCreateCommand");
+      expect(JSON.stringify(body.messages)).toContain(
+        "Factory starts Coding and System Contract App commands",
+      );
       expect(JSON.stringify(body.messages)).toContain(
         "Setup readiness means a reproducible launch and Verification, not application/browser acceptance",
       );
@@ -169,7 +173,7 @@ test("native setup inspection has a final-output step after sequential source re
         )
         .join("\n");
       expect(userText).toContain(
-        '"missingConfiguration":[".devcontainer/devcontainer.json",".factory/system.json",".forgejo/workflows/factory-verification.yml"]',
+        '"missingConfiguration":[".factory/actor-template.json",".factory/system.json",".forgejo/workflows/factory-verification.yml"]',
       );
       expect(userText).toContain('"previousProposal":');
       expect(userText).toContain("preserve-this-retained-installer");
@@ -255,9 +259,14 @@ test("native setup inspection has a final-output step after sequential source re
     expect(loaded).toEqual(paths);
     expect(requests).toBe(5);
     expect(instructions).not.toContain("/workspace/project");
-    expect(instructions).toContain("Preserve omitted or custom workspaceFolder");
-    expect(instructions).toContain("default workspace mount");
-    expect(instructions).toContain("existing repository bind");
+    expect(instructions).toContain("<source-mount>/project, not the mount itself");
+    expect(instructions).toContain("non-root UID/GID 1000");
+    expect(instructions).toContain(
+      "Monorepo commands stay relative to the actual project checkout inside the declared source mount",
+    );
+    expect(instructions).toContain("USER and WORKDIR belong to the OCI image");
+    expect(instructions).toContain("Native containers share the Actor network");
+    expect(instructions).toContain("Native template env values are literals");
     expect(instructions).toContain('run: test "$(git rev-parse HEAD)"');
     expect(instructions).toContain("run: REPLACE_WITH_EXISTING_CHECK_COMMAND");
     expect(instructions).toContain(

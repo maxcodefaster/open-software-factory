@@ -12,17 +12,17 @@ import {
   or,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
   changeAgentSession,
   changeCommitOperation,
+  operation,
   runtimeAttempt,
-  runtimeComputeWait,
   ticket,
   verification,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { reportFailure } from "../failure-log";
 import type { RuntimeHub } from "./hub";
 
@@ -178,8 +178,16 @@ export function createIdleCompute(
                     eq(verificationRuntime.id, verification.runtimeAttemptId),
                   )
                   .innerJoin(
-                    runtimeComputeWait,
-                    eq(runtimeComputeWait.attemptId, verificationRuntime.id),
+                    operation,
+                    and(
+                      eq(operation.kind, "runtime.compute_wait"),
+                      eq(operation.scopeType, "runtime_attempt"),
+                      eq(operation.scopeId, expression`${verificationRuntime.id}::text`),
+                      eq(
+                        operation.idempotencyKey,
+                        expression`'runtime.compute_wait:' || ${verificationRuntime.id}::text`,
+                      ),
+                    ),
                   )
                   .where(
                     and(
@@ -187,7 +195,7 @@ export function createIdleCompute(
                       inArray(verification.state, ["pending", "runner-starting"]),
                       eq(verificationRuntime.state, "starting"),
                       isNull(verificationRuntime.stopIntendedAt),
-                      eq(runtimeComputeWait.reason, "compute-capacity"),
+                      expression`${operation.payload}->>'reason' = 'compute-capacity'`,
                     ),
                   ),
               )}`,

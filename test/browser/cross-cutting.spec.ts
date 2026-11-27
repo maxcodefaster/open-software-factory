@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { test } from "../fixtures/browser-test";
 import { browserBootstrap } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
@@ -16,8 +16,8 @@ test.beforeEach(async ({ page }) => {
   const userID = (await browserBootstrap(page)).session.user.id;
   database = createDatabase(1);
   projectID = crypto.randomUUID();
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
-    VALUES(${projectID},${`cross-${projectID.slice(0, 8)}`},'Cross cutting','https://example.invalid/cross.git','main','.devcontainer/devcontainer.json',${userID},'river-landscape')`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
+    VALUES(${projectID},${`cross-${projectID.slice(0, 8)}`},'Cross cutting','https://example.invalid/cross.git','main','.factory/actor-template.json',${userID},'river-landscape')`;
   await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
     VALUES(${crypto.randomUUID()},${projectID},'Cross cutting ticket','ready',${userID})`;
 });

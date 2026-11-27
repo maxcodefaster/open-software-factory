@@ -20,16 +20,15 @@ import {
   learningRubric,
   legacyWikiCallPattern,
   maxCalibrationGrades,
-} from "../../../../packages/conversation-domain/src/learning";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+} from "#conversation-domain/learning";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   administrator,
   learningCase as caseTable,
-  learningApplication,
   learningProposal,
   learningReview,
   projectMembership,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { CommandError } from "../command-error";
 import {
   createModelConnections,
@@ -252,11 +251,12 @@ export function createLearningWorker(
             id: learningProposal.id,
             state: learningProposal.state,
             content: typedSQL<PriorProposal["content"]>`${learningProposal.content}`,
-            applicationState: learningApplication.state,
+            applicationState: typedSQL<
+              "applied" | "reverted" | null
+            >`${learningProposal.application}->>'state'`,
           })
           .from(learningProposal)
           .innerJoin(learningReview, eq(learningReview.id, learningProposal.reviewId))
-          .leftJoin(learningApplication, eq(learningApplication.proposalId, learningProposal.id))
           .where(
             and(
               eq(learningReview.projectId, scope.projectId),

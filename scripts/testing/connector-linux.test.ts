@@ -122,6 +122,23 @@ test("Connector Linux preserves the check failure after owned cleanup", async ()
   }
 }, 15_000);
 
+test("Connector Linux retains Source checks without mounting or proving the removed rootless scripts", async () => {
+  const f = await fixture("complete");
+  try {
+    expect(await f.child.exited).toBe(23);
+    const run = (await f.calls()).find((args) => args[0] === "run");
+    if (!run) throw new Error("Connector Linux check command was not recorded");
+    expect(run.join(" ")).not.toMatch(
+      /factory-rootless|substrate\/rootless|INPUT_STOP_BOOTSTRAP_PROOF/,
+    );
+    expect(run.at(-1)).toBe(
+      "go test -p 2 -race ./... && CGO_ENABLED=0 go test -p 2 ./cmd/factory-runtime-connector -run '^TestNativeSourceServiceRunsAsDevelopmentUser$' -count=1 && go vet -p 2 ./...",
+    );
+  } finally {
+    await f.dispose();
+  }
+}, 15_000);
+
 test("Connector Linux cancellation refuses cleanup after container ownership changes", async () => {
   const f = await fixture("run", true);
   try {

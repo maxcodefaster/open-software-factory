@@ -1,16 +1,16 @@
 import { render } from "@solidjs/web";
 import { createSignal, Loading } from "solid-js";
-import {
-  type KnowledgeGeneration,
-  type KnowledgePage,
-  type KnowledgeRevision,
-  type KnowledgeSearchResult,
+import type {
+  KnowledgeGeneration,
+  KnowledgePage,
+  KnowledgeRevision,
+  KnowledgeSearchResult,
 } from "../../apps/factory/src/knowledge/contracts";
 import type { KnowledgeDraft } from "../../apps/factory/src/knowledge/draft";
-import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
+import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge/knowledge-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import "../../apps/factory/src/tokens.css";
-import "../../apps/factory/src/knowledge-workspace.css";
+import "../../apps/factory/src/knowledge/knowledge-workspace.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";

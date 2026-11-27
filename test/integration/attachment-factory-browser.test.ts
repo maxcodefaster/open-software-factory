@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
+import { attachmentIDs } from "#conversation-domain/attachments";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { attachmentIDs } from "../../packages/conversation-domain/src/attachments";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { attachmentDOCX, attachmentPDF } from "../fixtures/attachment-files";
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
@@ -72,8 +72,8 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     const fixture = f;
     const otherProjectID = crypto.randomUUID();
     const otherSlug = `other-${owned.id.slice(0, 8)}`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      SELECT ${otherProjectID},${otherSlug},'Other Product',repository_url,default_branch,devcontainer_path,created_by
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      SELECT ${otherProjectID},${otherSlug},'Other Product',repository_url,default_branch,actor_template_path,created_by
       FROM factory.project WHERE id=${f.projectID}`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${otherProjectID},${f.userID},'developer',${f.userID})`;
@@ -82,9 +82,14 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     await database.client`UPDATE factory.project SET repository_url=${`${forge.url}owned-process-fixture/attachments.git`}
       WHERE id=${f.projectID}`;
     await database.client`UPDATE factory.ticket SET title='Keep references with saved feedback',state='ready' WHERE id=${f.ticketID}`;
-    await database.client`INSERT INTO factory.branch_create_operation(
-      id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','attachments',branch_name,base_sha,${`owned-attachment-ux:${owned.id}`},'succeeded',base_sha,now()
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+        'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','attachments',
+          'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+        jsonb_build_object('observedHeadSha',base_sha),now()
       FROM factory.change WHERE id=${f.changeID}`;
     const pageID = crypto.randomUUID();
     await database.client`INSERT INTO factory.knowledge_page(
@@ -92,9 +97,11 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
       VALUES(${pageID},${f.projectID},'reference-material','Reference material',
         '## Feedback references\n\nKeep the visual reference and supporting document together.',
         '## Feedback references',${"a".repeat(40)},${f.userID})`;
-    await database.client`INSERT INTO factory.knowledge_generation(
-      id,project_id,source_commit_sha,state,page_count,conflict_count,created_by,completed_at)
-      VALUES(${crypto.randomUUID()},${f.projectID},${"a".repeat(40)},'succeeded',1,0,${f.userID},now())`;
+    const generationID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+      VALUES(${generationID},'knowledge.generation','project',${f.projectID},${`knowledge.generation:${generationID}`},NULL,'succeeded',${f.userID},now(),
+        ${JSON.stringify({ id: generationID, projectId: f.projectID, sourceCommitSha: "a".repeat(40), pageCount: 1, conflictCount: 0, failure: null, createdBy: f.userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     await database.client`INSERT INTO auth.account(id,account_id,provider_id,user_id,password)
       SELECT ${crypto.randomUUID()},${f.userID},'credential',${f.userID},password
       FROM auth.account WHERE user_id='01994a7d-0000-7000-8000-000000000001' AND provider_id='credential'`;

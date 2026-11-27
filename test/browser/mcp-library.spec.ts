@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-host-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction } from "../fixtures/server-functions";
@@ -161,8 +161,8 @@ test("MCP library uses landscape connection covers, retains private drafts and k
       Array<{ id: string }>
     >`SELECT user_id AS id FROM factory.administrator`;
     if (!manager) throw new Error("Owned fixture manager is missing");
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`mcp-ui-${project}`},${projectName},'https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`mcp-ui-${project}`},${projectName},'https://example.invalid/owned.git','main','.factory/actor-template.json',${manager.id})`;
     const sharedId = crypto.randomUUID();
     const sharedRevision = crypto.randomUUID();
     expect(

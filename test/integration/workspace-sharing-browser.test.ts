@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 
 test("sharing uses real owner decisions, readable narrow/touch controls and returns focus", async () => {
   const fixture = await factoryProcess();
@@ -31,7 +31,7 @@ test("sharing uses real owner decisions, readable narrow/touch controls and retu
     const owner = person.id;
     const workspaceID = personalWorkspaceIdentity(projectID, owner).workspaceID;
     await database.client`INSERT INTO auth."user"(id,name,email)VALUES(${peer},'Browser collaborator',${`${peer}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)VALUES(${projectID},${slug},'Workspace sharing proof','https://example.invalid/owned/project.git','main','.devcontainer/devcontainer.json',${owner})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)VALUES(${projectID},${slug},'Workspace sharing proof','https://example.invalid/owned/project.git','main','.factory/actor-template.json',${owner})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)VALUES(${projectID},${peer},'developer',${owner})`;
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)VALUES(${workspaceID},${projectID},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
     for (const [name, settings] of [

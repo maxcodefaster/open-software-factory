@@ -1,8 +1,8 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
-import { EpicProposalWorkspace } from "../../apps/factory/src/epic-proposal-workspace";
+import type { EpicProposal } from "#conversation-domain/epic-proposal";
+import { EpicProposalWorkspace } from "../../apps/factory/src/tickets/epic-proposal-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
-import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
 import { epicNonGoalsKey, epicNonGoalsProposal } from "./epic-proposal-non-goals";
 import { fixtureValue } from "./value";
 import "../../apps/factory/src/tokens.css";

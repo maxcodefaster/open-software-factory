@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
+import { librarySkillsAvailable } from "#conversation-domain/skill-library";
+import type { SkillContent } from "#conversation-domain/skills";
+import { drizzleTransaction } from "#db/client";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { librarySkillsAvailable } from "../../packages/conversation-domain/src/skill-library";
-import type { SkillContent } from "../../packages/conversation-domain/src/skills";
-import { drizzleTransaction } from "../../packages/db/src/client";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
 let server: Awaited<ReturnType<typeof ownedPostgresServer>>;
@@ -44,9 +44,9 @@ async function fixture() {
         VALUES(${id},'Owned Skill contributor',${`${id}@skills.test`},true)`;
     await client`INSERT INTO factory.administrator(user_id) VALUES(${admin})`;
     for (const id of [project, otherProject]) {
-      await client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${id},${`skills-${id}`},'Owned Skill proof','https://example.invalid/owned.git',
-          'main','.devcontainer/devcontainer.json',${admin})`;
+          'main','.factory/actor-template.json',${admin})`;
       for (const user of [author, manager])
         await client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
           VALUES(${id},${user},'product-contributor',${user === manager},${admin})`;
@@ -210,7 +210,7 @@ test("library CRUD preserves private scopes, immutable copies, cover CAS and pro
     expect(copied?.revisions[0]?.content).toEqual(input.content);
     const [link] = await f.client<
       { copied_from: string }[]
-    >`SELECT copied_from FROM factory.skill_library_revision WHERE library_id=${shared.libraryId}`;
+    >`SELECT copied_from FROM factory.skill_revision WHERE library_id=${shared.libraryId}`;
     expect(link?.copied_from).toBe(input.revisionId);
     const next = {
       ...input,
@@ -606,7 +606,9 @@ test("Drizzle uses the caller's transaction and savepoint, including immutable r
     ).rejects.toThrow("Owned transaction rollback");
     expect(await f.client`SELECT id FROM factory.skill_library`).toHaveLength(0);
     expect(await f.client`SELECT id FROM factory.skill_revision`).toHaveLength(0);
-    expect(await f.client`SELECT library_id FROM factory.skill_library_cover`).toHaveLength(0);
+    expect(
+      await f.client`SELECT id FROM factory.skill_library WHERE cover_key IS NOT NULL`,
+    ).toHaveLength(0);
   } finally {
     await f.dispose();
   }
@@ -718,7 +720,7 @@ test("competing per-library choices at every scope cannot replace a winner", asy
         reason: { status: 409 },
       });
     }
-    await f.client`UPDATE factory.skill_library_choice SET version=9007199254740990 WHERE library_id=${input.libraryId}`;
+    await f.client`UPDATE factory.operation SET payload=jsonb_set(payload,'{version}','9007199254740990'::jsonb,true) WHERE kind='skills.choice' AND payload->>'libraryId'=${input.libraryId}`;
     await f.skills.chooseLibrary(
       { ...choice, expectedVersion: 9007199254740990 },
       f.author,
@@ -874,9 +876,8 @@ test("load rejects corrupt content digests and system proposals grant only insta
       (await f.skills.getLibrary(f.author)).entries.some((row) => row.id === accepted.libraryId),
     ).toBe(true);
     const corrupt = crypto.randomUUID();
-    await f.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by)
-      VALUES(${corrupt},'owned-corrupt',1,${JSON.stringify(f.content("owned-corrupt"))}::jsonb,${"f".repeat(64)},${f.admin})`;
-    await f.client`INSERT INTO factory.skill_publication(revision_id,published,updated_by) VALUES(${corrupt},true,${f.admin})`;
+    await f.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by,published,published_updated_by,published_updated_at)
+      VALUES(${corrupt},'owned-corrupt',1,${JSON.stringify(f.content("owned-corrupt"))}::jsonb,${"f".repeat(64)},${f.admin},true,${f.admin},now())`;
     await expect(f.skills.load([corrupt])).rejects.toMatchObject({ status: 503 });
   } finally {
     await f.dispose();

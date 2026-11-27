@@ -1,7 +1,10 @@
 # Factory Starter
 
 This application uses TanStack Start for Solid 2, Node.js 24, Better Auth and PostgreSQL.
-Factory supplies the configured environment and starts the declared Web app inside its Dev Container.
+Factory supplies the approved environment and starts the Web app in the native `work` container.
+The generated `.factory/actor-template.json` uses the installation's published, immutable
+Starter images for its selected Linux arm64 or amd64 Substrate workers. No Docker daemon,
+Dev Container, Compose service discovery or runtime image build is involved.
 Start RC11 uses the fixed upstream server core 1.169.45. Installation repairs its missing
 request-scope export automatically, without changing the upstream implementation.
 Production bundles TanStack's declared dependency graph before Nitro packages the server.
@@ -10,6 +13,7 @@ The exact Solid 2 and Start release candidates are pinned independently of Facto
 
 ```sh
 npm ci
+npm run db:wait
 npm run db:migrate
 npm run dev
 ```
@@ -19,9 +23,39 @@ types, runs every `test/*.test.ts` file, then checks TypeScript. `npm test` also
 Tests need a working `DATABASE_URL` and a `BETTER_AUTH_SECRET` of at least 32 characters.
 Keep credentials out of source control.
 
-The pinned Dev Containers CLI generates `.devcontainer/devcontainer-lock.json` during runtime
-setup. The Starter ignores this generated metadata; its Feature reference already pins the digest.
-An explicitly tracked lockfile remains tracked and is never removed by these ignore rules.
+## Native runtime and images
+
+The ActorTemplate declares `work` and PostgreSQL as direct native containers sharing the Actor's
+loopback network. Only `work` mounts saved Source; PostgreSQL has its own durable data directory.
+The checkout is `project/` inside the Source mount. Preparation and Verification commands are
+relative to that checkout, not a hardcoded working directory. Factory admits Source before any
+Project entrypoint and starts the Web app through `.factory/system.json` after preparation succeeds.
+Every cold start runs `npm ci`, waits for a successful SQL query, then runs the existing migrations
+once. Only readiness is retried; migrations and application writes are not replayed on failure.
+Native MEMORY continuation may keep the processes; Substrate's ROOTFS fallback restarts them.
+
+Configure these variables in the applicable Project Environment, including Verification access:
+
+- `POSTGRES_PASSWORD`: a strong password for the Actor-local PostgreSQL server.
+- `DATABASE_URL`: `postgres://app:<URL-encoded-password>@127.0.0.1:5432/app`, using the same password.
+- `BETTER_AUTH_SECRET`: at least 32 characters. Keep credentials out of repository files.
+
+Template environment values are literal. They do not interpolate `${...}` or reference other
+variables. Containers do not have Compose DNS names or `depends_on`; the SQL readiness command
+handles concurrent PostgreSQL startup before migration.
+
+The recipes in `.factory/images/work/Dockerfile` and `.factory/images/postgres/Dockerfile` use the
+repository's pinned upstream base images. Work adds Git and runs as the existing UID/GID 1000;
+PostgreSQL runs as its existing non-root `postgres` user. The release owns their build, publication
+and exact references as `starter-work` and `starter-postgres` in its normal artifact bundle.
+Startup selects the catalog for the configured native worker platform. Creating a Starter never
+builds images; it writes those exact published references into the new Project's template.
+
+An administrator may deliberately override the installation catalog with `FACTORY_STARTER_IMAGES`
+as `{platform, development, postgres}`. Its platform must match the selected Substrate runtime.
+There is deliberately no fallback to upstream root images, mutable tags, emulation or locally
+created acceptance images. Preparing these installation defaults is separate from the opportunistic
+Project image-preparation feature; publication never changes an existing Project's saved template.
 
 ## Application and tests
 

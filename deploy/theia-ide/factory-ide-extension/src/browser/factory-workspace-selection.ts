@@ -89,9 +89,10 @@ export class FactoryWorkspaceSelection extends WorkspaceService {
       }
     }
     window.addEventListener("message", this.selected);
-    // Explorer's initial root must resolve after source selection. Upstream
-    // doInit resolves its own ready before this adapter selects the remote root.
-    this.sourceReady.resolve();
+    // The embedded opener may have no Workspace query. Signal the parent below,
+    // but keep roots/layout storage gated until select installs its first root.
+    // Otherwise Theia restores _global_ editors and may wake a former Workspace.
+    if (!workspaceID && window.parent === window) this.sourceReady.resolve();
     if (this.factoryOrigin && window.parent !== window)
       window.parent.postMessage({ type: "factory:ide-ready" }, this.factoryOrigin);
   }
@@ -108,6 +109,7 @@ export class FactoryWorkspaceSelection extends WorkspaceService {
     await this.setWorkspace(stat);
     if (serial !== this.selection) return;
     factoryRuntimeContext.select(workspaceID);
+    this.sourceReady.resolve();
     if (this.navigatorWorkspace === workspaceID) this.acknowledge(workspaceID);
   }
 

@@ -1,16 +1,15 @@
 import { and, eq, sql as query } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
+  auditEvent,
   change as changeModel,
-  executionPolicyCommand,
-  promotionOperation,
+  operation as operationTable,
   runtimeAttempt,
-  stagingPreview,
   ticket,
   verification,
-} from "../../../../packages/db/src/schema";
-import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
-import { type createForgejoClient } from "../../../../packages/forge/src/forge";
+} from "#db/schema";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
 import type { RuntimeAttemptView } from "../runtime/types";
 
 type PromotionChange = {
@@ -24,6 +23,7 @@ export function createDeliveryPromotion(
   database: ReturnType<typeof createDatabase>,
   runtime: {
     startStagingReplacement(id: string, userID: string): Promise<RuntimeAttemptView | null>;
+    pause(id: string): Promise<RuntimeAttemptView | null>;
     stop(id: string): Promise<RuntimeAttemptView | null>;
   },
   forge: Pick<ReturnType<typeof createForgejoClient>, "deleteRunner">,
@@ -41,12 +41,15 @@ export function createDeliveryPromotion(
         previousAttemptID: query<string | null>`promotion.previous_runtime_attempt_id`,
         replacementAttemptID: query<string | null>`promotion.replacement_runtime_attempt_id`,
         replacementState: runtimeAttempt.state,
-        retryActorID: executionPolicyCommand.actorId,
+        retryActorID: auditEvent.actorId,
       })
       .from(query`factory.current_promotion promotion`)
       .leftJoin(
-        executionPolicyCommand,
-        eq(executionPolicyCommand.commandId, query`promotion.retry_command_id`),
+        auditEvent,
+        and(
+          eq(auditEvent.id, query`promotion.retry_command_id`),
+          eq(auditEvent.kind, "usage.policy_command"),
+        ),
       )
       .leftJoin(
         runtimeAttempt,
@@ -65,42 +68,63 @@ export function createDeliveryPromotion(
     }
     if (["failed", "stopped", "cleanup-failed"].includes(promotion.replacementState ?? "")) {
       await database.db
-        .update(promotionOperation)
+        .update(operationTable)
         .set({
           state: "failed",
-          lastError: "Replacement Staging failed before readiness",
+          activeKey: null,
+          error: "Replacement Staging failed before readiness",
           completedAt: query`now()`,
           updatedAt: query`now()`,
         })
-        .where(eq(promotionOperation.id, promotion.id));
+        .where(
+          and(eq(operationTable.id, promotion.id), eq(operationTable.kind, "delivery.promotion")),
+        );
       return;
     }
     if (promotion.replacementState !== "ready") return;
     await database.client.begin(async (transaction) => {
       const db = drizzleTransaction(transaction);
       await db
-        .update(promotionOperation)
+        .update(operationTable)
         .set({ state: "switching", updatedAt: query`now()` })
         .where(
-          and(eq(promotionOperation.id, promotion.id), eq(promotionOperation.state, "starting")),
+          and(
+            eq(operationTable.id, promotion.id),
+            eq(operationTable.kind, "delivery.promotion"),
+            eq(operationTable.state, "starting"),
+          ),
         );
       await db
-        .update(stagingPreview)
+        .update(operationTable)
         .set({
-          revision: promotion.commitSHA,
-          runtimeAttemptId: promotion.replacementAttemptID,
+          state: promotion.replacementAttemptID ? "attached" : "pending",
+          payload: query`jsonb_build_object(
+            'projectId', ${change.projectID}::text,
+            'revision', ${promotion.commitSHA}::text,
+            'runtimeAttemptId', ${promotion.replacementAttemptID}::text
+          )`,
           updatedAt: query`now()`,
         })
-        .where(eq(stagingPreview.projectId, change.projectID));
+        .where(
+          and(
+            eq(operationTable.kind, "delivery.staging_preview"),
+            eq(operationTable.scopeType, "project"),
+            eq(operationTable.scopeId, change.projectID),
+            eq(operationTable.idempotencyKey, `delivery.staging_preview:${change.projectID}`),
+          ),
+        );
       await db
-        .update(promotionOperation)
+        .update(operationTable)
         .set({
           state: "succeeded",
+          activeKey: null,
           completedAt: query`now()`,
           updatedAt: query`now()`,
-          lastError: "Delivery cleanup pending",
+          error: "Delivery cleanup pending",
         })
-        .where(eq(promotionOperation.id, promotion.id));
+        .where(
+          and(eq(operationTable.id, promotion.id), eq(operationTable.kind, "delivery.promotion")),
+        );
       await db
         .update(changeModel)
         .set({
@@ -125,7 +149,7 @@ export function createDeliveryPromotion(
   ) {
     try {
       if (promotion.previousAttemptID) await runtime.stop(promotion.previousAttemptID);
-      if (change.runtimeAttemptID) await runtime.stop(change.runtimeAttemptID);
+      if (change.runtimeAttemptID) await runtime.pause(change.runtimeAttemptID);
       const verifications = await database.db
         .select({
           runtimeAttemptID: verification.runtimeAttemptId,
@@ -139,17 +163,21 @@ export function createDeliveryPromotion(
       }
       await retireBranch(change.id);
       await database.db
-        .update(promotionOperation)
-        .set({ lastError: null, updatedAt: query`now()` })
-        .where(eq(promotionOperation.id, promotion.id));
+        .update(operationTable)
+        .set({ error: null, updatedAt: query`now()` })
+        .where(
+          and(eq(operationTable.id, promotion.id), eq(operationTable.kind, "delivery.promotion")),
+        );
     } catch (cause) {
       await database.db
-        .update(promotionOperation)
+        .update(operationTable)
         .set({
-          lastError: bounded(cause instanceof Error ? cause.message : "Delivery cleanup failed"),
+          error: bounded(cause instanceof Error ? cause.message : "Delivery cleanup failed"),
           updatedAt: query`now()`,
         })
-        .where(eq(promotionOperation.id, promotion.id));
+        .where(
+          and(eq(operationTable.id, promotion.id), eq(operationTable.kind, "delivery.promotion")),
+        );
     }
   }
   return reconcilePromotion;

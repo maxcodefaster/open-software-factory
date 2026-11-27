@@ -17,8 +17,22 @@ jobs:
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
         with:
           version: 2026.10.3
+      - name: Read the Go toolchain pin
+        id: tools
+        run: |
+          set -euo pipefail
+          go="$(mise exec -- bun -e 'console.log((await Bun.file("upstream.json").json()).go.version)')"
+          printf 'go=%s\n' "$go" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: ${{ steps.tools.outputs.go }}
+          cache-dependency-path: |
+            services/runtime-connector/go.sum
+            services/substrate-control/go.sum
       - name: Install locked dependencies
         run: mise exec -- bun install --frozen-lockfile
+      - name: Check documentation
+        run: mise exec -- bun run check:docs
       - name: Check database and planning schema drift
         run: |
           mise exec -- bun run db:check
@@ -31,5 +45,9 @@ jobs:
       # only the Theia extension needed by support tests. No browser bundle or image.
       - name: Prepare development adapters and check types
         run: mise exec -- bun run typecheck
-      - name: Check architecture diagnostics
-        run: mise exec -- bun run test:unit architecture-boundaries
+      - name: Run unit tests
+        run: mise exec -- bun run test:unit
+      - name: Check runtime Connector (host)
+        run: mise exec -- bun run connector:check:host
+      - name: Check Substrate control
+        run: mise exec -- bun run substrate:check

@@ -51,10 +51,12 @@ func TestNativeCheckoutRefreshKeepsGitMetadataOwnedByDevelopmentUser(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkoutProject(context.Background(), Assignment{
+	checkoutAssignment := Assignment{
 		WorkspaceFolder: workspace, PreserveWorkspace: true, RepositoryIdentity: "owned-native-source",
-		RepositoryURL: "https://example.invalid/current.git", nativeActorUID: "owned-native-actor",
-	}); err != nil {
+		RepositoryURL: "https://example.invalid/current.git",
+	}
+	checkoutAssignment.SetNativeActorUID("owned-native-actor")
+	if err := checkoutProject(context.Background(), checkoutAssignment); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(filepath.Join(workspace, ".git", "config"))
@@ -70,7 +72,8 @@ func TestNativeCheckoutRefreshKeepsGitMetadataOwnedByDevelopmentUser(t *testing.
 		t.Fatal(err)
 	}
 	commitFile(t, workspace, "app.txt", "owned native implementation\n")
-	assignment := Assignment{WorkspaceFolder: workspace, nativeActorUID: "owned-native-actor"}
+	assignment := Assignment{WorkspaceFolder: workspace}
+	assignment.SetNativeActorUID("owned-native-actor")
 	message := Message{Action: "git-prepare-commit", OperationID: "owned-native-commit", ExpectedSHA: strings.TrimSpace(base), CommitMessage: "Owned native implementation", AuthorName: "Factory", AuthorEmail: "owned@example.invalid"}
 	result := handleParentOperation(context.Background(), assignment, message)
 	if result.Error != "" || !validCommitSHA(result.CommitSHA) {

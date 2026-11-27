@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { verificationChangeScope, verificationReviewReasons } from "./verification";
-import { verificationReceipt } from "../../../test/fixtures/verification";
 import { fixtureValue } from "../../../test/fixtures/value";
+import { verificationReceipt } from "../../../test/fixtures/verification";
+import { verificationChangeScope, verificationReviewReasons } from "./verification";
 
 const commit = "b".repeat(40);
 

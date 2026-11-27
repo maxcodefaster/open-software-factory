@@ -3,7 +3,7 @@ import {
   type VerificationDiagnosis,
   type VerificationReceipt,
   verificationReceiptInput,
-} from "../../conversation-domain/src/verification";
+} from "#conversation-domain/verification";
 import type { ForgeRepository } from "./contracts";
 import { readVerificationDiagnostic, sanitizeVerificationOutput } from "./diagnostic-output";
 

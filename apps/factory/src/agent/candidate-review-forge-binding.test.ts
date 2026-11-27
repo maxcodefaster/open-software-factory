@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
-import { drizzleTransaction } from "../../../../packages/db/src/client";
-import { agentTurn } from "../../../../packages/db/src/schema";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { drizzleTransaction } from "#db/client";
+import { agentTurn } from "#db/schema";
+import type { createForgejoClient } from "#forge/forge";
 import {
   forgeBinding,
   forgeBindingDatabase,
@@ -82,7 +82,6 @@ test("review binds injected Forge readers before source calls, retaining exact r
             previousSHA: null,
             focusNeedsApp: false,
             criteria: 1,
-            coverageVersion: 1,
             attemptID: crypto.randomUUID(),
           },
         ];
@@ -90,7 +89,7 @@ test("review binds injected Forge readers before source calls, retaining exact r
       if (
         text.includes("FROM factory.change_agent_session") ||
         text.includes("FROM factory.ticket_conversation") ||
-        text.includes("FROM factory.review_scenario")
+        text.includes("FROM factory.operation")
       )
         return [];
       throw new Error(`Unexpected review query: ${text}`);
@@ -130,7 +129,7 @@ test("review binds injected Forge readers before source calls, retaining exact r
       if (text.includes('from "factory"."change"')) return [[changeID]];
       if (text.includes('from "factory"."change_writer"')) return [["agent", turnID]];
       if (text.includes('from "factory"."ticket_conversation"')) return [];
-      if (text.includes('from "factory"."review_scenario"')) return [];
+      if (text.includes('from "factory"."operation"')) return [];
       if (text.startsWith('update "factory"."candidate_review" set "evidence"')) {
         expect(parameters[1]).toBe(reviewID);
         evidence.push(...JSON.parse(String(parameters[0])));

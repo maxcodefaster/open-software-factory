@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { drizzleTransaction } from "#db/client";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
-import { drizzleTransaction } from "../../packages/db/src/client";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 

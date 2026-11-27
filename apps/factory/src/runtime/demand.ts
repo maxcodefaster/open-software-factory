@@ -1,4 +1,4 @@
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
+import { nativeLifecycleWindowMS } from "#runtime-domain/timing";
 
 export function runtimeDocumentRequest(request: Request) {
   return request.method === "GET" && request.headers.get("sec-fetch-mode") === "navigate";

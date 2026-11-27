@@ -4,10 +4,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { chromium } from "@playwright/test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { z } from "zod";
+import { createForgejoClient } from "#forge/forge";
+import { zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
@@ -335,8 +335,8 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       baseSHA = (await forge.getDefaultBranch(repository)).headSha;
       expect(await forge.getFile(repository, "src/browser-page.html", baseSHA)).toBe(pageContent);
       await forge.ensureDefaultBranchProtection(repository, "main");
-      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-        VALUES (${projectID}, ${slug}, 'Browser-assisted UI repair', ${`http://127.0.0.1:33030/${repository.owner}/${repository.name}.git`}, 'main', '.devcontainer/devcontainer.json', ${userID})`;
+      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+        VALUES (${projectID}, ${slug}, 'Browser-assisted UI repair', ${`http://127.0.0.1:33030/${repository.owner}/${repository.name}.git`}, 'main', '.factory/actor-template.json', ${userID})`;
       const zero = zeroDrizzle(zeroSchema, database.db);
       await zero.transaction(async (tx) =>
         zeroServerMutators.tickets.create.fn({
@@ -542,12 +542,6 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
             typeof session.context.workingTreeModified === "boolean",
         ),
       ).toBe(true);
-      for (const session of sessions)
-        expect(
-          await terminal.evaluate<boolean>(
-            `return !require("node:fs").existsSync(${JSON.stringify(`/tmp/factory-build-browser-${session.id}`)});`,
-          ),
-        ).toBe(true);
       const fixed = await forge.getFile(repository, "src/browser-page.html", verification.sha);
       expect(fixed).toContain("Continue");
       expect(fixed).not.toContain("position:absolute");

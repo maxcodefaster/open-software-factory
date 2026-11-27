@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
+import { candidateReviewResultInput } from "#conversation-domain/candidate-review";
 import { optionalEnum, optionalString } from "../optional-values";
 
 export const deliveryViewSchema = z.object({

@@ -31,52 +31,14 @@ const secretValue = z
 const grants = z
   .object({
     runtime: z.boolean(),
-    build: z.boolean(),
     verification: z.boolean(),
   })
   .strict();
 const variableMetadata = grants.extend({ name: variableName }).strict();
-const registryHost = z
-  .string()
-  .min(1)
-  .max(253)
-  .refine(
-    (host) => {
-      try {
-        const url = new URL(`https://${host}`);
-        return (
-          url.host === host &&
-          !url.username &&
-          !url.password &&
-          url.pathname === "/" &&
-          !url.search &&
-          !url.hash &&
-          !host.includes("@")
-        );
-      } catch {
-        return false;
-      }
-    },
-    { message: "Use a registry hostname with an optional port, without a URL path" },
-  );
-const registryMetadata = z
-  .object({
-    host: registryHost,
-    username: z
-      .string()
-      .max(256)
-      .refine((value) => !/[:\0\r\n]/.test(value)),
-    verification: z.boolean(),
-    publish: z.boolean().default(false),
-    hasPassword: z.boolean(),
-    hasCertificate: z.boolean(),
-  })
-  .strict();
 
 export const environmentManifest = z
   .object({
     variables: z.array(variableMetadata).max(128),
-    registries: z.array(registryMetadata).max(16),
   })
   .strict();
 export type EnvironmentManifest = z.output<typeof environmentManifest>;
@@ -92,36 +54,12 @@ export const environmentWrite = z
     variables: z
       .array(variableMetadata.extend({ value: secretValue.optional() }).strict())
       .max(128),
-    registries: z
-      .array(
-        registryMetadata
-          .omit({ hasPassword: true, hasCertificate: true })
-          .extend({
-            password: secretValue.optional(),
-            certificate: z
-              .string()
-              .max(131_072)
-              .refine(
-                (value) =>
-                  value === "" ||
-                  (value.includes("-----BEGIN CERTIFICATE-----") && !value.includes("PRIVATE KEY")),
-                { message: "Registry trust requires a PEM certificate, never a private key" },
-              )
-              .optional(),
-          })
-          .strict(),
-      )
-      .max(16),
   })
   .strict()
   .superRefine((input, context) => {
-    for (const [field, keys] of [
-      ["variables", input.variables.map((item) => item.name)],
-      ["registries", input.registries.map((item) => item.host)],
-    ] as const) {
-      if (new Set(keys).size !== keys.length)
-        context.addIssue({ code: "custom", path: [field], message: "Entries must be unique" });
-    }
+    const names = input.variables.map((item) => item.name);
+    if (new Set(names).size !== names.length)
+      context.addIssue({ code: "custom", path: ["variables"], message: "Entries must be unique" });
   });
 export type EnvironmentWrite = z.output<typeof environmentWrite>;
 export type EnvironmentWriteInput = z.input<typeof environmentWrite>;
@@ -129,17 +67,6 @@ export type EnvironmentWriteInput = z.input<typeof environmentWrite>;
 export const environmentBundle = z
   .object({
     variables: z.array(variableMetadata.extend({ value: secretValue }).strict()).max(128),
-    registries: z
-      .array(
-        registryMetadata
-          .omit({ hasPassword: true, hasCertificate: true })
-          .extend({
-            password: secretValue,
-            certificate: z.string().max(131_072),
-          })
-          .strict(),
-      )
-      .max(16),
   })
   .strict();
 export type EnvironmentBundle = z.output<typeof environmentBundle>;
@@ -147,11 +74,6 @@ export type EnvironmentBundle = z.output<typeof environmentBundle>;
 export function environmentMetadata(bundle: EnvironmentBundle): EnvironmentManifest {
   return {
     variables: bundle.variables.map(({ value: _value, ...metadata }) => metadata),
-    registries: bundle.registries.map(({ password, certificate, ...metadata }) => ({
-      ...metadata,
-      hasPassword: password.length > 0,
-      hasCertificate: certificate.length > 0,
-    })),
   };
 }
 
@@ -166,14 +88,6 @@ export function replaceEnvironment(
       if (value === undefined) throw new Error("A new variable needs a value");
       return { ...variable, value };
     }),
-    registries: input.registries.map((registry) => {
-      const old = previous.registries.find((item) => item.host === registry.host);
-      return {
-        ...registry,
-        password: registry.password ?? old?.password ?? "",
-        certificate: registry.certificate ?? old?.certificate ?? "",
-      };
-    }),
   });
 }
 
@@ -185,10 +99,6 @@ export const environmentSettingsView = environmentManifest
     storeConfigured: z.boolean(),
     pending: z.boolean(),
     pendingCommandID: z.uuid().nullable(),
-    preparation: z
-      .enum(["pending", "running", "succeeded", "unsupported", "failed"])
-      .nullable()
-      .optional(),
   })
   .strict();
 export type EnvironmentSettingsView = z.output<typeof environmentSettingsView>;

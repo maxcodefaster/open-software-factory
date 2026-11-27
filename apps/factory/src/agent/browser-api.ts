@@ -1,1 +1,1 @@
-export { type createBuildBrowserController } from "./browser-controller";
+export type { createBuildBrowserController } from "./browser-controller";

@@ -1,16 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
+import { sql as query, type SQL } from "drizzle-orm";
 import { z } from "zod";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { type SubstrateProvisionResources, substrateProvision } from "#db/schema";
 import {
   nativeMetadata,
   type SubstrateCall,
   SubstrateRPCError,
-} from "../../../../packages/runtime-kubernetes/src/substrate-control";
+} from "#runtime-kubernetes/substrate-control";
 import { substrateTemplateSHA256 } from "./substrate";
 
 export const boundNativeProvisioningResource = z.object({ metadata: nativeMetadata }).passthrough();
 type Resource = z.infer<typeof boundNativeProvisioningResource>;
 export const boundNativeProvisioningKinds = ["atespace", "policy", "template"] as const;
 type Kind = (typeof boundNativeProvisioningKinds)[number];
+type ProvisionSQL = ReturnType<typeof createDatabase>["client"] | DatabaseTransaction;
 export type BoundNativeProvisioningFacts = {
   atespace: Resource | null;
   policy: Resource | null;
@@ -23,10 +27,76 @@ export type BoundNativeProvisioningFacts = {
   templateRejected: boolean;
 };
 
+export function readProvisionResources(
+  resources: SubstrateProvisionResources | null | undefined,
+): BoundNativeProvisioningFacts {
+  const entry = (kind: Kind) => resources?.[kind];
+  const timestamp = (kind: Kind) => {
+    const value = entry(kind)?.attemptedAt;
+    return typeof value === "string" ? new Date(value) : null;
+  };
+  const resourceValue = (kind: Kind) => {
+    const value = entry(kind)?.value;
+    return value ? (value as Resource) : null;
+  };
+  return {
+    atespace: resourceValue("atespace"),
+    policy: resourceValue("policy"),
+    template: resourceValue("template"),
+    atespaceAttemptedAt: timestamp("atespace"),
+    policyAttemptedAt: timestamp("policy"),
+    templateAttemptedAt: timestamp("template"),
+    atespaceRejected: entry("atespace")?.rejected === true,
+    policyRejected: entry("policy")?.rejected === true,
+    templateRejected: entry("template")?.rejected === true,
+  };
+}
+
+function patchProvisionResourceIn(
+  sql: ProvisionSQL,
+  where: SQL | undefined,
+  kind: Kind,
+  patch: SQL,
+) {
+  return drizzleTransaction(sql)
+    .update(substrateProvision)
+    .set({
+      resources: query`jsonb_set(${substrateProvision.resources}, ARRAY[${kind}::text], COALESCE(${substrateProvision.resources} -> ${kind}::text, '{}'::jsonb) || ${patch}, true)`,
+    })
+    .where(where);
+}
+
+export function dispatchProvisionResourceIn(sql: ProvisionSQL, where: SQL | undefined, kind: Kind) {
+  return patchProvisionResourceIn(
+    sql,
+    where,
+    kind,
+    query`jsonb_build_object('attemptedAt', to_jsonb(now()))`,
+  );
+}
+
+export function rejectProvisionResourceIn(sql: ProvisionSQL, where: SQL | undefined, kind: Kind) {
+  return patchProvisionResourceIn(sql, where, kind, query`'{"rejected":true}'::jsonb`);
+}
+
+export function rememberProvisionResourceIn(
+  sql: ProvisionSQL,
+  where: SQL | undefined,
+  kind: Kind,
+  value: Resource,
+) {
+  return patchProvisionResourceIn(
+    sql,
+    where,
+    kind,
+    query`jsonb_build_object('value', ${JSON.stringify(value)}::text::jsonb)`,
+  );
+}
+
 // Requests and identity checks for these three concrete native resources only.
 // The caller retains authorization, locks, durable intent and dispatch/outcome writes.
 export function boundNativeProvisioningChecks(
-  label: "Workspace" | "prebuild" | "Verification" | "isolated",
+  label: "Workspace" | "Verification" | "isolated",
   atespace: string,
   editorPrincipal: string,
   template: ReturnType<typeof import("./substrate-template").renderSubstrateTemplate>,

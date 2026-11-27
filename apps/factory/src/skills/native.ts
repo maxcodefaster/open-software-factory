@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillRevision } from "#conversation-domain/skills";
 
 export const nativeSkillId = (revision: SkillRevision) => `factory-${revision.id}`;
 export function invokedSkills(prompt: string, revisions: SkillRevision[]) {

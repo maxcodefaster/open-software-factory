@@ -1,4 +1,4 @@
-import type { WikiGenerationOutput } from "../../../../packages/knowledge-domain/src/generation";
+import type { WikiGenerationOutput } from "#knowledge-domain/generation";
 import type { WikiGenerationInput } from "./generation-contracts";
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {

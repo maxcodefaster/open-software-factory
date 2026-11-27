@@ -1,10 +1,10 @@
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { controlledForgeProtection } from "../fixtures/forge-protection";
 import { nativeBuildProcessFixture } from "../fixtures/native-build-process";
 import { nativeProcessProtocol } from "../fixtures/native-process-protocol";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 test.each(["restore", "mode revoked", "Session replaced"] as const)(
   "actual Factory commit recovery under %s waits for Connector readiness without paid replay",

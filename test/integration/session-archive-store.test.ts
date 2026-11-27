@@ -83,18 +83,20 @@ test("archive failure is independent of turn/commit settlement and retries retai
       .client`SELECT state FROM factory.change_commit_operation WHERE id=${firstID}`;
     expect(commits[0]?.["state"]).toBe("succeeded");
     await owned.database
-      .client`UPDATE factory.session_archive SET retry_after=now() WHERE state<>'saved'`;
+      .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{retryAfter}',to_jsonb(now()))
+        WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND state<>'saved'`;
     await archives.savePending();
     expect(await archives.status(owned.changeID)).toMatchObject({
       latest: { turnID: firstID, state: "failed" },
       lastSaved: null,
     });
     const original = await owned.database
-      .client`SELECT a.id,b.atespace,b.actor_name,b.actor_uid,b.intent FROM factory.runtime_attempt a
-        JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${owned.attemptID}`;
+      .client`SELECT a.id,a.atespace,a.actor_name,a.actor_uid,a.binding_intent AS intent FROM factory.runtime_attempt a
+        WHERE a.id=${owned.attemptID}`;
     fail = false;
     await owned.database
-      .client`UPDATE factory.session_archive SET retry_after=now() WHERE state<>'saved'`;
+      .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{retryAfter}',to_jsonb(now()))
+        WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND state<>'saved'`;
     await archives.savePending();
     const good = await archives.status(owned.changeID);
     expect(good.latest).toMatchObject({ turnID: firstID, state: "saved" });
@@ -103,18 +105,21 @@ test("archive failure is independent of turn/commit settlement and retries retai
     await expect(
       Promise.resolve(
         owned.database
-          .client`UPDATE factory.session_archive SET session_id='different' WHERE turn_id=${firstID}`,
+          .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{sessionId}','"different"'::jsonb)
+            WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${firstID}`,
       ),
     ).rejects.toThrow("immutable");
     await expect(
       Promise.resolve(
-        owned.database.client`DELETE FROM factory.session_archive WHERE turn_id=${firstID}`,
+        owned.database
+          .client`DELETE FROM factory.operation WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${firstID}`,
       ),
     ).rejects.toThrow("immutable");
     fail = true;
     const secondID = await complete("Second owned checkpoint");
     await owned.database
-      .client`UPDATE factory.session_archive SET retry_after=now() WHERE state<>'saved'`;
+      .client`UPDATE factory.operation SET payload=jsonb_set(payload,'{retryAfter}',to_jsonb(now()))
+        WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND state<>'saved'`;
     await archives.savePending();
     expect(await archives.status(owned.changeID)).toMatchObject({
       latest: { turnID: secondID, state: "failed" },
@@ -122,12 +127,13 @@ test("archive failure is independent of turn/commit settlement and retries retai
     });
     expect(
       await owned.database
-        .client`SELECT a.id,b.atespace,b.actor_name,b.actor_uid,b.intent FROM factory.runtime_attempt a
-          JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${owned.attemptID}`,
+        .client`SELECT a.id,a.atespace,a.actor_name,a.actor_uid,a.binding_intent AS intent FROM factory.runtime_attempt a
+          WHERE a.id=${owned.attemptID}`,
     ).toEqual(original);
     const data = await owned.database.client<
       { bytes: number }[]
-    >`SELECT octet_length(summary::text) AS bytes FROM factory.session_archive WHERE turn_id=${firstID}`;
+    >`SELECT octet_length((payload->'summary')::text) AS bytes FROM factory.operation
+      WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${firstID}`;
     expect(data[0]?.bytes).toBeLessThan(16384);
     expect(owned.requests()).toBe(2);
     const status = await owned.controller().get(owned.changeID);
@@ -176,9 +182,8 @@ test("native transcript checkpoint retains pinned recovery references without co
       connection: { ...f.config.connection, tokenFile: "/must-never-archive-editor-credential" },
     };
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},${JSON.stringify({ configuration: { workloadImage: image, provisioner: { tokenFile: "/must-never-archive-owner-credential" } } })}::jsonb)`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(intent)}::jsonb,${actorUID},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace',${JSON.stringify({ configuration: { workloadImage: image, provisioner: { tokenFile: "/must-never-archive-owner-credential" } } })}::jsonb)`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},${JSON.stringify(intent)}::jsonb,${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`INSERT INTO factory.change_agent_turn_intent(turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title,runtime_attempt_id) VALUES(${turn.id},${f.changeID},${sessionID},${promptID},'Owned checkpoint',true,'Owned native archive',${f.attemptID})`;
@@ -247,11 +252,13 @@ test("native transcript checkpoint retains pinned recovery references without co
         sha256: string;
         source: Record<string, unknown>;
       }[]
-    >`SELECT state,manifest_key AS key,manifest_sha256 AS sha256,source_refs AS source FROM factory.session_archive WHERE turn_id=${turn.id}`;
+    >`SELECT state,payload->>'manifestKey' AS key,payload->>'manifestSha256' AS sha256,payload->'sourceRefs' AS source
+      FROM factory.operation WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${turn.id}`;
     expect(saved?.state).toBe("saved");
     if (!saved) throw new Error("Owned native archive missing");
     const [timestamp] = await f.database.client<{ value: string }[]>`
-      SELECT saved_at::text AS value FROM factory.session_archive WHERE turn_id=${turn.id}`;
+      SELECT completed_at::text AS value FROM factory.operation
+      WHERE kind='coding.session_archive' AND scope_type='agent_turn' AND scope_id=${turn.id}`;
     expect((await archives.status(f.changeID)).lastSaved?.savedAt).toBe(timestamp?.value);
     expect(saved.source["runtimeArtifacts"]).toBe(image);
     expect(saved.source["nativeRuntime"]).toEqual({

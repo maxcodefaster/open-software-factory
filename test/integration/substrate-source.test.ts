@@ -1,14 +1,115 @@
 import { expect, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import { SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { objectDigest, type PrivateObjects } from "../../apps/factory/src/storage/objects";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
-import { SubstrateRPCError } from "../../packages/runtime-kubernetes/src/substrate-control";
-import { substrateFixture } from "../fixtures/substrate";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
+import { substrateFixture } from "../fixtures/substrate";
+
+test.each(["SNAPSHOT_FIDELITY_MEMORY", "SNAPSHOT_FIDELITY_ROOTFS"])(
+  "native durable pause retains the sole Actor Source without a writer transfer (%s)",
+  async (fidelity) => {
+    const f = await substrateFixture();
+    let actor: ReturnType<typeof f.actor> | undefined;
+    const effects: string[] = [];
+    const controller = await f.controller(
+      async (method) => {
+        if (method === "GetAtespace") return f.space;
+        if (method === "GetActorTemplate") return f.template;
+        if (method === "GetActor") {
+          if (!actor) throw new SubstrateRPCError("NotFound", "absent");
+          return structuredClone(actor);
+        }
+        effects.push(method);
+        if (method === "CreateActor") {
+          actor = await f.createdActor();
+          return structuredClone(actor);
+        }
+        if (method === "ResumeActor" && actor) {
+          actor.metadata.version = String(Number(actor.metadata.version) + 1);
+          actor.status = {
+            ...actor.status,
+            state: "ACTOR_STATE_RUNNING",
+            ...(actor.status.snapshots?.length ? { lastAssignedGeneration: 1 } : {}),
+            workerAssignment: { sandboxRuntime: f.config.runtime },
+          };
+          return { actor: structuredClone(actor) };
+        }
+        if (method === "SuspendActor" && actor) {
+          const uuid = crypto.randomUUID();
+          actor.metadata.version = String(Number(actor.metadata.version) + 1);
+          actor.status = {
+            state: "ACTOR_STATE_SUSPENDED",
+            lastAssignedGeneration: 1,
+            snapshots: [
+              {
+                uuid,
+                generation: 1,
+                owner: "SNAPSHOT_OWNER_ACTOR",
+                fidelity,
+                actorTemplateUid: f.config.templateUID,
+                sandboxRuntime: f.config.runtime,
+                durableSnapshot: {
+                  state: "SNAPSHOT_STORAGE_STATE_COMPLETED",
+                  object: {
+                    snapshotUri: `s3://owned/prefix/atespaces/${f.atespace}/actors/${actor.metadata.uid}/snapshots/${uuid}`,
+                  },
+                },
+              },
+            ],
+          };
+          return { actor: structuredClone(actor) };
+        }
+        throw new Error(`Unexpected native effect ${method}`);
+      },
+      {
+        async attach(_workspaceID, actorUID, sql) {
+          const [current] = await sql<{ actorUID: string }[]>`
+            SELECT actor_uid AS "actorUID" FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`;
+          if (current) expect(current.actorUID).toBe(actorUID);
+          else await f.admitActorSource(actorUID, sql);
+        },
+        async resume() {},
+        async freezeActor() {
+          throw new Error("ordinary Pause must not freeze/copy Source");
+        },
+        async makeIndependent() {
+          throw new Error("ordinary Pause must not transfer Source");
+        },
+        async requireIndependent() {
+          throw new Error("native Actor remains canonical");
+        },
+      },
+    );
+    try {
+      await controller.start(f.projectID, f.userID);
+      f.hub.sourceConnected = () => true;
+      const before = [
+        ...(await f.database
+          .client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ];
+      await controller.pause(f.attemptID);
+      expect((await controller.get(f.attemptID))?.state).toBe("paused");
+      expect([
+        ...(await f.database
+          .client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ]).toEqual(before);
+      await controller.start(f.projectID, f.userID);
+      expect([
+        ...(await f.database
+          .client`SELECT * FROM factory.substrate_source WHERE workspace_id=${f.workspaceID}`),
+      ]).toEqual(before);
+      expect(effects).toEqual(["CreateActor", "ResumeActor", "SuspendActor", "ResumeActor"]);
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test("final Stop hands off a confirmed Source export without ROOTFS and cannot reopen execution", async () => {
   const f = await substrateFixture();
@@ -59,9 +160,30 @@ test("final Stop hands off a confirmed Source export without ROOTFS and cannot r
     const uid = actor?.metadata.uid;
     if (!uid) throw new Error("Original native Actor is missing");
     f.hub.sourceConnected = () => true;
-    f.hub.parentOperation = async () => ({});
-    f.hub.request = async (_id, _channel, _request, path) =>
-      path.endsWith("/checkpoint") ? Response.json(bundle) : new Response(bytes);
+    const writerDrains: string[] = [];
+    let denyWorkDrain = true;
+    f.hub.childOperation = async (_id, operation) => {
+      expect(operation["action"]).toBe("source-drain");
+      if (denyWorkDrain) throw new Error("owned Work writer barrier unavailable");
+      writerDrains.push("work");
+    };
+    f.hub.parentOperation = async (_id, operation) => {
+      expect(operation.action).toBe("source-drain");
+      expect(operation["data"]).toBe(operation.operationId);
+      expect(writerDrains.at(-1)).toBe("work");
+      writerDrains.push("control");
+      return {};
+    };
+    f.hub.request = async (_id, _channel, _request, path) => {
+      expect(writerDrains.slice(-2)).toEqual(["work", "control"]);
+      return path.endsWith("/checkpoint") ? Response.json(bundle) : new Response(bytes);
+    };
+    await expect(source.freezeActor(f.workspaceID, f.attemptID, f.database.client)).rejects.toThrow(
+      "owned Work writer barrier unavailable",
+    );
+    expect(writerDrains).toEqual([]);
+    expect(effects).toEqual(["CreateActor", "ResumeActor"]);
+    denyWorkDrain = false;
     await source.freezeActor(f.workspaceID, f.attemptID, f.database.client);
     const transfer = async () =>
       await f.database.client`UPDATE factory.substrate_source
@@ -90,7 +212,7 @@ test("final Stop hands off a confirmed Source export without ROOTFS and cannot r
       generation: 1,
     });
     const [saved] = await f.database
-      .client`SELECT checkpoint FROM factory.substrate_binding WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(saved?.["checkpoint"]).toBeNull();
     expect(effects).toEqual(["CreateActor", "ResumeActor"]);
     await expect(
@@ -127,9 +249,8 @@ test("native Ticket Source uses the Change writer fence, not storage ownership, 
   let held = false;
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.change_writer SET state='human',epoch=42,user_id=${f.userID} WHERE change_id=${f.changeID}`;
@@ -217,9 +338,8 @@ test("native editor metadata queues brief contention under the existing exclusiv
     });
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
     });
     await f.admitActorSource(actorUID);
@@ -313,8 +433,15 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     },
   };
   f.hub.parentOperation = async (_id, operation) => {
+    expect(operation["data"]).toBe(operation.operationId);
+    expect(workDrained.at(-1)).toBe(operation.operationId);
     drained.push(operation.operationId);
     return {};
+  };
+  const workDrained: string[] = [];
+  f.hub.childOperation = async (_id, operation) => {
+    expect(operation["action"]).toBe("source-drain");
+    workDrained.push(operation["operationId"] ?? "");
   };
   f.hub.sourceConnected = () => true;
   f.hub.request = async (_attempt, channel, request, path) => {
@@ -422,7 +549,7 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
     await f.database
-      .client`UPDATE factory.substrate_binding SET checkpoint=${JSON.stringify({ actorUID: uid, fidelity: "SNAPSHOT_FIDELITY_ROOTFS", generation: 1, durableSnapshot: { state: "SNAPSHOT_STORAGE_STATE_COMPLETED" } })}::text::jsonb,observation=${JSON.stringify({ status: { state: "ACTOR_STATE_SUSPENDED", lastAssignedGeneration: 1 } })}::text::jsonb WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`UPDATE factory.runtime_attempt SET checkpoint=${JSON.stringify({ actorUID: uid, fidelity: "SNAPSHOT_FIDELITY_ROOTFS", generation: 1, durableSnapshot: { state: "SNAPSHOT_STORAGE_STATE_COMPLETED" } })}::text::jsonb,observation=${JSON.stringify({ status: { state: "ACTOR_STATE_SUSPENDED", lastAssignedGeneration: 1 } })}::text::jsonb WHERE id=${f.attemptID}`;
     await move();
     const suspended = actor as ReturnType<typeof f.actor> | null;
     if (!suspended) throw new Error("Owned Actor observation missing");
@@ -443,7 +570,7 @@ test("Source lease/confirmed generation survives lost upload reply, rejects stal
     };
     suspended.metadata.version = "3";
     await f.database
-      .client`UPDATE factory.substrate_binding SET checkpoint=${JSON.stringify({ actorUID: uid, templateUID: f.config.templateUID, ...snapshot })}::text::jsonb,observation=${JSON.stringify(suspended)}::text::jsonb WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`UPDATE factory.runtime_attempt SET checkpoint=${JSON.stringify({ actorUID: uid, templateUID: f.config.templateUID, ...snapshot })}::text::jsonb,observation=${JSON.stringify(suspended)}::text::jsonb WHERE id=${f.attemptID}`;
     const pausedView = await controller.get(f.attemptID);
     expect(pausedView?.native).toMatchObject({
       sourceHandoff: "confirmed-same-node",
@@ -564,9 +691,8 @@ test("native Ticket Source forwards Change writer epochs and handoff fences, nev
   const lifecycle = f.database.coordination();
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.substrate_workspace(workspace_id,intent) VALUES(${f.workspaceID},'{}')`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${uid},now())`;
+      await sql`INSERT INTO factory.substrate_provision(owner_id,kind,intent) VALUES(${f.workspaceID},'workspace','{}')`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at) VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${uid},now())`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change_writer SET state='human',epoch=42,user_id=${f.userID} WHERE change_id=${f.changeID}`;

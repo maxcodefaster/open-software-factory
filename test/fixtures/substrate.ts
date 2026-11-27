@@ -1,4 +1,13 @@
 import { createHash } from "node:crypto";
+import { createDatabase, type DatabaseTransaction } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
+import { personalWorkspaceIdentity, ticketWorkspaceIdentity } from "#workspace-domain/workspace";
 import { createCodingRuntimeShutdown } from "../../apps/factory/src/agent/runtime-shutdown";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
@@ -10,18 +19,6 @@ import {
 } from "../../apps/factory/src/runtime/substrate";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
-import { createDatabase } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import {
-  personalWorkspaceIdentity,
-  ticketWorkspaceIdentity,
-} from "../../packages/workspace-domain/src/workspace";
 import { ownedPostgresServer, ownedTestDatabase } from "./postgres-server";
 
 export const fixtureRuntime: SubstrateConfiguration["runtime"] = {
@@ -37,6 +34,7 @@ export const fixtureRuntime: SubstrateConfiguration["runtime"] = {
 export async function substrateFixture(
   sourceRevision = "a".repeat(40),
   kind: "personal" | "ticket" = "personal",
+  appPort = 4300,
 ) {
   const inherited = process.env["FACTORY_TEST_POSTGRES"];
   const server = inherited ? undefined : await ownedPostgresServer();
@@ -66,7 +64,7 @@ export async function substrateFixture(
     name = `runtime-${attemptID.replaceAll("-", "")}`;
   await database.client.begin(async (sql) => {
     await sql`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${userID},'Native fixture',${`${userID}@factory.local`},true)`;
-    await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`native-${projectID}`},'Native fixture','https://example.invalid/fixture.git','main','.devcontainer/devcontainer.json',${userID})`;
+    await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectID},${`native-${projectID}`},'Native fixture','https://example.invalid/fixture.git','main','.factory/actor-template.json',${userID})`;
     await sql`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${userID},'developer',${userID})`;
     if (kind === "ticket") {
       // Controlled controller-test data only, never a human approval or live acceptance receipt.
@@ -81,7 +79,18 @@ export async function substrateFixture(
       await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${content},${createHash("sha256").update(content).digest("hex")},${userID})`;
       await sql`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${branch},${sourceRevision},'active',${userID})`;
-      await sql`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES(${crypto.randomUUID()},${changeID},'owned','native-ticket',${branch},${sourceRevision},${`native-fixture:${changeID}`},'succeeded',${sourceRevision},now())`;
+      await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at) VALUES(${crypto.randomUUID()},'delivery.branch_create','change',${changeID},${`delivery.branch_create:change:${changeID}:create-branch`},NULL,'succeeded',${JSON.stringify(
+        {
+          changeId: changeID,
+          repositoryOwner: "owned",
+          repositoryName: "native-ticket",
+          branchName: branch,
+          startSha: sourceRevision,
+          attemptCount: 1,
+          leaseGeneration: 1,
+          reconcileAfter: null,
+        },
+      )}::jsonb,${JSON.stringify({ observedHeadSha: sourceRevision })}::jsonb,${userID},now())`;
     }
     await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${workspaceID},${projectID},${kind},${kind === "personal" ? userID : null},${kind === "ticket" ? ticketID : null},${kind === "ticket" ? changeID : null},${branch},${sourceRevision},${userID})`;
   });
@@ -176,7 +185,10 @@ export async function substrateFixture(
     hub,
     // Controlled already-granted Source, not bootstrap/native acceptance.
     // Real cold starts use the independent seed and authenticated v2 commit.
-    async admitActorSource(actorUID: string, sql = database.client) {
+    async admitActorSource(
+      actorUID: string,
+      sql: DatabaseTransaction | typeof database.client = database.client,
+    ) {
       await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
         VALUES(${workspaceID},${actorUID})`;
     },
@@ -225,7 +237,7 @@ export async function substrateFixture(
         revision: sourceRevision,
         repositoryURL: "https://example.invalid/fixture.git",
         branch,
-        devcontainerPath: ".devcontainer/devcontainer.json",
+        actorTemplatePath: ".factory/actor-template.json",
         templateSHA256: config.templateSHA256,
         environment: config.environment ?? { version: 0, secretKey: null },
         systemContract: {
@@ -236,20 +248,23 @@ export async function substrateFixture(
               id: "web",
               label: "Owned",
               command: ["node", "server.mjs"],
-              port: 4300,
+              port: appPort,
               healthPath: "/",
             },
           ],
         },
       };
       // Real provisioning retains metadata only, never credential-bearing bootstrap env.
-      await database.client`INSERT INTO factory.substrate_workspace(
-        workspace_id,intent,atespace_attempted_at,atespace,
-        policy_attempted_at,policy,template_attempted_at,template)
-        VALUES(${workspaceID},${JSON.stringify(intent)}::text::jsonb,
-          ${space.metadata.createTime},${JSON.stringify(space)}::text::jsonb,
-          ${policy.metadata.createTime},${JSON.stringify(policy)}::text::jsonb,
-          ${template.metadata.createTime},${JSON.stringify({ metadata: template.metadata })}::text::jsonb)`;
+      await database.client`INSERT INTO factory.substrate_provision(owner_id,kind,intent,resources)
+        VALUES(${workspaceID},'workspace',${JSON.stringify(intent)}::text::jsonb,
+          ${JSON.stringify({
+            atespace: { attemptedAt: space.metadata.createTime, value: space },
+            policy: { attemptedAt: policy.metadata.createTime, value: policy },
+            template: {
+              attemptedAt: template.metadata.createTime,
+              value: { metadata: template.metadata },
+            },
+          })}::text::jsonb)`;
       const withEgress: SubstrateCall = async (method, request) => {
         if (method === "GetAtespaceAccessPolicy") return structuredClone(policy);
         if (method === "GetActorEgressPolicy")

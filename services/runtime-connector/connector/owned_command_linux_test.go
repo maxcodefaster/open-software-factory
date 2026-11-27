@@ -3,13 +3,14 @@
 package connector
 
 import (
-	"context"
 	"os"
 	"testing"
+
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/gitops"
 )
 
 func TestOwnedNativeGitRetainsProcessGroupAndDevelopmentUser(t *testing.T) {
-	ctx := context.WithValue(t.Context(), nativeCommitGitKey{}, true)
+	ctx := gitops.WithNativeCommitGit(t.Context(), true)
 	command := workspaceGitCommand(ctx, "/workspace/project", "status")
 	if command.SysProcAttr == nil || !command.SysProcAttr.Setpgid || command.Cancel == nil || command.WaitDelay == 0 {
 		t.Fatal("native Source Git lost assigned-process cancellation or bounded pipe ownership")

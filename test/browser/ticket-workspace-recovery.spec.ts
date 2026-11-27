@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -20,8 +20,8 @@ test.beforeEach(async ({ page }) => {
   database = createDatabase(2);
   projectID = crypto.randomUUID();
   slug = `ticket-recovery-${projectID.slice(0, 8)}`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${projectID},${slug},'Ticket recovery','https://example.invalid/recovery.git','main','.devcontainer/devcontainer.json',${userID})`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES(${projectID},${slug},'Ticket recovery','https://example.invalid/recovery.git','main','.factory/actor-template.json',${userID})`;
   await mockFactoryFunctions(page, {
     workspaces: {
       ensurePersonalSource: async () => {

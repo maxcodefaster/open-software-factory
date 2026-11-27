@@ -1,4 +1,4 @@
-import type { DeveloperIDEIdentity } from "../../workspace-domain/src/developer-ide";
+import type { DeveloperIDEIdentity } from "#workspace-domain/developer-ide";
 import { runtimeNodeSelector } from "./config";
 
 export interface DeveloperIDEResources {

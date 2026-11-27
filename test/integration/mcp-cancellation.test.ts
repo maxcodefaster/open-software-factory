@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
-import type { MCPAssignment } from "../../packages/conversation-domain/src/mcp-library";
 import { factoryProcess } from "../fixtures/factory-process";
 
 for (const phase of ["initialize", "tools/list", "tools/call"] as const) {
@@ -61,9 +61,9 @@ for (const phase of ["initialize", "tools/list", "tools/call"] as const) {
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${userId},'Owned cancellation manager',${`${userId}@cancellation.test`},true)`;
       await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userId})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectId},${`owned-cancellation-${projectId}`},'Owned cancellation Project',
-          'https://forge.example/owned/cancellation.git','main','.devcontainer/devcontainer.json',${userId})`;
+          'https://forge.example/owned/cancellation.git','main','.factory/actor-template.json',${userId})`;
       await connections.library.save(
         {
           libraryId: id,

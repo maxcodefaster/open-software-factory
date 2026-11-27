@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { nativeRuntimeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import { substrateRepositoryCloneURL } from "../../apps/factory/src/runtime/endpoints";
 import { substrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { nativeRuntimeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
+import { nativeStarterImages } from "../../apps/factory/src/setup/starter";
 import { type RuntimeArtifacts, runtimeImageReference } from "./artifacts";
 
 /** Validate the concrete native installation before changing installation resources. */
@@ -56,4 +57,18 @@ export function requireNativeBrowserImage(environment: Record<string, string | u
   if (registry.port || isIP(registry.hostname) || !registry.hostname.includes("."))
     throw new Error("Native browser tools require a TLS registry DNS name on port 443");
   return image;
+}
+
+export function requireNativeStarterImages(
+  environment: Record<string, string | undefined> = process.env,
+) {
+  const configuration = requireNativeInstallation(environment);
+  const raw = environment["FACTORY_STARTER_IMAGES"];
+  let catalog: unknown;
+  try {
+    catalog = raw ? JSON.parse(raw) : undefined;
+  } catch {
+    throw new Error("FACTORY_STARTER_IMAGES must contain the published native image catalog");
+  }
+  return nativeStarterImages(`linux/${nativeRuntimeArchitecture(configuration.runtime)}`, catalog);
 }

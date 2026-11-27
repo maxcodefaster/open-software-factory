@@ -5,74 +5,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-func TestStopIsReadWhileAGitOperationIsInFlight(t *testing.T) {
-	assignment := validAssignment()
-	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
-	statuses := make(chan Message, 4)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		connection, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
+func TestParentControlRejectsObsoleteBrowserExecution(t *testing.T) {
+	for _, action := range []string{
+		"browser-call", "browser-renew", "browser-close",
+		"browser-recording-start", "browser-recording-finish", "browser-recording-chunk",
+	} {
+		message := Message{Type: "operation-request", OperationID: "retired-browser-request", Action: action}
+		response := handleParentOperation(context.Background(), validAssignment(), message)
+		if response.Type != "operation-response" || response.OperationID != message.OperationID ||
+			response.Action != action || response.Error != "unsupported parent operation" || response.Data != "" {
+			t.Fatalf("Parent retained an obsolete browser execution route: %+v", response)
 		}
-		defer connection.Close()
-		if connection.WriteJSON(Message{Type: "operation-request", OperationID: "slow", Action: "git-push"}) != nil {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-		if connection.WriteJSON(Message{Type: "stop"}) != nil {
-			return
-		}
-		for {
-			var message Message
-			if connection.ReadJSON(&message) != nil {
-				return
-			}
-			statuses <- message
-		}
-	}))
-	defer server.Close()
-	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	control, err := dialControl(ctx, assignment, "parent", "owned-test-capability")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.close()
-	var started, cancelled atomic.Bool
-	handle := func(operationContext context.Context, message Message) Message {
-		started.Store(true)
-		<-operationContext.Done()
-		cancelled.Store(true)
-		return Message{Type: "operation-response", OperationID: message.OperationID, Error: "cancelled"}
-	}
-	done := make(chan error, 1)
-	go func() { done <- serveParentControl(ctx, assignment, "owned-test-capability", &control, nil, handle) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Stop was not read while the Git operation was running")
-	}
-	if !started.Load() || !cancelled.Load() {
-		t.Fatalf("Stop did not cancel the in-flight operation (started=%v cancelled=%v)", started.Load(), cancelled.Load())
-	}
-	select {
-	case message := <-statuses:
-		if message.Type != "status" || message.Phase != "stopping" {
-			t.Fatalf("unexpected acknowledgement: %#v", message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Stop was not acknowledged")
 	}
 }
 
@@ -107,7 +56,7 @@ func TestParentOperationsRunInOrderAndReportAFullQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer control.close()
+	defer control.Close()
 	if !operations.submit(control, Message{OperationID: "first"}) {
 		t.Fatal("first operation was refused")
 	}
@@ -153,11 +102,11 @@ func TestControlReadDeadlineDetectsHalfOpenSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer control.close()
-	control.armReadDeadline(200 * time.Millisecond)
+	defer control.Close()
+	control.ArmReadDeadline(200 * time.Millisecond)
 	started := time.Now()
 	var message Message
-	if err := control.read(&message); err == nil {
+	if err := control.Read(&message); err == nil {
 		t.Fatal("a silent peer was never detected")
 	}
 	if time.Since(started) > 3*time.Second {
@@ -195,10 +144,10 @@ func TestControlPingsKeepAnIdleSocketAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer control.close()
-	control.armReadDeadline(300 * time.Millisecond)
+	defer control.Close()
+	control.ArmReadDeadline(300 * time.Millisecond)
 	var message Message
-	if err := control.read(&message); err != nil || message.Type != "stop" {
+	if err := control.Read(&message); err != nil || message.Type != "stop" {
 		t.Fatalf("heartbeat did not keep an idle socket alive for 800ms with a 300ms deadline: %v, %#v", err, message)
 	}
 }
@@ -207,7 +156,7 @@ func TestReconnectBackoffGrowsWithJitterAndResets(t *testing.T) {
 	var backoff reconnectBackoff
 	floor := controlReconnectMin
 	for attempt := 0; attempt < 12; attempt++ {
-		delay := backoff.next()
+		delay := backoff.Next()
 		if delay < floor || delay > floor+floor/2 {
 			t.Fatalf("attempt %d waited %v; expected %v plus up to 50%% jitter", attempt, delay, floor)
 		}
@@ -216,14 +165,14 @@ func TestReconnectBackoffGrowsWithJitterAndResets(t *testing.T) {
 	if floor != controlReconnectMax {
 		t.Fatal("backoff never reached its cap")
 	}
-	backoff.reset()
-	if delay := backoff.next(); delay > controlReconnectMin+controlReconnectMin/2 {
+	backoff.Reset()
+	if delay := backoff.Next(); delay > controlReconnectMin+controlReconnectMin/2 {
 		t.Fatalf("reset did not restart backoff: %v", delay)
 	}
 	seen := map[time.Duration]bool{}
 	for range 20 {
 		var fresh reconnectBackoff
-		seen[fresh.next()] = true
+		seen[fresh.Next()] = true
 	}
 	if len(seen) < 2 {
 		t.Fatal("reconnect delays have no jitter")

@@ -1,8 +1,9 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { pageSiblings } from "../../../../packages/knowledge-domain/src/page-tree";
+import { pageSiblings } from "#knowledge-domain/page-tree";
 import { plainErrorMessage } from "../command-error";
 import { Icon } from "../icon";
-import { type KnowledgePageOutline, type RepositoryDocument } from "./contracts";
+import type { KnowledgePageOutline, RepositoryDocument } from "./contracts";
+import { defaultExpandedKeys } from "./page-tree-state";
 
 export type PageMove = { pageId: string; parentId: string | null; beforeId: string | null };
 type Folder = { path: string; name: string; folders: Folder[]; documents: RepositoryDocument[] };
@@ -48,6 +49,8 @@ export function KnowledgeTree(props: {
   onMove(move: PageMove): Promise<void>;
 }) {
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(["wiki"]));
+  let hasStoredExpansion = false;
+  let initializedProjectID: string | undefined;
   const [documentsLoading, setDocumentsLoading] = createSignal(false);
   const [documentsError, setDocumentsError] = createSignal("");
   createEffect(
@@ -88,18 +91,34 @@ export function KnowledgeTree(props: {
   createEffect(
     () => props.projectID,
     (id) => {
-      let keys = ["wiki"];
+      let storedKeys: string[] | undefined;
       try {
         const stored: unknown = JSON.parse(localStorage.getItem(`wiki-tree:${id}`) ?? "null");
-        if (Array.isArray(stored) && stored.every((key) => typeof key === "string")) keys = stored;
+        if (Array.isArray(stored) && stored.every((key) => typeof key === "string"))
+          storedKeys = stored;
       } catch {
         /* Browser storage is optional. */
       }
-      setExpanded(new Set(keys));
+      hasStoredExpansion = storedKeys !== undefined;
+      initializedProjectID = hasStoredExpansion ? id : undefined;
+      setExpanded(new Set(storedKeys ?? ["wiki"]));
+    },
+  );
+  createEffect(
+    () => ({ id: props.projectID, pages: props.pages }),
+    ({ id, pages }) => {
+      if (hasStoredExpansion || initializedProjectID === id || pages.length === 0) return;
+      initializedProjectID = id;
+      const defaults = defaultExpandedKeys(pages);
+      if (defaults.length > 1) {
+        setExpanded((current) => new Set([...current, ...defaults]));
+      }
     },
   );
   const isExpanded = (key: string) => props.search || expanded().has(key);
   function toggle(key: string) {
+    hasStoredExpansion = true;
+    initializedProjectID = props.projectID;
     const keys = new Set(expanded());
     if (keys.has(key)) keys.delete(key);
     else keys.add(key);

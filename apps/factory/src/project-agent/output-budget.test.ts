@@ -90,6 +90,12 @@ test.each([{ providerTruncates: false }, { providerTruncates: true }])(
       expect(requests).toHaveLength(1);
       expect(requests[0]).not.toHaveProperty("max_output_tokens");
       expect(requests[0]?.["store"]).toBe(false);
+      const instructions = JSON.stringify(requests[0]);
+      expect(instructions).toContain("native ActorTemplate");
+      expect(instructions).toContain("frozenProject.project.actorTemplatePath");
+      expect(instructions).toContain(".factory/actor-template.json");
+      expect(instructions).toContain(".factory/system.json");
+      expect(instructions).not.toMatch(/dev.?container|compose/i);
     } finally {
       await provider.stop(true);
     }

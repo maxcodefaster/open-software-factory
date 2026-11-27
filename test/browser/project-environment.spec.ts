@@ -1,14 +1,14 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import {
   type EnvironmentBundle,
   type EnvironmentSettingsView,
   environmentMetadata,
   environmentWrite,
   replaceEnvironment,
-} from "../../packages/project-domain/src/environment";
+} from "#project-domain/environment";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
@@ -25,9 +25,9 @@ test.beforeEach(async () => {
   if (!actor) throw new Error("Owned Environment fixture administrator is unavailable");
   fixtureProjectID = crypto.randomUUID();
   fixtureSlug = `environment-proof-${fixtureProjectID.slice(0, 8)}`;
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
     VALUES(${fixtureProjectID},${fixtureSlug},'Environment transport proof',
-      'https://example.invalid/owned-environment.git','main','.devcontainer/devcontainer.json',${actor.id})`;
+      'https://example.invalid/owned-environment.git','main','.factory/actor-template.json',${actor.id})`;
 });
 test.afterEach(async ({ page }) => {
   await page.close();
@@ -62,14 +62,13 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
   });
   function view(environment: "development" | "main-preview"): EnvironmentSettingsView {
     return {
-      ...environmentMetadata(bundles.get(environment) ?? { variables: [], registries: [] }),
+      ...environmentMetadata(bundles.get(environment) ?? { variables: [] }),
       environment,
       version: versions.get(environment) ?? 0,
       canManage: true,
       storeConfigured: true,
       pending: false,
       pendingCommandID: null,
-      preparation: null,
     };
   }
   await mockFactoryFunctions(page, {
@@ -85,7 +84,7 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
           environment,
           replaceEnvironment(
             environmentWrite.parse(input),
-            bundles.get(environment) ?? { variables: [], registries: [] },
+            bundles.get(environment) ?? { variables: [] },
           ),
         );
         versions.set(environment, input.version + 1);
@@ -107,7 +106,19 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
   const settings = page.getByRole("region", { name: "Settings", exact: true });
   await settings.getByRole("button", { name: "Environments", exact: true }).click();
   const area = settings.getByRole("region", { name: "Project environment" });
+  await expect(
+    area.getByRole("button", { name: "Add credentials", includeHidden: true }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("region", { name: "Private container images", includeHidden: true }),
+  ).toHaveCount(0);
   await area.getByRole("button", { name: "Add variable", exact: true }).click();
+  await expect(
+    area.getByRole("checkbox", { name: "Image build", exact: true, includeHidden: true }),
+  ).toHaveCount(0);
+  await expect(
+    area.getByRole("group", { name: "Available to", exact: true }).getByRole("checkbox"),
+  ).toHaveCount(2);
   const name = area.getByRole("textbox", { name: "Variable 1 name" });
   await name.pressSequentially("API_KEY");
   await expect(name).toHaveValue("API_KEY");
@@ -118,7 +129,7 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
   await area.getByRole("button", { name: "Save environment", exact: true }).click();
   await expect(value).toHaveCount(0);
   await expect(
-    area.getByText("Saved. New starts use these settings; restart existing compute to apply."),
+    area.getByText("Saved. Restart existing compute to apply runtime variable changes."),
   ).toBeVisible();
   expect(lastSaved).toBe("development");
   await area.getByRole("button", { name: "Import .env", exact: true }).click();
@@ -135,6 +146,9 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
   );
   expect(bundles.get("development")?.variables[1]?.value).toBe("first\nsecond");
   await area.getByRole("button", { name: "Main-Preview", exact: true }).click();
+  await expect(
+    area.getByRole("region", { name: "Private container images", includeHidden: true }),
+  ).toHaveCount(0);
   await expect(area.getByRole("textbox", { name: "Variable 1 name" })).toHaveCount(0);
   await area.getByRole("button", { name: "Development", exact: true }).click();
   await expect(area.getByRole("article", { name: "API_KEY", exact: true })).toBeVisible();

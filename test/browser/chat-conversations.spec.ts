@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { conversationViewSchema } from "../../apps/factory/src/project-agent/contracts";
-import { createDatabase } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -74,8 +74,8 @@ test("saved chat stays tidy across screen sizes, long Markdown and a growing dra
   });
   try {
     await database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${slug},'Factory workspace','https://example.invalid/chat-layout.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${slug},'Factory workspace','https://example.invalid/chat-layout.git','main','.factory/actor-template.json',${session.user.id})`;
       await sql`INSERT INTO factory.ticket_conversation(id,project_id,mode,created_by)
         VALUES(${conversationID},${projectID},'plan',${session.user.id})`;
       for (const [index, message] of messages.entries())
@@ -277,8 +277,8 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     },
   });
   try {
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Skill refresh proof','https://example.invalid/owned-skill-refresh.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Skill refresh proof','https://example.invalid/owned-skill-refresh.git','main','.factory/actor-template.json',${session.user.id})`;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
@@ -384,8 +384,8 @@ test("saved conversation says it is loading instead of offering an empty chat", 
     },
   });
   try {
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Chat loading proof','https://example.invalid/chat-loading.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Chat loading proof','https://example.invalid/chat-loading.git','main','.factory/actor-template.json',${session.user.id})`;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
@@ -439,8 +439,8 @@ test("personal conversation history keeps drafts scoped through selection and re
     },
   });
   try {
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${slug},'Conversation draft proof','https://example.invalid/owned-chat.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${slug},'Conversation draft proof','https://example.invalid/owned-chat.git','main','.factory/actor-template.json',${session.user.id})`;
     const select = async () => {
       await openProjectMenu(page);
       await page.getByRole("button").filter({ hasText: slug }).click();
@@ -586,8 +586,8 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
       nonGoals: [],
     });
     await database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${slug},'Shared conversation proof','https://example.invalid/owned-chat.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${slug},'Shared conversation proof','https://example.invalid/owned-chat.git','main','.factory/actor-template.json',${session.user.id})`;
       await sql`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${ben},'Ben',${`${ben}@factory.local`},true)`;
       await sql`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${ben},'developer',${session.user.id})`;
       await sql`INSERT INTO factory.ticket(id,project_id,title,state,created_by) VALUES(${ticketID},${projectID},'Retained shared Coding','in-progress',${session.user.id})`;
@@ -597,10 +597,20 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
         VALUES(${approvalID},${ticketID},${revisionID},${session.user.id})`;
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by)
         VALUES(${changeID},${projectID},${ticketID},${approvalID},${`factory/change-${suffix}`},${"a".repeat(40)},'active',${session.user.id})`;
-      await sql`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,
-        idempotency_key,state,observed_head_sha,completed_at)
-        VALUES(${crypto.randomUUID()},${changeID},'owned-process-fixture',${slug},${`factory/change-${suffix}`},
-          ${"a".repeat(40)},${changeID},'succeeded',${"a".repeat(40)},now())`;
+      await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at)
+        VALUES(${crypto.randomUUID()},'delivery.branch_create','change',${changeID},
+          ${`delivery.branch_create:change:${changeID}:create-branch`},NULL,'succeeded',
+          ${JSON.stringify({
+            changeId: changeID,
+            repositoryOwner: "owned-process-fixture",
+            repositoryName: slug,
+            branchName: `factory/change-${suffix}`,
+            startSha: "a".repeat(40),
+            attemptCount: 1,
+            leaseGeneration: 1,
+            reconcileAfter: null,
+          })}::jsonb,
+          ${JSON.stringify({ observedHeadSha: "a".repeat(40) })}::jsonb,${session.user.id},now())`;
       await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
         VALUES(${workspaceID},${projectID},'ticket',${ticketID},${changeID},${`factory/change-${suffix}`},${"a".repeat(40)},${session.user.id})`;
       await sql`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
@@ -616,7 +626,7 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
       state: "stopped",
     });
     await database.client.begin(async (sql) => {
-      await sql`UPDATE factory.runtime_attempt SET stop_intended_at=now(),stopped_at=now()
+      await sql`UPDATE factory.runtime_attempt SET stop_intended_at=now()
         WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${attemptID} WHERE id=${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)

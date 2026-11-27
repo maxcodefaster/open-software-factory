@@ -351,6 +351,9 @@ func TestSubstrateSourceRestoreCommitRejectsAuthorityAndMalformedACK(t *testing.
 		{http.StatusOK, strings.Replace(ack, `"readOnly":false`, `"readOnly":null`, 1)},
 		{http.StatusOK, strings.Replace(ack, `"readOnly":false`, `"readOnly":"false"`, 1)},
 		{http.StatusOK, strings.Replace(ack, "}", `,"grant":true}`, 1)},
+		{http.StatusOK, strings.Replace(ack, "}", `,"preservedTreeSHA256":"`+strings.Repeat("a", 64)+`"}`, 1)},
+		{http.StatusOK, strings.Replace(ack, "}", `,"preservedTreeSHA256":""}`, 1)},
+		{http.StatusOK, strings.Replace(ack, "}", `,"preservedTreeSHA256":null}`, 1)},
 	} {
 		t.Run(http.StatusText(response.status)+response.body[:min(len(response.body), 8)], func(t *testing.T) {
 			var calls atomic.Int32
@@ -414,6 +417,14 @@ func TestSubstrateSourceRestoreV2PublicationRequiresCommitACK(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "saved"), []byte("canonical source"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	templateContent := []byte("{\"containers\":[]}\n")
+	if err := os.Mkdir(filepath.Join(project, ".factory"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".factory/actor-template.json"), templateContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+	templateDigest := sha256.Sum256(templateContent)
 	if err := filepath.WalkDir(project, func(path string, _ os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -457,6 +468,9 @@ func TestSubstrateSourceRestoreV2PublicationRequiresCommitACK(t *testing.T) {
 		{"invalid-role-epoch", 2, 1, false}, {"input-stop-writable", 2, 1, false},
 		{"role-drift-reget", 2, 1, true}, {"invalid-final-role-epoch", 2, 0, false},
 		{"input-stop-final-writable", 2, 0, false}, {"input-stop-lease-changed", 2, 0, false},
+		{"native-template-match", 2, 1, true}, {"native-template-mismatch", 1, 0, false},
+		{"native-template-missing", 1, 0, false}, {"same-actor-template-edited", 2, 1, true},
+		{"ack-before-marker-failure", 2, 1, false},
 	} {
 		t.Run(check.outcome, func(t *testing.T) {
 			outcome := check.outcome
@@ -478,6 +492,21 @@ func TestSubstrateSourceRestoreV2PublicationRequiresCommitACK(t *testing.T) {
 				b.Source.ProjectID = "foreign-project"
 			}
 			b.Assignment.RuntimeAttemptID, b.Assignment.Generation = "owned-attempt", 2
+			if strings.HasPrefix(outcome, "native-template-") || outcome == "same-actor-template-edited" {
+				b.Assignment.ActorTemplatePath = ".factory/actor-template.json"
+				b.ProjectTemplate = &nativeProjectTemplate{Path: b.Assignment.ActorTemplatePath, SHA256: hex.EncodeToString(templateDigest[:])}
+				if outcome == "native-template-missing" {
+					b.Assignment.ActorTemplatePath = ".factory/missing.json"
+					b.ProjectTemplate.Path = b.Assignment.ActorTemplatePath
+				}
+				if outcome == "native-template-mismatch" || outcome == "same-actor-template-edited" {
+					b.ProjectTemplate.SHA256 = strings.Repeat("f", 64)
+				}
+				if outcome == "same-actor-template-edited" {
+					reply.Checkpoint.ActorUID, reply.CheckpointActorUID = reply.ActorUID, reply.ActorUID
+					reply.Checkpoint.SeedID, reply.CheckpointSeedID = nil, nil
+				}
+			}
 			if outcome == "role-drift-writable" {
 				reply.ReadOnly = true
 			}
@@ -572,9 +601,30 @@ func TestSubstrateSourceRestoreV2PublicationRequiresCommitACK(t *testing.T) {
 				if canonical, err := os.ReadFile(filepath.Join(b.Assignment.WorkspaceFolder, "saved")); err != nil || string(canonical) != "canonical source" {
 					t.Error("commit preceded canonical Source publication")
 				}
+				if reply.InputStop == nil {
+					// This must be durable BEFORE a commit can take effect. An
+					// ACK followed by process death cannot rely on the role marker.
+					data, err := os.ReadFile(filepath.Join(b.Assignment.ConnectorStateDir, "source-imported.json"))
+					var imported map[string]any
+					if err != nil || json.Unmarshal(data, &imported) != nil ||
+						imported["version"] != float64(1) || imported["actorUID"] != reply.ActorUID ||
+						imported["workspaceID"] != b.Source.WorkspaceID || imported["projectID"] != b.Source.ProjectID ||
+						imported["attemptID"] != b.Assignment.RuntimeAttemptID || imported["generation"] != float64(2) ||
+						imported["writerEpoch"] != float64(reply.WriterEpoch) || imported["checkpointID"] != reply.Checkpoint.ID {
+						t.Error("Source commit preceded its private durable publication identity")
+					}
+				}
 				count := commits.Add(1)
 				ack := sourceRestoreCommitTestACK(reply)
 				switch outcome {
+				case "ack-before-marker-failure":
+					// Make only final role publication fail after a valid ACK.
+					if err := os.Mkdir(marker, 0700); err != nil {
+						t.Error(err)
+					}
+					json.NewEncoder(w).Encode(ack)
+				case "native-template-match", "same-actor-template-edited":
+					json.NewEncoder(w).Encode(ack)
 				case "rejected":
 					w.WriteHeader(http.StatusForbidden)
 				case "revoked":
@@ -661,8 +711,44 @@ func TestSubstrateSourceRestoreV2PublicationRequiresCommitACK(t *testing.T) {
 				if err != nil || restored.WriterEpoch != 2 || restored.ChangeWriterEpoch != epoch || restored.ReadOnly != readOnly {
 					t.Fatalf("exact ACK did not publish its marker: %+v %v", restored, err)
 				}
-			} else if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			} else if _, err := os.Stat(marker); outcome != "ack-before-marker-failure" && !os.IsNotExist(err) {
 				t.Fatal("rejected/uncertain commit published an execution marker")
+			}
+			if outcome == "ack-before-marker-failure" {
+				if _, err := readNativeRestored(b, reply.ActorUID); err == nil {
+					t.Fatal("failed final marker publication admitted Work")
+				}
+				if err := os.Remove(marker); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(b.Assignment.WorkspaceFolder, "saved"), []byte("dirty after initial import"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				unchanged := retainedSourceUnchanged(t, b.Assignment.WorkspaceFolder)
+				wire := map[string]any{"version": 2, "retained": true, "actorUID": reply.ActorUID,
+					"writerEpoch": reply.WriterEpoch, "changeWriterEpoch": 99, "readOnly": true, "checkpoint": nil}
+				// Unlike the dedicated retained fixture, this first import
+				// already owns one staging directory. Its presence is evidence
+				// of that import, not permission to replay it.
+				var calls atomic.Int32
+				retained := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls.Add(1)
+					if r.Method != http.MethodGet || r.URL.RawQuery != "" {
+						t.Error("ACK/marker crash replayed an import/commit")
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+					json.NewEncoder(w).Encode(wire)
+				}))
+				defer retained.Close()
+				target, _ := url.Parse(retained.URL + "/internal/substrate-source/" + b.Assignment.RuntimeAttemptID)
+				if err := restoreSubstrateSource(t.Context(), b, reply.ActorUID, retained.Client(), target); err != nil || calls.Load() != 1 {
+					t.Fatalf("durable first publication was not recoverable through retained authority: calls=%d err=%v", calls.Load(), err)
+				}
+				unchanged()
+				if current, err := readNativeRestored(b, reply.ActorUID); err != nil || current.ChangeWriterEpoch != 99 || !current.ReadOnly {
+					t.Fatal("retained lease did not refresh the role after the ACK/marker crash:", err)
+				}
 			}
 			if check.commits == 0 {
 				if old, err := os.ReadFile(filepath.Join(b.Assignment.WorkspaceFolder, "old")); err != nil || string(old) != "retain me" {

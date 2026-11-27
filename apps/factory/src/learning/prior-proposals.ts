@@ -8,7 +8,7 @@ import {
   LearningResultRejected,
   learningEdit,
   validateLearningResult,
-} from "../../../../packages/conversation-domain/src/learning";
+} from "#conversation-domain/learning";
 
 export type PriorProposal = {
   id: string;

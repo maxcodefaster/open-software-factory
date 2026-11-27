@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, sql as expression, gt, inArray, like, lte, ne, or } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { authSession, authUser, authVerification } from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { authSession, authUser, authVerification } from "#db/schema";
 import { CommandError } from "../command-error";
-import { developerIDEOrigin } from "../developer-ide-origin";
+import { logFailure } from "../failure-log";
 import { factoryRequestURL } from "../request-origin";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
+import { developerIDEOrigin } from "./developer-ide-origin";
 
 export interface DeveloperIDEGrant {
   readonly userID: string;
@@ -36,29 +37,34 @@ export function createDeveloperIDEAccess(
     onRevoke(token);
   }
   function decode(value: string): StoredGrant | undefined {
+    let grant: unknown;
     try {
-      const grant: unknown = JSON.parse(value);
-      if (
-        grant &&
-        typeof grant === "object" &&
-        "userID" in grant &&
-        typeof grant.userID === "string" &&
-        "sessionID" in grant &&
-        typeof grant.sessionID === "string" &&
-        "epoch" in grant &&
-        typeof grant.epoch === "number" &&
-        Number.isSafeInteger(grant.epoch) &&
-        grant.epoch > 0 &&
-        "expires" in grant &&
-        typeof grant.expires === "number" &&
-        Number.isSafeInteger(grant.expires) &&
-        "embedded" in grant &&
-        typeof grant.embedded === "boolean" &&
-        "kind" in grant &&
-        (grant.kind === "exchange" || grant.kind === "access")
-      )
-        return grant as StoredGrant;
-    } catch {}
+      grant = JSON.parse(value);
+    } catch (cause) {
+      // Corrupted verification rows under the editor prefix must fail closed and stay visible.
+      logFailure("Stored developer IDE grant could not be decoded", cause);
+      return undefined;
+    }
+    if (
+      grant &&
+      typeof grant === "object" &&
+      "userID" in grant &&
+      typeof grant.userID === "string" &&
+      "sessionID" in grant &&
+      typeof grant.sessionID === "string" &&
+      "epoch" in grant &&
+      typeof grant.epoch === "number" &&
+      Number.isSafeInteger(grant.epoch) &&
+      grant.epoch > 0 &&
+      "expires" in grant &&
+      typeof grant.expires === "number" &&
+      Number.isSafeInteger(grant.expires) &&
+      "embedded" in grant &&
+      typeof grant.embedded === "boolean" &&
+      "kind" in grant &&
+      (grant.kind === "exchange" || grant.kind === "access")
+    )
+      return grant as StoredGrant;
     return undefined;
   }
   async function load(token: string, userID: string, kind: StoredGrant["kind"]) {

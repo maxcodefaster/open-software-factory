@@ -3,24 +3,17 @@ import { dirname, join } from "node:path";
 import { and, eq, sql as expression, isNull } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  branchCreateOperation,
   change,
   developmentWorkspace,
+  operation,
   project,
   runtimeAttempt,
   substrateSource,
   ticket,
-} from "../../../../packages/db/src/schema";
-import {
-  personalWorkspaceIdentity,
-  ticketWorkspaceIdentity,
-} from "../../../../packages/workspace-domain/src/workspace";
+} from "#db/schema";
+import { personalWorkspaceIdentity, ticketWorkspaceIdentity } from "#workspace-domain/workspace";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";
@@ -117,39 +110,41 @@ export async function initialSourceActorIn(
   return [
     ...(await sql<{ id: string }[]>`
     SELECT current.id FROM factory.runtime_attempt current
-    JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=current.id
-    JOIN factory.substrate_workspace p ON p.workspace_id=current.workspace_id AND p.generation=current.generation
+    JOIN factory.substrate_provision p ON p.owner_id=current.workspace_id AND p.kind='workspace' AND p.generation=current.generation
     WHERE current.workspace_id=${seed.workspaceID}
       AND current.project_id=${seed.projectID} AND current.revision=${seed.revision}
       AND (current.state='create-intended'
-        OR (current.state='starting' AND binding.intent->>'sourceRestoreProtocol'='2'))
+        OR (current.state='starting' AND current.binding_intent->>'sourceRestoreProtocol'='2'))
       AND current.stop_intended_at IS NULL
-      AND binding.actor_uid=${actorUID} AND NOT binding.create_rejected
-      AND binding.create_attempted_at IS NOT NULL
-      AND binding.delete_intended_at IS NULL AND binding.deleted_at IS NULL
-      AND binding.observation#>>'{metadata,uid}'=${actorUID}
-      AND binding.observation#>>'{metadata,name}'=binding.actor_name
-      AND binding.observation#>>'{metadata,atespace}'=binding.atespace
-      AND binding.intent->>'projectID'=${seed.projectID}
-      AND binding.intent->>'workspaceID'=${seed.workspaceID}
-      AND binding.intent->>'generation'=current.generation::text
-      AND binding.intent->>'atespaceUID'=p.atespace#>>'{metadata,uid}'
-      AND binding.intent->>'templateUID'=p.template#>>'{metadata,uid}'
-      AND binding.intent->>'templateVersion'=p.template#>>'{metadata,version}'
-      AND binding.intent->>'templateSHA256'=p.intent->>'templateSHA256'
-      AND p.atespace IS NOT NULL AND p.policy IS NOT NULL AND p.template IS NOT NULL
-      AND NOT p.atespace_rejected AND NOT p.policy_rejected AND NOT p.template_rejected
+      AND current.actor_uid=${actorUID} AND NOT current.create_rejected
+      AND current.create_attempted_at IS NOT NULL
+      AND current.delete_intended_at IS NULL AND current.deleted_at IS NULL
+      AND current.observation#>>'{metadata,uid}'=${actorUID}
+      AND current.observation#>>'{metadata,name}'=current.actor_name
+      AND current.observation#>>'{metadata,atespace}'=current.atespace
+      AND current.binding_intent->>'projectID'=${seed.projectID}
+      AND current.binding_intent->>'workspaceID'=${seed.workspaceID}
+      AND current.binding_intent->>'generation'=current.generation::text
+      AND current.binding_intent->>'atespaceUID'=p.resources#>>'{atespace,value,metadata,uid}'
+      AND current.binding_intent->>'templateUID'=p.resources#>>'{template,value,metadata,uid}'
+      AND current.binding_intent->>'templateVersion'=p.resources#>>'{template,value,metadata,version}'
+      AND current.binding_intent->>'templateSHA256'=p.intent->>'templateSHA256'
+      AND jsonb_typeof(p.resources->'atespace'->'value')='object'
+      AND jsonb_typeof(p.resources->'policy'->'value')='object'
+      AND jsonb_typeof(p.resources->'template'->'value')='object'
+      AND NOT COALESCE((p.resources#>>'{atespace,rejected}')::boolean,false)
+      AND NOT COALESCE((p.resources#>>'{policy,rejected}')::boolean,false)
+      AND NOT COALESCE((p.resources#>>'{template,rejected}')::boolean,false)
       AND p.intent->>'revision'=${seed.revision}
       AND p.intent->>'branch'=${seed.branch}
       AND p.intent->>'repositoryURL'=${seed.repositoryURL}
       AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt other
-        LEFT JOIN factory.substrate_binding retired ON retired.runtime_attempt_id=other.id
         WHERE other.workspace_id=current.workspace_id AND other.id<>current.id AND (
           other.generation<current.generation AND other.state='stopped'
-          AND retired.deleted_at IS NOT NULL AND retired.intent->>'sourceRestoreProtocol'='2'
-          AND retired.intent->>'projectID'=${seed.projectID}
-          AND retired.intent->>'workspaceID'=${seed.workspaceID}
-          AND retired.intent->>'generation'=other.generation::text) IS NOT TRUE)`),
+          AND other.deleted_at IS NOT NULL AND other.binding_intent->>'sourceRestoreProtocol'='2'
+          AND other.binding_intent->>'projectID'=${seed.projectID}
+          AND other.binding_intent->>'workspaceID'=${seed.workspaceID}
+          AND other.binding_intent->>'generation'=other.generation::text) IS NOT TRUE)`),
   ];
 }
 
@@ -181,15 +176,25 @@ export async function admitInitialSource(
             })
             .from(sourceChange)
             .innerJoin(ticket, eq(ticket.id, sourceChange.ticketId))
-            .innerJoin(branchCreateOperation, eq(branchCreateOperation.changeId, sourceChange.id))
+            .innerJoin(
+              operation,
+              and(
+                eq(operation.kind, "delivery.branch_create"),
+                eq(operation.scopeType, "change"),
+                eq(operation.scopeId, expression<string>`${sourceChange.id}::text`),
+              ),
+            )
             .where(
               and(
                 eq(sourceChange.id, selection.changeID),
                 expression`${sourceChange.state} IN ('starting','active','failed')`,
                 expression`${sourceChange.cancelRequestedAt} IS NULL`,
                 expression`${ticket.trashedAt} IS NULL`,
-                eq(branchCreateOperation.state, "succeeded"),
-                eq(branchCreateOperation.observedHeadSha, sourceChange.baseSha),
+                eq(operation.state, "succeeded"),
+                eq(
+                  expression<string | null>`${operation.result}->>'observedHeadSha'`,
+                  sourceChange.baseSha,
+                ),
               ),
             )
             .for("share", { of: sourceChange });

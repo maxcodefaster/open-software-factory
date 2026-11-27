@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
-import { fixture } from "../fixtures/change-agent-turns";
 import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
-import { callFactoryFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { fixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 test("Contributor permissions and role downgrade cover commands and existing IDE grants", async () => {
   const process = await factoryProcess();

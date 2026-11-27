@@ -3,12 +3,14 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import ts from "typescript";
+import { createDatabase } from "#db/client";
+import { desktopBackgroundKeys } from "#interface-domain/background";
+import { type ProjectSetupView, projectSetupView } from "#project-domain/setup";
 import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { ticketDetailSchema } from "../../apps/factory/src/change/contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import {
   knowledgeGenerationSchema,
   repositoryDocumentsSchema,
@@ -19,13 +21,11 @@ import {
   runtimeAttemptSchema,
 } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/workspace/contracts";
-import { createDatabase } from "../../packages/db/src/client";
-import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
-import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -1006,14 +1006,28 @@ test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({
   `;
   if (!change) throw new Error("Missing fixture Change");
   await database.client`
-    INSERT INTO factory.pull_request_operation(
-      id, change_id, repository_owner, repository_name, base_branch, head_branch,
-      first_head_sha, title, body, idempotency_key, state, pull_request_number,
-      pull_request_url, completed_at
+    INSERT INTO factory.operation(
+      id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+      payload, result, created_by, completed_at
     ) VALUES (
-      ${crypto.randomUUID()}, ${change.id}, 'factory-mutation', 'ux-trust', 'main',
-      ${change.branch}, ${"a".repeat(40)}, ${title}, '', ${`ux-trust:pr:${change.id}`},
-      'succeeded', 28, 'https://example.invalid/ux-trust/pulls/28', now()
+      ${crypto.randomUUID()}, 'delivery.pull_request', 'change', ${change.id},
+      ${`delivery.pull_request:change:${change.id}:pull-request`}, NULL, 'succeeded',
+      ${JSON.stringify({
+        changeId: change.id,
+        repositoryOwner: "factory-mutation",
+        repositoryName: "ux-trust",
+        baseBranch: "main",
+        headBranch: change.branch,
+        commitSha: "a".repeat(40),
+        firstHeadSha: "a".repeat(40),
+        title,
+        body: "",
+      })}::jsonb,
+      ${JSON.stringify({
+        number: 28,
+        url: "https://example.invalid/ux-trust/pulls/28",
+      })}::jsonb,
+      ${userID}, now()
     )
   `;
   await signIn(page);
@@ -1149,10 +1163,10 @@ async function insertOtherProjectConversation() {
   additionalProjectIDs.push(id);
   await database.client`
     INSERT INTO factory.project(
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+      id, slug, name, repository_url, default_branch, actor_template_path, created_by
     ) VALUES (
       ${id}, ${slug}, 'Other conversation fixture',
-      'https://example.invalid/ux-other.git', 'main', '.devcontainer/devcontainer.json', ${userID}
+      'https://example.invalid/ux-other.git', 'main', '.factory/actor-template.json', ${userID}
     )
   `;
   const conversationID = await insertConversation(id);
@@ -1203,12 +1217,24 @@ async function insertChangedTicket(
       )
     `;
     await transaction`
-      INSERT INTO factory.branch_create_operation(
-        id, change_id, repository_owner, repository_name, branch_name, start_sha,
-        idempotency_key, state, observed_head_sha, completed_at
+      INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state,
+        payload, result, created_by, completed_at
       ) VALUES (
-        ${crypto.randomUUID()}, ${changeID}, 'factory-mutation', 'ux-trust', ${branchName},
-        ${"a".repeat(40)}, ${`ux-trust:${changeID}`}, 'succeeded', ${"a".repeat(40)}, now()
+        ${crypto.randomUUID()}, 'delivery.branch_create', 'change', ${changeID},
+        ${`delivery.branch_create:change:${changeID}:create-branch`}, NULL, 'succeeded',
+        ${JSON.stringify({
+          changeId: changeID,
+          repositoryOwner: "factory-mutation",
+          repositoryName: "ux-trust",
+          branchName,
+          startSha: "a".repeat(40),
+          attemptCount: 1,
+          leaseGeneration: 1,
+          reconcileAfter: null,
+        })}::jsonb,
+        ${JSON.stringify({ observedHeadSha: "a".repeat(40) })}::jsonb,
+        ${userID}, now()
       )
     `;
   });
@@ -1258,10 +1284,10 @@ test.beforeEach(async ({ page }) => {
   projectSlug = `ux-trust-${projectID.slice(0, 8)}`;
   await database.client`
     INSERT INTO factory.project(
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+      id, slug, name, repository_url, default_branch, actor_template_path, created_by
     ) VALUES (
       ${projectID}, ${projectSlug}, 'UX trust fixture', 'https://example.invalid/ux-trust.git',
-      'main', '.devcontainer/devcontainer.json', ${userID}
+      'main', '.factory/actor-template.json', ${userID}
     )
   `;
   await database.client`
@@ -1723,11 +1749,10 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
       SELECT ${workspaceId}, project_id, 'ticket', ticket_id, id, branch_name, base_sha, created_by FROM factory.change WHERE id = ${change.id}`;
     await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation,
       revision, state, parent_connector_token_hash,
-      child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'create-intended', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), created_by
+      create_intended_at, created_by, atespace, actor_name, binding_intent)
+      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'create-intended', ${"b".repeat(64)}, now(), created_by,
+        ${`fa-${attemptId.replaceAll("-", "")}`}, ${`runtime-${attemptId.replaceAll("-", "")}`}, '{}'::jsonb
       FROM factory.change WHERE id = ${change.id}`;
-    await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-      VALUES(${attemptId},${`fa-${attemptId.replaceAll("-", "")}`},${`runtime-${attemptId.replaceAll("-", "")}`},'{}')`;
     await sql`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${attemptId}`;
     await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptId} WHERE id = ${change.id}`;
     await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id,
@@ -1767,8 +1792,8 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
     lastError: expect.stringContaining("Live Workspace status is unavailable"),
   });
   const attempts = await database.client<Array<{ state: string; uid: string | null }>>`
-    SELECT attempt.state,binding.actor_uid::text AS uid FROM factory.runtime_attempt attempt
-      JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id WHERE attempt.project_id = ${projectID}`;
+    SELECT attempt.state,attempt.actor_uid::text AS uid FROM factory.runtime_attempt attempt
+      WHERE attempt.project_id = ${projectID} AND attempt.atespace IS NOT NULL`;
   expect([...attempts]).toEqual([{ state: "failed", uid: null }]);
   const turns =
     await database.client`SELECT id FROM factory.agent_turn WHERE project_id = ${projectID}`;
@@ -3521,9 +3546,11 @@ test("Knowledge History preserves exact bodies and new saves advance immutable o
     INSERT INTO factory.knowledge_revision(id, page_id, ordinal, kind, title, body, generated_body, source_commit_sha, created_by)
     VALUES (${crypto.randomUUID()}, ${pageID}, ${ordinal}, ${ordinal === 1 ? "generated" : "proposed"}, 'Cleanup knowledge', ${original}, ${ordinal === 1 ? original : "## Proposed section\n\nNew generated content."}, ${"a".repeat(40)}, ${userID})
   `;
+  const generationID = crypto.randomUUID();
   await database.client`
-    INSERT INTO factory.knowledge_generation(id, project_id, source_commit_sha, state, page_count, conflict_count, created_by, completed_at)
-    VALUES (${crypto.randomUUID()}, ${projectID}, ${"a".repeat(40)}, 'succeeded', 1, 1, ${userID}, now())
+    INSERT INTO factory.operation(id, kind, scope_type, scope_id, idempotency_key, active_key, state, created_by, completed_at, payload)
+    VALUES (${generationID}, 'knowledge.generation', 'project', ${projectID}, ${`knowledge.generation:${generationID}`}, NULL, 'succeeded', ${userID}, now(),
+      ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: "a".repeat(40), pageCount: 1, conflictCount: 1, failure: null, createdBy: userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)
   `;
   await mockFactoryFunctions(page, {
     knowledge: {

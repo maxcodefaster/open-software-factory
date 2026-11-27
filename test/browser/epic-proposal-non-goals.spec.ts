@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
+import type { EpicProposal } from "#conversation-domain/epic-proposal";
 import { test } from "../fixtures/browser-test";
 import {
   correctedHomeCriterion,

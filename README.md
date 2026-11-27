@@ -1,177 +1,158 @@
 # Open Software Factory
 
-Self-hosted software development with coding agents. Import your repository and Dev Container,
-write requirements, and let an agent implement them. Tests and an independent review check the exact
-commit before you approve delivery.
+**Self-hosted, requirements-first software development with autonomous coding agents.**
+Import your repository with a native `.factory/actor-template.json`, define and approve requirements, and let coding agents implement changes inside isolated Kubernetes Workspaces. Exact-commit verification and independent QA review gate every change before you explicitly approve delivery.
 
-Runs on Kubernetes with Linux arm64 and amd64 artifacts. The Substrate profile pins both worker
-architectures; [qualification scope](deploy/substrate/README.md#qualification-scope) distinguishes
-the live ARM product path from component and packaging checks. Apache-2.0. No telemetry.
+Built on Kubernetes for Linux `arm64` and `amd64`, using **pinned official Substrate** (gVisor + native ActorTemplates) as its sole execution runtime. See [qualification scope](deploy/substrate/README.md#qualification-scope) for the live ARM product path versus component and packaging checks. **Apache-2.0. No telemetry.**
 
-[Runtime direction](#runtime-direction) · [Install](#install) · [Develop](#developing)
-
-## Runtime direction
-
-Factory uses **Substrate as its sole execution runtime**, using the pinned official API
-and gVisor profile with ROOTFS cold restart, private Docker and Dev Containers. Factory retains
-product authority, approvals and execution intent; Substrate owns native lifecycle and snapshots.
-See [the Substrate integration](deploy/substrate/README.md) for the supported contract and qualification limits.
-
-Factorybox execution, the execution reserve and worker recovery have been removed. This is a
-Greenfield installation, with no old-runtime compatibility or data-transfer path. The chart requires
-installation-wide native configuration, and the distribution build packages a separate
-multi-architecture Actor image. Workspace compute, prebuilds, Verification, Staging, promotion and
-publication use the official runtime through Factory's adapters.
-
-## The workflow
+[Quickstart](#quickstart) · [Features](#features) · [Local agents via MCP](#local-agents-via-mcp) · [Architecture](#architecture) · [Commands and test lanes](#commands-and-test-lanes) · [Install](#install)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/lifecycle-dark.svg">
   <img alt="Idea, Interview, Requirements, Design, Build, Review, Deliver and Learn. People approve requirements and delivery." src="assets/lifecycle-light.svg" width="100%">
 </picture>
 
-### Write requirements
+## Quickstart
 
-Tickets hold the request, acceptance criteria and discussion. Write them yourself or ask the AI
-Interview to read the repository and clarify missing decisions. Approve the product spec before
-technical planning and implementation.
+### Point your coding agent here
 
+Paste this into your coding agent (OpenCode, Claude Code, Codex, Cursor, etc.) from a clone of this repo:
+
+> Set up Open Software Factory locally using [mise](https://mise.jdx.dev): run `mise install` and `mise exec -- bun install --frozen-lockfile`, then check `README.md` and `deploy/helm/factory/README.md` to either connect to my Helm installation (`mise exec -- bun run factory:connect`) or start a local development instance (`mise exec -- bun run factory:up`). Verify health at `/health/ready` and report the URL and any missing Substrate environment variables.
+
+### Run it yourself
+
+**Prerequisites:** [mise](https://mise.jdx.dev) (installs pinned Bun, Node, Go, Python, `kubectl`, `helm`, `kubeconform`, `mkcert`) and OrbStack/Docker (for local development) or a Kubernetes cluster with official Substrate commissioned.
+
+```sh
+# 1. Install pinned toolchain and dependencies
+mise install
+mise exec -- bun install --frozen-lockfile
+
+# 2a. Connect to an existing local Helm installation (recommended for cluster installs)
+mise exec -- bun run factory:connect
+
+# 2b. Or start the local source launcher (requires native Substrate config, TLS origins & browser-tools image:
+#     FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION, FACTORY_FORGEJO_PUBLIC_URL, FACTORY_BROWSER_TOOLS_IMAGE)
+mise exec -- bun run factory:up
+
+# 3. Verify health
+curl -fsS http://127.0.0.1:3000/health/ready
+```
+
+Open `http://127.0.0.1:3000` (the launcher prints the generated admin password path), then configure model providers in **Settings**. For full cluster deployment, TLS, backups, and operations, see the [Helm chart guide](deploy/helm/factory/README.md).
+
+## Features
+
+| Capability | What Factory does |
+| --- | --- |
+| **Requirements-first Tickets** | Manual editing by default — reading or saving never starts inference. Request an optional AI Interview or technical design when needed. Full revision history; **Implement** pins and approves the exact saved revision. |
+| **Isolated Substrate Workspaces & IDE** | Direct native Project containers defined in `.factory/actor-template.json` (no nested Docker or Dev Containers). Browser Theia IDE, live App Previews, durable **Suspend / Resume** (native `MEMORY` preferred with `ROOTFS` cold fallback; retained Actor and canonical files stay authoritative), and Yjs real-time Workspace sharing. |
+| **Autonomous Coding, Verification & Review** | Coding agents implement approved specs in isolated Workspaces. Exact-commit verification and independent review (with an App QA recording) run on the same commit before explicit human Delivery approval (or eligible delegation) promotes to Staging. |
+| **Wiki, Skills, MCP & Operations** | Self-updating Project Wiki with revisions and human edits; scoped Skills (private personal library or manager-pinned Project/System versions); external MCP servers + remote `/api/mcp`; OpenBao Environments; Releases; Monitoring; Learning proposals; and Inbox. |
+| **Enterprise Security Boundaries** | gVisor sandbox isolation and restricted TLS egress, OpenBao secret encryption, fail-closed private OCI image pull trust, private-by-default Workspaces, and strict role separation across Contributors, Developers, Project Managers, and Administrators. |
+
+### From requirements to verified delivery
+
+<details open>
+<summary><strong>1. Requirements &amp; spec approval</strong> — author manually or run an AI Interview before implementation</summary>
+<br>
 <img alt="Product specification and acceptance criteria awaiting approval" src="assets/screens/spec.jpg" width="100%">
+</details>
 
-### Work with the agent
-
-Each Sandbox has your Dev Container, a private Docker daemon and running services. Open the IDE
-to inspect or edit the source. Its first access prepares a pinned canonical checkout without
-starting an Actor, Docker, Project hooks or inference. The first explicit compute Start imports
-the latest saved checkout before Project execution. Open the Preview to use the App. The Substrate
-integration uses cold restart rather than promising continuity of running processes.
-Starting compute without opening the IDE first admits the same independent Source, not another
-checkout. Native allocation alone does not transfer it: the Actor must verify its import and
-confirm the exact checkpoint before it can start Docker or Project work.
-An existing standard Dev Container is enough for Workspace compute and Coding; `.factory/system.json`
-and a Factory verification workflow are not prerequisites for that development path. The pinned
-Dev Containers CLI selects the actual container folder and user, including its default folder
-and custom image, Dockerfile or Compose workspaces. Factory does not rewrite those settings or
-require `/workspace/project`. Development readiness respects the standard `waitFor` setting through
-the official CLI. Remaining lifecycle commands continue as visible Project setup without blocking
-the Agent; their failure is reported separately from Agent readiness or App health.
-App Preview, Staging and exact-commit Verification need their own
-explicitly configured commands and checks; opening Source or starting compute does not supply or pass them.
-Installation security and egress policy still apply; privileged or host-bound recipes are not portable.
-If you opened Source before confirming Project setup, Start adds only the exact approved missing
-configuration files. Saved edits and Git history stay intact; conflicting local configuration is
-preserved and reported instead of overwritten.
-
+<details>
+<summary><strong>2. Isolated Workspace, Theia IDE &amp; live Preview</strong> — inspect code, collaborate via Yjs, and pause/resume durably</summary>
+<br>
 <img alt="Project source and running application in the Factory IDE" src="assets/screens/ide.jpg" width="100%">
+</details>
 
-### Review and deliver
-
-Verification and independent review use the same commit. Review includes a recording of the App.
-Recordings shorten runs of identical captured frames, not the QA itself. Their playback time is
-not a performance measurement.
-Your approval promotes the change to Staging. Production deployment remains your responsibility.
-
+<details>
+<summary><strong>3. Exact-commit Verification, QA recording &amp; Delivery</strong> — inspect checks and App QA video before promoting to Staging</summary>
+<br>
 <img alt="Passed checks and an App QA recording before delivery" src="assets/screens/review.jpg" width="100%">
+</details>
 
-Project Wikis keep revisions and human edits. Roles separate product work, development and
-administration. OpenBao encrypts secrets. Backups include Git, database, objects and secrets.
-Learning reviews completed work and compact native tool evidence, including repeated discovery.
-Its proposals need approval before adoption; repeated calls alone do not prove wasted work.
-Personal Skills stay private in personal Project conversations. Exact Skill versions admitted to
-shared Ticket work are inspectable by that Project's members; this does not share the private library.
-Skills use one per-library choice model for settings, configuration checks and admission.
-System and Project managers can require exact versions; lower scopes cannot override those choices.
-Changing publication or defaults does not rewrite guidance already admitted to a turn.
+## Local agents via MCP
 
-## Use a local agent with Factory compute
+Use your own local coding agent directly against Factory's remote Substrate compute — no Factory-specific plugin required. Factory authenticates clients via user OAuth with PKCE and never imports your local browser sessions or model credentials.
 
-Point a remote MCP client at `https://YOUR_FACTORY/api/mcp`. Sign in to Factory in your local
-browser and approve that client. Factory uses user OAuth with PKCE. It does not import your local
-browser sessions or model credentials. Your agent and browser stay local; shell commands and
-interactive terminals run as the development user inside the selected Workspace's Dev Container.
+```sh
+# OpenCode V2 (other MCP clients use the same URL and OAuth PKCE flow)
+opencode mcp add factory --url https://YOUR_FACTORY/api/mcp
+# Then sign in via /mcps
+```
 
-Use `listProjects`, `listWorkspaces` and `openWorkspace` to select an existing Project or Workspace.
-Personal development does not require a Ticket. `startWorkspace`, `pauseWorkspace` and
-`stopWorkspace` control that Workspace's compute. For a fresh Project with no Workspace row, call
-`startWorkspace` with `projectID` and a new `requestID` to explicitly initialize and start your personal
-Workspace. Start accepts exactly one of `projectID` or `workspaceID`; Pause and Stop require
-`workspaceID` and `requestID`. List and Open never perform this first Start.
-Commands, terminals and container-file access resume paused compute, but never silently restart
-explicitly stopped or failed compute. A laptop disconnect does not cancel admitted remote commands.
-Use their returned IDs to observe outcomes.
+- **Workspace lifecycle**: `listProjects`, `listWorkspaces`, `listTicketWorkspaces`, `openWorkspace`, `startWorkspace`, `pauseWorkspace`. Commands and container-file access wake paused compute automatically without restarting explicitly stopped/failed compute or starting AI inference.
+- **Files, transfers & terminals**: Checkout-relative or absolute container file tools with optimistic version checks; `beginFileTransfer` / `commitFileTransfer` for SHA-256-verified binary transfers up to 128 MiB; remote commands survive laptop disconnects.
+- **Collaboration & Ticket handoff**: `shareWorkspace` grants observation or collaboration on personal Workspaces; `readSharedDocument`, `editSharedDocument`, and `saveSharedDocument` edit live Yjs buffers under your authenticated identity; `takeOverTicketEditing` handles explicit writer handoff for Ticket Workspaces.
 
-For Ticket work, `listTicketWorkspaces` returns retained Changes and `openWorkspace` accepts their
-`changeID`. `getWorkspaceEditing` reports the current editing phase. An explicit
-`takeOverTicketEditing` uses Factory's existing handoff and its observed writer epoch before a
-local agent can change a Ticket checkout. It does not start Coding or approve requirements.
+## Architecture
 
-File tools default to `location: "checkout"`, with paths relative to retained source. Those reads
-do not wake compute. Select `location: "container"` for absolute paths inside the actual Dev
-Container. `getContainerContext` reports its Workspace folder, observed checkout root and effective user ID. Container
-access requires development scope and collaboration permission. Keep the returned file version
-when changing an existing file. Versions detect observed changes; they do not coordinate arbitrary
-concurrent shell, formatter or Git writes, or save another editor's unsaved buffer.
+Factory owns product authority, approvals, and execution intent; pinned official **Substrate** owns Actor lifecycle and snapshots through Factory's adapters. See [deploy/substrate/README.md](deploy/substrate/README.md) for the runtime contract, gVisor profile, and [Project images and native preparation](deploy/substrate/README.md#project-images-and-native-preparation).
 
-In the IDE, **Retry file access** rechecks the same retained Source owner. It does not stop or
-replace Source, start compute or reload the editor's unsaved buffer. Workspace Stop controls
-compute separately and retains independent Source before deleting its original Actor. Pause saves
-the environment for cold continuation. Final Stop saves the checkout, not a new snapshot of the
-Docker environment it is about to delete; its recorded intent blocks execution until cleanup finishes.
-An open IDE observes a lost connection rather than replaying its opening request. Once the editor
-is stopped, only a new opening or explicit editor retry can prepare another editor instance.
+| Path | Responsibility |
+| --- | --- |
+| `apps/factory/` | Solid 2 + TanStack Start web application, authenticated server functions, Zero planning sync, Mastra orchestration, OpenCode V2 client, and feature controllers (`tickets`, `change`, `workspace`, `agent`, `delivery`, `knowledge`, `learning`, `environments`, `skills`, `mcp`, `releases`, `monitoring`, `inbox`). |
+| `packages/` | Pure domain modules (`change-domain`, `ticket-domain`, `workspace-domain`, `runtime-domain`, `project-domain`, `knowledge-domain`, `identity-domain`, `requirement-domain`, `conversation-domain`, `interface-domain`), Drizzle PostgreSQL schema & sealed baseline (`db`), Zero schema & Solid bindings (`zero-schema`, `zero-solid`), Better Auth (`auth`), Forgejo adapter (`forge`), Kubernetes/Substrate profile (`runtime-kubernetes`), and `system-contract`. |
+| `services/` | Go runtime services: `runtime-connector` (in-Actor connector) and `substrate-control` (Substrate API/router bridge). |
+| `deploy/` | Production [Helm chart](deploy/helm/factory/README.md), [Substrate operator profile](deploy/substrate/README.md), container images (`factory`, `theia-ide`, `runtime-host`, `browser-tools`, `language-tools`, `opencode-server`), and local Compose services. |
+| `test/` | Playwright browser journeys (`test/browser/`), controller/database/native integration suites (`test/integration/`), TLA+ writer safety model (`test/models/`), and shared fixtures (`test/fixtures/`, `test/support/`). |
+| `scripts/` & `templates/` | Local launcher, test lane runners, release qualification gates, and starter/release templates. |
 
-For binary or larger files, `beginFileTransfer` binds an upload or download to one user, Workspace
-and Runtime Attempt. Transfers support files up to 128 MiB and expire after 30 minutes. Use its
-authenticated HTTP URL for raw chunks up to 256 KiB, or the MCP chunk tools for smaller chunks.
-Send the MCP OAuth Bearer token in the `Authorization` header, never in the URL. An upload needs
-its byte length and SHA-256, and `commitFileTransfer` publishes it only after verification.
-Verify an assembled download against its reported SHA-256. `releaseFileTransfer` closes the
-handle and removes only its own unpublished temporary file. File bytes do not enter product history.
+## Commands and test lanes
 
-Reuse request IDs only for the same deliberate operation. After a lost response, observe the
-existing command or transfer rather than starting a replacement. Unknown outcomes are not success.
-Command output and terminal scrollback are bounded and temporary. Save complete logs as files
-deliberately if you need to retain them.
+Always invoke commands via `mise exec --` to use the pinned toolchain.
 
-Personal Workspaces are private by default, including their development Previews. Their owner can
-explicitly grant another current Project Developer observation or collaboration through
-`shareWorkspace`. Participants use the same Dev Container, processes and Docker environment.
-Removing access does not cancel already-started code or stop shared compute. Command cancellation
-and Workspace Stop are separate actions. Project permissions remain the upper bound.
+### Local lifecycle & schema checks
 
-In the IDE, use **Share Workspace** to manage personal access or choose a shared Workspace. Shared
-editing uses Yjs to merge document edits and show authenticated participants and cursors. Factory
-retains the shared buffer without requiring the owner's browser to stay open. Save writes that
-buffer to canonical source. If a shell, formatter or Git operation changes the saved file while
-the shared buffer has unsaved edits, Factory keeps the buffer and reports a conflict. The editor's
-conflict action compares both versions before you choose which to keep.
+| Command | Purpose |
+| --- | --- |
+| `mise exec -- bun run factory:up` | Start local development Factory and print admin credentials. |
+| `mise exec -- bun run factory:connect` | Keep local port-forwards open to a Helm-installed Factory without restarting it. |
+| `mise exec -- bun run factory:status` / `factory:restart` | Inspect or restart the local development installation. |
+| `mise exec -- bun run factory:reset` | Reset a named disposable installation (requires explicit confirmation; never touches Substrate resources). |
+| `mise exec -- bun run check` | Fast full source gate: `check:docs`, `db:check`, `zero:check`, `format:check`, `lint` (incl. architecture rules), `typecheck`, `test:unit`, `connector:check`, and `substrate:check`. |
+| `mise exec -- bun run check:docs` | Validate Markdown fences, local images, links, and heading anchors across all docs. |
+| `mise exec -- bun run db:check` / `db:generate` | Check or regenerate the sealed Greenfield Drizzle + PostgreSQL baseline (`packages/db/`). |
+| `mise exec -- bun run zero:check` / `zero:generate` | Check or regenerate the allowlisted Zero planning schema (`packages/zero-schema/`). |
+| `mise exec -- bun run connector:check` / `substrate:check` | Run Go race tests and `go vet` for `runtime-connector` (host + Linux) and `substrate-control`. |
 
-Local agents can use `readSharedDocument`, `editSharedDocument` and `saveSharedDocument` to work
-with the same buffer. Reads are paged; edits require the exact observed revision. Agents appear
-under their authenticated user and OAuth client, not as an anonymous editor.
+### Test lanes & release qualification
 
-For a Ticket Workspace in its human editing phase, **Enable shared editing** lets current Project
-Developers collaborate. **Submit saved checkout** captures the saved shared source for normal
-exact-commit Verification and independent review. Unsaved shared buffers must be saved or resolved
-first. Submission is not requirements approval, a passing review, or Delivery approval.
+| Command | Scope & notes |
+| --- | --- |
+| `mise exec -- bun run test:unit` | Fast unit and domain tests (no external services). |
+| `mise exec -- bun run test:controllers [path]` | Database & controller integration tests. Pass an exact file/filter (e.g. `test/integration/inbox.test.ts`), or shard in parallel with `--shard=1/2` and `--shard=2/2`. |
+| `mise exec -- bun run test:browser [spec]` | Playwright UI journeys against an owned fixture (`test:browser:native` and `test:browser:paid` for native/paid lanes). Supports Playwright `--shard` args. |
+| `mise exec -- bun run test:native [filter]` | Native service/runtime integration tests (`runtime:conformance` runs Substrate adapter & Workspace conformance). See [scripts/runtime/README.md](scripts/runtime/README.md). |
+| `mise exec -- bun run test:live` | Explicit paid-model live acceptance lane (never part of default tests). |
+| `mise exec -- bun run test:formal` | Optional TLA+ bounded Writer safety model check (macOS arm64 pinned Temurin/TLC). |
+| `mise exec -- bun run check:integration` | Runs `check` plus the full controller suite. |
+| `mise exec -- bun run beta:gate` | Exact-commit source/controller/UI receipt (including Connector & Substrate bridge checks; not native product acceptance). |
+| `mise exec -- bun run release:clean-room` | Fresh-install clean-room qualification with explicitly owned cluster inputs. |
 
-For OpenCode V2, add the remote server with `opencode mcp add factory --url https://YOUR_FACTORY/api/mcp`,
-then use `/mcps` to sign in. Other MCP clients use the same URL and OAuth flow. No Factory-specific
-agent plugin is required.
+> For disposable source-launcher fixture lanes using `factory-mutation/runtime-fixture`, seed explicitly after startup:
+> `mise exec -- bun scripts/factory/index.ts prepare-fixture --disposable YOUR_PROOF --confirm YOUR_PROOF`
 
-## Isolation
+### Feature check index
 
-The pinned Substrate profile uses gVisor, an Actor-private Docker daemon and restricted TLS egress.
-ROOTFS snapshots restart processes and connections; Factory does not promise memory continuity.
-Actor-level resource limits are the enforcement boundary, not per-inner-container cgroups.
-The [Substrate profile](deploy/substrate/README.md) records trust, networking and qualification
-limits. The [chart guide](deploy/helm/factory/README.md) covers installation requirements.
+Map user actions directly to their owning code and focused regression checks (controlled fixtures complement, but do not replace, native product acceptance):
 
-Runtime inventory shows saved Factory state, not current Actor health. Reading that list does
-not contact Substrate. Explicit runtime observation and lifecycle commands retain their native
-owner and live-state checks.
+| User action | Code owner | Focused check |
+| --- | --- | --- |
+| Manage access or register a Project | [Access](apps/factory/src/access/controller.ts), [Projects](apps/factory/src/projects/service.ts) | `bun run test:controllers project-registration-authority project-access` |
+| Save requirements & Implement exact revision | [Ticket documents](apps/factory/src/change/document.ts), [Change admission](apps/factory/src/change/controller.ts) | `bun run test:controllers change-document-drizzle implementation-admission technical-planning` |
+| Create Ticket, switch Projects, retain edits | [Desktop commands](apps/factory/src/desktop/project-commands.ts), [Ticket editor](apps/factory/src/tickets/ticket-workspace.tsx) | `bun run test:browser requirements-entry.spec.ts ticket-autosave-ack.spec.ts board-navigation.spec.ts` |
+| Open Source, IDE, or shared Workspace | [Workspace](apps/factory/src/workspace/service.ts) | `bun run test:controllers developer-ide workspace-sharing workspace-commands`; native fixtures in [scripts/runtime](scripts/runtime/README.md) |
+| Start Coding or Stop admitted work | [Coding](apps/factory/src/agent/controller.ts) | `bun run test:controllers implementation-admission`; `bun run test:native substrate-coding-stop` |
+| Verify, review & deliver a candidate | [Delivery](apps/factory/src/delivery/controller.ts), [Review](apps/factory/src/agent/candidate-review.ts) | `bun run test:controllers candidate-review-delivery delivery-controller-drizzle parallel-delivery` |
+| Generate or update the Wiki | [Knowledge](apps/factory/src/knowledge/generation-workflow.ts) | `bun run test:unit plan-coverage generation-speed`; `bun run test:controllers wiki-generation wiki-human-edits wiki-resume` |
+| Review completed work & Learning proposals | [Learning](apps/factory/src/learning/service.ts) | `bun run test:unit apps/factory/src/learning/`; `bun run test:browser learning.spec.ts` |
+| Qualify installation, backup & isolation | [Chart](deploy/helm/factory/README.md), [Substrate](deploy/substrate/README.md) | `bun run release:clean-room` (owned inputs); `bun run connector:check` |
 
 ## Install
+
+Install and qualify pinned official Substrate on matching `arm64` or `amd64` workers first, then deploy Factory with digest-pinned images, public TLS origins, and Substrate credentials in `private-values.yaml`:
 
 ```sh
 mise exec -- kubectl create namespace factory
@@ -181,157 +162,9 @@ mise exec -- helm install factory ./deploy/helm/factory \
   --wait=legacy --timeout 20m
 ```
 
-Supply the exact application image, public TLS origins, installation-wide Substrate configuration
-and separately rotated native provisioner credential in `private-values.yaml`. Install and qualify
-the pinned official runtime on workers matching the selected Linux arm64 or amd64 identity first. The chart supplies the Factory data
-services and credentials. Use the exact images qualified for the selected architecture; a source-chart
-qualification is not publication of a new Factory release.
-With Ingress enabled, the chart creates its own CA and renews its HTTPS certificates automatically.
-The default issuer needs no manually generated certificate, private key or CA file.
-It distributes public trust to native workloads without mkcert, OrbStack or a public DNS service.
-Clients still need to trust that CA, and the installation needs reachable DNS and an Ingress controller.
-An existing enterprise TLS Secret can replace the built-in issuer.
-The Namespace label admits trusted Factory clients through Substrate's API NetworkPolicy;
-it does not grant native authority. Keep execution and editor namespaces unlabelled.
-[Installation, backups and recovery](deploy/helm/factory/README.md).
+With Ingress enabled, the chart automatically issues and renews HTTPS certificates (or accepts an enterprise TLS Secret). Keep execution and editor namespaces unlabelled. See [deploy/helm/factory/README.md](deploy/helm/factory/README.md) for prerequisites, Router identity commissioning, backups, and recovery.
 
-## Developing
+---
 
-On macOS with OrbStack and [mise](https://mise.jdx.dev):
-
-```sh
-mise install
-mise exec -- bun install --frozen-lockfile
-# Supply native configuration, reachable TLS origins and a released browser-tools image:
-# FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION, FACTORY_FORGEJO_PUBLIC_URL, FACTORY_BROWSER_TOOLS_IMAGE
-mise exec -- bun run factory:up
-```
-
-Open http://127.0.0.1:3000. The launcher prints the generated administrator-password file.
-Configure model connections in Settings. Calls send context to the model provider you select.
-
-Source-launcher test lanes using `factory-mutation/runtime-fixture` need explicit preparation
-after their owned disposable installation starts. Ordinary `factory:up` does not seed or repair it:
-
-```sh
-mise exec -- bun scripts/factory/index.ts prepare-fixture --disposable YOUR_PROOF --confirm YOUR_PROOF
-```
-
-Preparation never removes branch protection. Do not rerun preparation over retained release work.
-
-The complete `runtime-artifacts.json` contains four roles: `runtime-host`, `browser-tools`,
-`developer-ide` and `substrate-runtime`. Native `workloadImage` must match that Actor artifact exactly.
-Source-development publication consumes the supplied native Actor and browser images. It builds
-the host tools and IDE images separately. The Factory and Actor images embed the native Source
-service; there is no separate Source image. Publication does not substitute arm64 host binaries or
-the local port-5000 registry for native browser and Starter dependencies.
-
-Factory and the Starter use Solid 2 with TanStack Start RC11 and the fixed upstream
-`start-server-core` 1.169.45. A metadata-only package repair exposes the existing native
-request-scope module omitted from that release's exports. Installation applies it automatically;
-no upstream implementation is copied or changed. The old security backport is removed.
-The Starter bundles TanStack before Nitro packages the production server.
-IDE diagnostics use project language tools, not a browser-only TypeScript compiler.
-TypeScript 6 remains required by compiler API-based test tooling and the packaged language server;
-TypeScript 7's CLI does not provide those JavaScript compiler or `tsserver` APIs.
-Runtime and data-service upgrades need their native and backup checks, not only a newer lockfile.
-
-Database tables, enums, defaults, keys, indexes and checks live in the feature-grouped Drizzle
-models under `packages/db/src/schema/`. `bun run db:generate` composes them with owned native
-PostgreSQL routines and triggers under `packages/db/native/` into the single sealed Greenfield
-baseline. `bun run db:check` detects source drift. Operators install that checked-in baseline;
-they do not run a generator or adopt a historical database.
-
-Schema-backed Drizzle queries cover Project setup, Models, Ticket authoring, Coding admission,
-Delivery, Source and IDE access, Workspace sharing/commands/files, Monitoring, Knowledge, Learning,
-Releases and attachment/media storage. `drizzleTransaction` binds queries to the existing
-Postgres.js transaction, including nested savepoints, or an explicitly reserved connection.
-It does not open a second connection. Remaining direct queries own native locks,
-compound authority predicates, aggregates, search and native PostgreSQL expressions. Zero reuses its
-database provider per connection pool, not a user's authorization context.
-Its eight planning tables are generated from an explicit Drizzle column allowlist with
-`bun run zero:generate`; `bun run zero:check` rejects drift. Authorization joins remain explicit.
-The generator is development-only, and the browser imports only its checked-in output.
-Project registration and repository setup share `projects/creation.ts`. It selects the shared
-background under a transaction lock; PostgreSQL no longer owns that product selection policy.
-Runtime Attempts and Workspaces have no runtime-selector flag. Every Attempt requires its
-persisted matching native binding, including at the deferred transaction boundary.
-
-Mastra owns Planning orchestration. Explicit provider SDKs remain behind the model adapter because
-Mastra's compatible endpoint route does not preserve every native provider's protocol and reasoning
-semantics. Build probes use OpenCode's native Promise API; Factory no longer imports Effect directly.
-Effect remains an upstream OpenCode requirement. Tiptap packages upgrade together; qualified Marked
-and Highlight.js overrides keep the reader and editor on one implementation of each parser.
-
-`factory:reset` is restricted to an explicitly named disposable installation and matching
-confirmation. It refuses active runtime work or unconfirmed Coding Stop. Before removing its
-Compose data volumes, it checks that every recorded native scope, Developer IDE Namespace and
-additional native WorkerPool is absent. Unconfirmed creates refuse reset even when a read finds
-no resource. This includes incomplete provisioning intents. It does
-not delete Substrate resources for you or reset the developer installation.
-
-`bun run check` checks source and the Connector. `bun run check:integration` adds database and
-controller tests. `bun run test:browser` runs UI journeys. `bun run beta:gate` writes an exact-commit
-source/controller/UI receipt, including Connector and Substrate bridge checks. It is not native
-product acceptance. Native runtime and clean-install commands are in [scripts/runtime](scripts/runtime/README.md)
-and the [chart guide](deploy/helm/factory/README.md). Pushes and pull requests run the lightweight
-source gate: schema drift, formatting, lint, types and architecture regressions. Full controller,
-browser and image checks run for releases or by request.
-
-For an affected controller check, select its exact path. Database-only checks skip the application
-build; compiled endpoint checks retain it:
-
-```sh
-mise exec -- bun run test:controllers test/integration/inbox.test.ts
-```
-
-For a full parallel controller run, start `bun run test:controllers --shard=1/2` and
-`bun run test:controllers --shard=2/2` in separate terminals through `mise exec --`.
-Each invocation owns its build and PostgreSQL fixture. Both shards must pass.
-The browser lane accepts the same Playwright shard arguments and owns a separate installation
-per invocation. Reserve host capacity before running multiple lanes.
-
-### Feature checks
-
-Use the existing lane with an exact file or feature filter. This index connects user actions
-to their code owner and regression entrypoint; it does not turn controlled fixtures into native
-product acceptance. Browser navigation and authenticated commands reuse `test/fixtures/`.
-
-| User action | Code owner | Focused check |
-| --- | --- | --- |
-| Manage access or register a Project | [Access](apps/factory/src/access/controller.ts), [Projects](apps/factory/src/projects/service.ts) | `bun run test:controllers project-registration-authority project-access` |
-| Save requirements and Implement the exact revision | [Ticket documents](apps/factory/src/change/document.ts), [Change admission](apps/factory/src/change/controller.ts) | `bun run test:controllers change-document-drizzle implementation-admission technical-planning` |
-| Create a Ticket, switch Projects, or retain an unsaved edit | [Desktop commands](apps/factory/src/desktop/project-commands.ts), [Ticket editor](apps/factory/src/ticket-workspace.tsx) | `bun run test:browser requirements-entry.spec.ts ticket-autosave-ack.spec.ts board-navigation.spec.ts` |
-| Open Source, IDE, or a shared Workspace | [Workspace](apps/factory/src/workspace/service.ts) | `bun run test:controllers developer-ide workspace-sharing workspace-commands`; native checks use the configured fixtures in [scripts/runtime](scripts/runtime/README.md) |
-| Start Coding or Stop admitted work | [Coding](apps/factory/src/agent/controller.ts) | `bun run test:controllers implementation-admission`; `bun run test:native substrate-coding-stop` requires its native fixture |
-| Verify, review and deliver a candidate | [Delivery](apps/factory/src/delivery/controller.ts), [Review](apps/factory/src/agent/candidate-review.ts) | `bun run test:controllers candidate-review-delivery delivery-controller-drizzle parallel-delivery` |
-| Generate or update the Wiki | [Knowledge](apps/factory/src/knowledge/generation-workflow.ts) | `bun run test:unit plan-coverage generation-speed`; `bun run test:controllers wiki-generation wiki-human-edits wiki-resume` |
-| Review completed work and adopt Learning proposals | [Learning](apps/factory/src/learning/service.ts) | `bun run test:unit apps/factory/src/learning/`; `bun run test:browser learning.spec.ts` |
-| Qualify installation, backup and native isolation | [Chart](deploy/helm/factory/README.md), [Substrate](deploy/substrate/README.md) | `bun run release:clean-room` with its explicitly owned installation inputs; `bun run connector:check` |
-
-`bun run lint` includes architecture checks for domain modules and browser owners. They inspect
-imports, re-exports, dynamic imports and import types, including normalized relative paths.
-Domain rules stay independent of application, database and runtime adapters. Browser code uses
-domain contracts and authenticated server functions instead of importing server implementations.
-Keep each correction in its owning API or regression check rather than adding a repeated prose rule.
-
-Public request and response contracts live in each feature's `contracts.ts`, not a shared
-application-wide barrel. Desktop composition imports those contracts rather than deriving them
-from controllers or UI components. Ticket draft models belong to Change; Delivery owns its
-Verification orchestration. Cross-feature operations use named `api.ts` or responsibility-specific
-`*-api.ts` exports; browser entrypoints use `client.ts` or `*-client.ts`. Contracts cannot depend
-on those implementation facades. Native SDK integration stays in server adapters.
-Shared test launchers reuse code while keeping each fixture's installation, process and resource
-ownership separate.
-
-The optional `bun run test:formal` Writer safety pilot requires a deliberate stale-epoch
-counterexample before checking the healthy bounded TLA+ model. It also sends generated event
-orders through the existing Writer/Stop controllers and an owned PostgreSQL fixture. The current
-tool checksums qualify macOS arm64; developer-only Temurin and official TLC must match their pins.
-Missing tooling fails explicitly. Default unit tests and Factory installations need no Java.
-Receipts and source hashes live under `.factory/test-results/blueprint-formal/`. External
-acknowledgements in this pilot are controlled fixtures; live runtime checks use their separate lane.
-
-Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode and Forgejo.
-[AGENTS.md](AGENTS.md) holds contributor rules. Report bugs in GitHub Issues and vulnerabilities
-through [SECURITY.md](SECURITY.md). [Apache-2.0](LICENSE); bundled assets keep their own notices.
+Built with Solid 2, TanStack Start, Bun, PostgreSQL, Zero, Mastra, OpenCode V2, Forgejo, and OpenBao.
+Contributor policy: [AGENTS.md](AGENTS.md) · Bugs: GitHub Issues · Security: [SECURITY.md](SECURITY.md) · License: [Apache-2.0](LICENSE)

@@ -11,11 +11,7 @@ import {
   sql as query,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   change,
   changeAgentSession,
@@ -23,8 +19,8 @@ import {
   changeCommitOperation,
   project,
   runtimeAttempt,
-  substrateBinding,
-} from "../../../../packages/db/src/schema";
+  ticketConversation,
+} from "#db/schema";
 import { CommandError } from "../command-error";
 import { substrateRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/transport-api";
@@ -97,27 +93,32 @@ export function createAgentCandidates(
       .select({
         id: changeCommitOperation.id,
         changeID: changeCommitOperation.changeId,
-        attemptID: query<string>`${changeCommitOperation.runtimeAttemptId}`,
+        attemptID: changeCommitOperation.runtimeAttemptId,
         branchName: changeCommitOperation.branchName,
         expectedParentSHA: changeCommitOperation.expectedParentSha,
-        mergeParentSHA: changeCommitOperation.mergeParentSha,
+        integrationBaseSHA: changeCommitOperation.integrationBaseSha,
+        isMerge: changeCommitOperation.isMerge,
         commitSHA: changeCommitOperation.commitSha,
         commitMessage: changeCommitOperation.commitMessage,
         state: changeCommitOperation.state,
         lastError: changeCommitOperation.lastError,
         repositoryURL: project.repositoryUrl,
-        nativeIntent: substrateBinding.intent,
+        nativeIntent: runtimeAttempt.bindingIntent,
       })
       .from(changeCommitOperation)
       .innerJoin(change, eq(change.id, changeCommitOperation.changeId))
       .innerJoin(project, eq(project.id, change.projectId))
       .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, changeCommitOperation.runtimeAttemptId))
-      .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
       .where(
-        and(eq(changeCommitOperation.id, operationID), eq(changeCommitOperation.source, "agent")),
+        and(
+          eq(changeCommitOperation.id, operationID),
+          eq(changeCommitOperation.source, "agent"),
+          isNotNull(runtimeAttempt.atespace),
+        ),
       );
     const operation = operations[0];
     if (!operation || ["succeeded", "failed"].includes(operation.state)) return;
+    const mergeParentSha = operation.isMerge ? (operation.integrationBaseSHA ?? "") : "";
     try {
       await advanceCandidateCommit(
         database,
@@ -126,7 +127,7 @@ export function createAgentCandidates(
           const payload = {
             operationId: operation.id,
             expectedSha: operation.expectedParentSHA,
-            mergeParentSha: operation.mergeParentSHA ?? "",
+            mergeParentSha,
             commitMessage: operation.commitMessage,
             authorName: "Open Software Factory",
             authorEmail: "factory@localhost",
@@ -147,7 +148,7 @@ export function createAgentCandidates(
             action: "git-push",
             branch: operation.branchName,
             expectedSha: operation.expectedParentSHA,
-            mergeParentSha: operation.mergeParentSHA ?? "",
+            mergeParentSha,
             commitSha: prepared.commitSHA,
             repositoryURL: substrateRepositoryCloneURL(
               operation.repositoryURL,
@@ -398,8 +399,11 @@ export function createAgentCandidates(
       FOR UPDATE OF change, ticket`;
     if (!allowed[0]) throw new CommandError("conflict", "Build approval changed before committing");
     if (allowed[0].conversationID) {
-      const modes = await sql<Array<{ mode: string }>>`SELECT mode FROM factory.ticket_conversation
-        WHERE id = ${allowed[0].conversationID} FOR UPDATE`;
+      const modes = await drizzleTransaction(sql)
+        .select({ mode: ticketConversation.mode })
+        .from(ticketConversation)
+        .where(eq(ticketConversation.id, allowed[0].conversationID))
+        .for("update");
       if (modes[0]?.mode !== "build")
         throw new CommandError("conflict", "Build mode changed before committing");
     }
@@ -408,7 +412,7 @@ export function createAgentCandidates(
     const created = await sql<Array<{ id: string }>>`
       INSERT INTO factory.change_commit_operation(
         id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
-        integration_base_sha, merge_parent_sha, commit_message, idempotency_key, state, created_by
+        integration_base_sha, is_merge, commit_message, idempotency_key, state, created_by
       )
       SELECT ${operationID}, change.id, ${active.runtimeAttemptID},
         COALESCE(MAX(previous.sequence), 0) + 1, change.branch_name,
@@ -422,12 +426,15 @@ export function createAgentCandidates(
           WHERE latest.change_id=change.id AND (latest.state='succeeded' OR (
             latest.source='integration' AND latest.state='failed' AND latest.last_error='integration has conflicts'))
           ORDER BY latest.sequence DESC LIMIT 1),
-        (SELECT merge_parent_sha FROM factory.change_commit_operation integration
-          WHERE integration.change_id=change.id AND integration.source='integration'
-            AND integration.state='failed' AND integration.last_error='integration has conflicts'
-            AND integration.sequence>COALESCE((SELECT MAX(sequence) FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded'),0)
-          ORDER BY integration.sequence DESC LIMIT 1),
+        COALESCE(
+          (SELECT integration.is_merge FROM factory.change_commit_operation integration
+            WHERE integration.change_id=change.id AND integration.source='integration'
+              AND integration.state='failed' AND integration.last_error='integration has conflicts'
+              AND integration.sequence>COALESCE((SELECT MAX(sequence) FROM factory.change_commit_operation
+                WHERE change_id=change.id AND state='succeeded'),0)
+            ORDER BY integration.sequence DESC LIMIT 1),
+          false
+        ),
         ${active.ticketTitle}, ${`change-commit:${changeID}:${operationID}`},
         'commit-intended', ${userID}
       FROM factory.change change

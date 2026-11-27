@@ -17,11 +17,12 @@ test("local repository registration persists configuration intent before prepari
       database,
       localRepositoryOrigin: "https://forge.test",
       forgeOwner: "factory",
+      readDefaultBranch: async () => "main",
       onRegistered: async (projectID: string, userID: string, recovering: boolean) => {
         expect(userID).toBe(manager);
         const [configuration] = await database.client<{ state: string }[]>`
-          SELECT state FROM factory.project_setup_readiness
-          WHERE project_id=${projectID} AND task='configuration'`;
+          SELECT state FROM factory.operation
+          WHERE kind='projects.setup_readiness' AND idempotency_key=${`projects.setup_readiness:${projectID}:configuration`}`;
         expect(configuration?.state).toBe("pending");
         await expect(requireSetupReady(database.client, projectID)).rejects.toThrow("Confirm");
         calls.push("inspect-configuration");
@@ -29,12 +30,13 @@ test("local repository registration persists configuration intent before prepari
       },
     };
     const service = createProjectService(dependencies);
+    const slug = `local-acme-${crypto.randomUUID()}`;
     const project = await service.register(manager, {
       name: "Local ACME",
-      slug: `local-acme-${crypto.randomUUID()}`,
-      repositoryUrl: "https://forge.test/factory/acme.git",
+      slug,
+      repositoryUrl: `https://forge.test/factory/${slug}.git`,
       defaultBranch: "main",
-      devcontainerPath: ".devcontainer/devcontainer.json",
+      actorTemplatePath: ".factory/actor-template.json",
     });
     await eventually(
       async () => calls.length,
@@ -49,8 +51,8 @@ test("local repository registration persists configuration intent before prepari
     ).toHaveLength(0);
     await service.recover();
     expect(recoveringCalls).toEqual([false, true]);
-    await database.client`UPDATE factory.project_setup_readiness SET state='ready'
-      WHERE project_id=${project.id} AND task='configuration'`;
+    await database.client`UPDATE factory.operation SET state='ready',completed_at=now()
+      WHERE kind='projects.setup_readiness' AND idempotency_key=${`projects.setup_readiness:${project.id}:configuration`}`;
     await requireSetupReady(database.client, project.id);
     await service.recover();
     expect(recoveringCalls).toEqual([false, true]);

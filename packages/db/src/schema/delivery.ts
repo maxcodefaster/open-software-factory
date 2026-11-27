@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  boolean,
   check,
   foreignKey,
-  index,
   integer,
   jsonb,
   type PgTableExtraConfigValue,
@@ -14,102 +14,14 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { authUser } from "./auth";
-import {
-  branchOperationState,
-  changeCommitSource,
-  changeCommitState,
-  changeState,
-  mergeOperationState,
-  promotionOperationState,
-  pullRequestOperationState,
-  verificationState,
-} from "./enums";
+import { changeCommitSource, changeCommitState, changeState, verificationState } from "./enums";
 import { monitoringIncident, monitoringPolicy } from "./monitoring";
 import { factorySchema } from "./namespaces";
-import { project, projectDeliveryPolicy } from "./projects";
+import { operation } from "./operations";
+import { project } from "./projects";
 import { candidateReview } from "./review";
 import { runtimeAttempt } from "./runtime";
 import { requirementApproval, ticket } from "./tickets";
-import { executionPolicyCommand } from "./usage";
-
-export const branchCreateOperation = factorySchema.table(
-  "branch_create_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    changeId: uuid("change_id").notNull(),
-    repositoryOwner: text("repository_owner").notNull(),
-    repositoryName: text("repository_name").notNull(),
-    branchName: text("branch_name").notNull(),
-    startSha: text("start_sha").notNull(),
-    idempotencyKey: text("idempotency_key").notNull(),
-    state: branchOperationState("state").default("pending").notNull(),
-    attemptCount: integer("attempt_count").default(0).notNull(),
-    leaseOwner: text("lease_owner"),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
-    leaseGeneration: bigint("lease_generation", { mode: "number" }).default(0).notNull(),
-    reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).defaultNow().notNull(),
-    observedHeadSha: text("observed_head_sha"),
-    lastError: text("last_error"),
-    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    index("branch_create_operation_due_idx").using(
-      "btree",
-      table.state.asc().nullsLast(),
-      table.reconcileAfter.asc().nullsLast(),
-      table.leaseExpiresAt.asc().nullsLast(),
-    ),
-    foreignKey({
-      columns: [table.changeId, table.branchName, table.startSha],
-      foreignColumns: [change.id, change.branchName, change.baseSha],
-      name: "branch_create_operation_change_id_branch_name_start_sha_fkey",
-    }),
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "branch_create_operation_change_id_fkey",
-    }),
-    unique("branch_create_operation_change_id_key").on(table.changeId),
-    unique("branch_create_operation_repository_owner_repository_name_br_key").on(
-      table.repositoryOwner,
-      table.repositoryName,
-      table.branchName,
-    ),
-    unique("branch_create_operation_idempotency_key_key").on(table.idempotencyKey),
-    check("branch_create_operation_lease_generation_check", sql`${table.leaseGeneration} >= 0`),
-    check("branch_create_operation_attempt_count_check", sql`${table.attemptCount} >= 0`),
-    check(
-      "branch_create_operation_check",
-      sql`(${table.leaseOwner} IS NULL) = (${table.leaseExpiresAt} IS NULL)`,
-    ),
-    check(
-      "branch_create_operation_check1",
-      sql`(${table.state} = ANY (ARRAY['succeeded'::branch_operation_state, 'failed'::branch_operation_state, 'cancelled'::branch_operation_state])) = (${table.completedAt} IS NOT NULL)`,
-    ),
-    check(
-      "branch_create_operation_check2",
-      sql`(${table.state} <> 'succeeded'::branch_operation_state) OR (${table.observedHeadSha} = ${table.startSha})`,
-    ),
-    check(
-      "branch_create_operation_observed_head_sha_check",
-      sql`(${table.observedHeadSha} IS NULL) OR (${table.observedHeadSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
-    ),
-    check(
-      "branch_create_operation_repository_name_check",
-      sql`length(btrim(${table.repositoryName})) > 0`,
-    ),
-    check(
-      "branch_create_operation_repository_owner_check",
-      sql`length(btrim(${table.repositoryOwner})) > 0`,
-    ),
-    check(
-      "branch_create_operation_start_sha_check",
-      sql`${table.startSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-  ],
-);
 
 export const change = factorySchema.table(
   "change",
@@ -144,18 +56,13 @@ export const change = factorySchema.table(
     }),
     foreignKey({
       columns: [table.deliveryWaitingPolicyId],
-      foreignColumns: [projectDeliveryPolicy.id],
+      foreignColumns: [operation.id],
       name: "change_delivery_waiting_policy_fk",
     }),
     foreignKey({
       columns: [table.projectId],
       foreignColumns: [project.id],
       name: "change_project_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.requirementApprovalId],
-      foreignColumns: [requirementApproval.id],
-      name: "change_requirement_approval_id_fkey",
     }),
     foreignKey({
       columns: [table.requirementApprovalId, table.ticketId],
@@ -166,11 +73,6 @@ export const change = factorySchema.table(
       columns: [table.runtimeAttemptId, table.id],
       foreignColumns: [runtimeAttempt.id, runtimeAttempt.changeId],
       name: "change_runtime_attempt_fk",
-    }),
-    foreignKey({
-      columns: [table.ticketId],
-      foreignColumns: [ticket.id],
-      name: "change_ticket_id_fkey",
     }),
     foreignKey({
       columns: [table.ticketId, table.projectId],
@@ -249,7 +151,7 @@ export const deliveryApproval = factorySchema.table(
     }),
     foreignKey({
       columns: [table.deliveryPolicyId],
-      foreignColumns: [projectDeliveryPolicy.id],
+      foreignColumns: [operation.id],
       name: "delivery_policy_basis_fk",
     }),
     unique("delivery_approval_exact_basis_key")
@@ -281,12 +183,12 @@ export const changeCommitOperation = factorySchema.table(
   {
     id: uuid("id").primaryKey().notNull(),
     changeId: uuid("change_id").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id"),
+    runtimeAttemptId: uuid("runtime_attempt_id").notNull(),
     sequence: integer("sequence").notNull(),
     branchName: text("branch_name").notNull(),
     expectedParentSha: text("expected_parent_sha").notNull(),
     integrationBaseSha: text("integration_base_sha"),
-    mergeParentSha: text("merge_parent_sha"),
+    isMerge: boolean("is_merge").default(false).notNull(),
     commitSha: text("commit_sha"),
     observedRemoteSha: text("observed_remote_sha"),
     commitMessage: text("commit_message").notNull(),
@@ -298,10 +200,6 @@ export const changeCommitOperation = factorySchema.table(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     source: changeCommitSource("source").default("agent").notNull(),
-    repositoryPath: text("repository_path"),
-    repositoryBlobSha: text("repository_blob_sha"),
-    repositoryContent: text("repository_content"),
-    contentDigest: text("content_digest"),
   },
   (table): PgTableExtraConfigValue[] => [
     uniqueIndex("change_commit_one_active_uidx")
@@ -320,11 +218,6 @@ export const changeCommitOperation = factorySchema.table(
       name: "change_commit_operation_created_by_fkey",
     }),
     foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "change_commit_operation_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
       columns: [table.runtimeAttemptId, table.changeId],
       foreignColumns: [runtimeAttempt.id, runtimeAttempt.changeId],
       name: "change_commit_operation_runtime_change_fk",
@@ -340,8 +233,8 @@ export const changeCommitOperation = factorySchema.table(
       sql`(${table.integrationBaseSha} IS NULL) OR (${table.integrationBaseSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
     ),
     check(
-      "change_commit_merge_parent",
-      sql`(${table.mergeParentSha} IS NULL) OR ((${table.mergeParentSha} = ${table.integrationBaseSha}) AND (${table.mergeParentSha} <> ${table.expectedParentSha}))`,
+      "change_commit_is_merge",
+      sql`(NOT ${table.isMerge}) OR ((${table.integrationBaseSha} IS NOT NULL) AND (${table.integrationBaseSha} <> ${table.expectedParentSha}))`,
     ),
     check(
       "change_commit_operation_check",
@@ -357,7 +250,7 @@ export const changeCommitOperation = factorySchema.table(
     ),
     check(
       "change_commit_operation_commit_presence_check",
-      sql`(${table.state} <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR (${table.commitSha} IS NOT NULL) OR ((${table.source} = 'repository-document'::change_commit_source) AND (${table.state} = 'push-intended'::change_commit_state))`,
+      sql`(${table.state} <> ALL (ARRAY['committed'::change_commit_state, 'push-intended'::change_commit_state, 'succeeded'::change_commit_state])) OR (${table.commitSha} IS NOT NULL)`,
     ),
     check(
       "change_commit_operation_commit_sha_check",
@@ -370,216 +263,7 @@ export const changeCommitOperation = factorySchema.table(
     check("change_commit_operation_sequence_check", sql`${table.sequence} > 0`),
     check(
       "change_commit_operation_source_check",
-      sql`(((${table.source})::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND (${table.runtimeAttemptId} IS NOT NULL) AND (${table.repositoryPath} IS NULL) AND (${table.repositoryBlobSha} IS NULL) AND (${table.repositoryContent} IS NULL) AND (${table.contentDigest} IS NULL)) OR (((${table.source})::text = 'repository-document'::text) AND (${table.runtimeAttemptId} IS NULL) AND (${table.repositoryPath} IS NOT NULL) AND (${table.repositoryBlobSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (${table.repositoryContent} IS NOT NULL) AND (${table.contentDigest} ~ '^[0-9a-f]{64}$'::text))`,
-    ),
-  ],
-);
-
-export const promotionOperation = factorySchema.table(
-  "promotion_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    changeId: uuid("change_id").notNull(),
-    projectId: uuid("project_id").notNull(),
-    commitSha: text("commit_sha").notNull(),
-    previousRuntimeAttemptId: uuid("previous_runtime_attempt_id"),
-    replacementRuntimeAttemptId: uuid("replacement_runtime_attempt_id"),
-    state: promotionOperationState("state").default("pending").notNull(),
-    lastError: text("last_error"),
-    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-    ordinal: integer("ordinal").default(1).notNull(),
-    supersedesId: uuid("supersedes_id"),
-    retryCommandId: uuid("retry_command_id"),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "promotion_operation_change_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.previousRuntimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "promotion_operation_previous_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "promotion_operation_project_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.replacementRuntimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "promotion_operation_replacement_runtime_attempt_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.retryCommandId],
-      foreignColumns: [executionPolicyCommand.commandId],
-      name: "promotion_operation_retry_command_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.supersedesId],
-      foreignColumns: [promotionOperation.id],
-      name: "promotion_operation_supersedes_id_fkey",
-    }),
-    unique("promotion_operation_sequence").on(table.changeId, table.ordinal),
-    unique("promotion_operation_replacement_runtime_attempt_id_key").on(
-      table.replacementRuntimeAttemptId,
-    ),
-    unique("promotion_operation_supersedes_id_key").on(table.supersedesId),
-    unique("promotion_operation_retry_command_id_key").on(table.retryCommandId),
-    check(
-      "promotion_operation_retry_identity",
-      sql`((${table.ordinal} = 1) AND (${table.supersedesId} IS NULL) AND (${table.retryCommandId} IS NULL)) OR ((${table.ordinal} > 1) AND (${table.supersedesId} IS NOT NULL) AND (${table.retryCommandId} = ${table.id}))`,
-    ),
-    check(
-      "promotion_operation_check",
-      sql`(${table.state} = ANY (ARRAY['succeeded'::promotion_operation_state, 'failed'::promotion_operation_state])) = (${table.completedAt} IS NOT NULL)`,
-    ),
-    check(
-      "promotion_operation_commit_sha_check",
-      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-    check("promotion_operation_ordinal_check", sql`${table.ordinal} > 0`),
-  ],
-);
-
-export const pullRequestOperation = factorySchema.table(
-  "pull_request_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    changeId: uuid("change_id").notNull(),
-    repositoryOwner: text("repository_owner").notNull(),
-    repositoryName: text("repository_name").notNull(),
-    baseBranch: text("base_branch").notNull(),
-    headBranch: text("head_branch").notNull(),
-    firstHeadSha: text("first_head_sha").notNull(),
-    title: text("title").notNull(),
-    body: text("body").notNull(),
-    idempotencyKey: text("idempotency_key").notNull(),
-    state: pullRequestOperationState("state").default("pending").notNull(),
-    pullRequestNumber: bigint("pull_request_number", { mode: "number" }),
-    pullRequestUrl: text("pull_request_url"),
-    lastError: text("last_error"),
-    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "pull_request_operation_change_id_fkey",
-    }),
-    unique("pull_request_operation_change_id_key").on(table.changeId),
-    unique("pull_request_operation_idempotency_key_key").on(table.idempotencyKey),
-    check("pull_request_operation_body_check", sql`length(${table.body}) <= 10000`),
-    check(
-      "pull_request_operation_check",
-      sql`(${table.state} = ANY (ARRAY['succeeded'::pull_request_operation_state, 'failed'::pull_request_operation_state])) = (${table.completedAt} IS NOT NULL)`,
-    ),
-    check(
-      "pull_request_operation_check1",
-      sql`(${table.state} <> 'succeeded'::pull_request_operation_state) OR ((${table.pullRequestNumber} IS NOT NULL) AND (${table.pullRequestUrl} IS NOT NULL))`,
-    ),
-    check(
-      "pull_request_operation_first_head_sha_check",
-      sql`${table.firstHeadSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-    check(
-      "pull_request_operation_title_check",
-      sql`(length(btrim(${table.title})) >= 1) AND (length(btrim(${table.title})) <= 240)`,
-    ),
-  ],
-);
-
-export const mergeOperation = factorySchema.table(
-  "merge_operation",
-  {
-    id: uuid("id").primaryKey().notNull(),
-    changeId: uuid("change_id").notNull(),
-    deliveryApprovalId: uuid("delivery_approval_id").notNull(),
-    pullRequestNumber: bigint("pull_request_number", { mode: "number" }).notNull(),
-    baseSha: text("base_sha").notNull(),
-    commitSha: text("commit_sha").notNull(),
-    idempotencyKey: text("idempotency_key").notNull(),
-    state: mergeOperationState("state").default("pending").notNull(),
-    observedDefaultSha: text("observed_default_sha"),
-    lastError: text("last_error"),
-    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    uniqueIndex("merge_operation_one_success")
-      .using("btree", table.changeId.asc().nullsLast())
-      .where(sql`(${table.state} = 'succeeded'::merge_operation_state)`),
-    uniqueIndex("merge_operation_one_unfinished")
-      .using("btree", table.changeId.asc().nullsLast())
-      .where(
-        sql`(${table.state} <> ALL (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state]))`,
-      ),
-    foreignKey({
-      columns: [table.changeId],
-      foreignColumns: [change.id],
-      name: "merge_operation_change_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.deliveryApprovalId],
-      foreignColumns: [deliveryApproval.id],
-      name: "merge_operation_delivery_approval_id_fkey",
-    }),
-    unique("merge_operation_delivery_approval_id_key").on(table.deliveryApprovalId),
-    unique("merge_operation_idempotency_key_key").on(table.idempotencyKey),
-    check(
-      "merge_operation_base_sha_check",
-      sql`${table.baseSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-    check(
-      "merge_operation_check",
-      sql`(${table.state} = ANY (ARRAY['succeeded'::merge_operation_state, 'failed'::merge_operation_state])) = (${table.completedAt} IS NOT NULL)`,
-    ),
-    check(
-      "merge_operation_check1",
-      sql`(${table.state} <> 'succeeded'::merge_operation_state) OR (${table.observedDefaultSha} = ${table.commitSha})`,
-    ),
-    check(
-      "merge_operation_commit_sha_check",
-      sql`${table.commitSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
-    ),
-    check(
-      "merge_operation_observed_default_sha_check",
-      sql`(${table.observedDefaultSha} IS NULL) OR (${table.observedDefaultSha} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)`,
-    ),
-  ],
-);
-
-export const stagingPreview = factorySchema.table(
-  "staging_preview",
-  {
-    projectId: uuid("project_id").primaryKey().notNull(),
-    revision: text("revision").notNull(),
-    runtimeAttemptId: uuid("runtime_attempt_id"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "staging_preview_project_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.runtimeAttemptId, table.projectId],
-      foreignColumns: [runtimeAttempt.id, runtimeAttempt.projectId],
-      name: "staging_preview_runtime_attempt_id_project_id_fkey",
-    }),
-    unique("staging_preview_runtime_attempt_id_key").on(table.runtimeAttemptId),
-    check(
-      "staging_preview_revision_check",
-      sql`${table.revision} ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text`,
+      sql`((${table.source})::text = ANY (ARRAY['agent'::text, 'integration'::text, 'workspace'::text])) AND (${table.runtimeAttemptId} IS NOT NULL)`,
     ),
   ],
 );
@@ -595,7 +279,6 @@ export const verification = factorySchema.table(
     actionRunId: bigint("action_run_id", { mode: "number" }),
     actionRunUrl: text("action_run_url"),
     runtimeAttemptId: uuid("runtime_attempt_id"),
-    runnerName: text("runner_name").notNull(),
     runnerId: bigint("runner_id", { mode: "number" }),
     runnerUuid: uuid("runner_uuid"),
     runnerToken: text("runner_token"),
@@ -664,26 +347,6 @@ export const verification = factorySchema.table(
     check(
       "verification_summary_check",
       sql`(${table.summary} IS NULL) OR (length(${table.summary}) <= 2000)`,
-    ),
-  ],
-);
-
-export const stagingConfiguration = factorySchema.table(
-  "staging_configuration",
-  {
-    runtimeAttemptId: uuid("runtime_attempt_id").primaryKey().notNull(),
-    declaration: jsonb("declaration").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.runtimeAttemptId],
-      foreignColumns: [runtimeAttempt.id],
-      name: "staging_configuration_attempt_fkey",
-    }),
-    check(
-      "staging_configuration_declaration_check",
-      sql`jsonb_typeof(${table.declaration}) = 'object'::text`,
     ),
   ],
 );

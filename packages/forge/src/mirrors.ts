@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RepositoryMirror } from "../../project-domain/src/repository-mirror";
+import type { RepositoryMirror } from "#project-domain/repository-mirror";
 import type { ForgeRepository } from "./contracts";
 
 const mirror = z.object({

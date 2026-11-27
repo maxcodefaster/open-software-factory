@@ -1,15 +1,12 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, lte, sql as query } from "drizzle-orm";
 import type { z } from "zod";
-import type { reviewExecutionArgumentsInput } from "../../../../packages/conversation-domain/src/candidate-review";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { changeCommitOperation, runtimeAttempt } from "../../../../packages/db/src/schema";
-import {
-  environmentManifest,
-  environmentMetadata,
-} from "../../../../packages/project-domain/src/environment";
-import { type EnvironmentSecrets } from "../environments/api";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { reviewExecutionArgumentsInput } from "#conversation-domain/candidate-review";
+import type { createDatabase } from "#db/client";
+import { changeCommitOperation, runtimeAttempt } from "#db/schema";
+import { environmentManifest, environmentMetadata } from "#project-domain/environment";
+import type { EnvironmentSecrets } from "../environments/api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { createOpenCodeClient, listOpenCodeSessionTree } from "./opencode-adapter";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -264,13 +261,17 @@ export function createReviewExecutionReader(
         manifest: unknown;
       }[]
     >`SELECT DISTINCT intent.session_id AS "sessionID",original.workspace_id AS "workspaceID",
-        environment.secret_key AS key,environment.runtime_attempt_id AS "frozenID",
-        write.fingerprint,write.command_id AS "commandID",write.manifest
+        environment.payload->>'secretKey' AS key,environment.scope_id AS "frozenID",
+        write.payload->>'fingerprint' AS fingerprint,write.id AS "commandID",write.payload->'manifest' AS manifest
       FROM factory.change_agent_turn_intent intent
       JOIN factory.agent_turn turn ON turn.id=intent.turn_id
       LEFT JOIN factory.runtime_attempt original ON original.id=intent.runtime_attempt_id
-      LEFT JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=intent.runtime_attempt_id
-      LEFT JOIN factory.environment_write write ON write.secret_key=environment.secret_key AND write.state='committed'
+      LEFT JOIN factory.operation environment ON environment.kind='runtime.environment_intent'
+        AND environment.scope_type='runtime_attempt'
+        AND environment.idempotency_key='runtime.environment_intent:' || intent.runtime_attempt_id::text
+      LEFT JOIN factory.operation write ON write.kind='environments.write'
+        AND write.idempotency_key='environments.write:' || (environment.payload->>'secretKey')
+        AND write.state='committed'
       WHERE intent.change_id=${scope.changeID} AND NOT (turn.authority ? 'review')
         AND turn.created_at<=${candidate.completedAt}::timestamptz ORDER BY intent.session_id`;
     if (!roots.length || roots.some((root) => root.workspaceID !== candidate.workspaceID))
@@ -301,10 +302,7 @@ export function createReviewExecutionReader(
           unavailable: "Historical input redaction is unavailable",
           limits,
         };
-      hidden.push(
-        ...stored.bundle.variables.map((variable) => variable.value),
-        ...stored.bundle.registries.map((registry) => registry.password),
-      );
+      hidden.push(...stored.bundle.variables.map((variable) => variable.value));
     }
     const client = createOpenCodeClient((request, path) =>
       hub.request(scope.attemptID, "agent", request, path),

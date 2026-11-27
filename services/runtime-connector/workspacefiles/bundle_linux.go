@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"path"
@@ -26,10 +28,11 @@ const MaxSourceBundleBytes int64 = 4 << 30
 const maxSourceEntries = 200_000
 
 type Bundle struct {
-	Version int      `json:"version"`
-	Bytes   int64    `json:"bytes"`
-	SHA256  string   `json:"sha256"`
-	Chunks  []string `json:"chunks"`
+	Version    int      `json:"version"`
+	Bytes      int64    `json:"bytes"`
+	SHA256     string   `json:"sha256"`
+	Chunks     []string `json:"chunks"`
+	TreeSHA256 string   `json:"treeSHA256,omitempty"`
 }
 
 func bundlePath(name string) bool {
@@ -126,7 +129,7 @@ func (source *Source) walkBundle(visit func(string, error) error) error {
 			return err
 		}
 		defer directory.Close()
-		entries, err := directory.ReadDir(maxSourceEntries + 1)
+		entries, err := source.bundleReads.read(directory)
 		if err != nil && err != io.EOF {
 			return err
 		}
@@ -152,6 +155,11 @@ func sameBundleStat(expected syscall.Stat_t, current unix.Stat_t) bool {
 }
 
 func (source *Source) verifyBundleEntry(name string, expected syscall.Stat_t, attrs map[string]string) error {
+	var rebaseErr error
+	expected, rebaseErr = source.bundleReads.rebase(expected)
+	if rebaseErr != nil {
+		return rebaseErr
+	}
 	fd, err := unix.Openat2(int(source.root.Fd()), name, &unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV})
 	if err != nil {
 		return ErrConflict
@@ -196,7 +204,7 @@ func (source *Source) bundleChildren(name string) ([]string, error) {
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
-	entries, err := file.ReadDir(maxSourceEntries + 1)
+	entries, err := source.bundleReads.read(file)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
@@ -228,19 +236,21 @@ func (source *Source) verifyBundleChildren(name string, expected []string) error
 }
 
 // ExportBundle is called only under Service.writes after its writer has been
-// fenced. Actor callers additionally stop/drain their private Docker containers
-// and serialize Parent Git operations before reaching this operation.
+// fenced. Native Actor callers additionally stop every Work writer and
+// serialize controller Git operations before reaching this operation.
 func (source *Source) ExportBundle(output *os.File) (Bundle, error) {
-	source.life.RLock()
-	defer source.life.RUnlock()
+	// Source listings/watch setup can themselves update directory atime on
+	// the native kernel. Join them too, not only cooperating content writers.
+	source.life.Lock()
+	defer source.life.Unlock()
 	source.writes.Lock()
 	defer source.writes.Unlock()
 	if source.root == nil {
 		return Bundle{}, os.ErrClosed
 	}
-	view := source
+	view := &Source{root: source.root, bundleReads: make(bundleDirectoryReads)}
 	if source.archiveRoot != nil {
-		view = &Source{root: source.archiveRoot}
+		view.root = source.archiveRoot
 	}
 	immutableAtime := readOnlyNoAtime(view.root)
 	type entry struct {
@@ -444,92 +454,239 @@ func InspectBundle(file *os.File) (Bundle, error) {
 		}
 	}
 	result.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return Bundle{}, err
+	}
+	tree, err := inspectBundleTree(file)
+	if err != nil {
+		return Bundle{}, err
+	}
+	result.TreeSHA256 = tree.sha256
 	return result, nil
 }
 
-// MaterializeBundle creates a new, private staging checkout. It never writes
-// through an existing tree, follows archive links, reclones, or deletes old data.
-// The caller publishes this directory only after complete validation succeeds.
-func MaterializeBundle(input *os.File, destination string) error {
-	if _, err := input.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	type item struct{ h tar.Header }
-	items := map[string]item{}
-	var ordered []string
+type bundleTreeEntry struct {
+	h       tar.Header
+	content [sha256.Size]byte
+}
+
+type bundleTree struct {
+	items   map[string]bundleTreeEntry
+	ordered []string
+	sha256  string
+}
+
+// Inspection and materialization share the same bounded validation pass. Hash
+// every regular file's bytes here, including Git/history, not a filesystem stat,
+// Git object ID or archive checksum standing in for those bytes.
+func inspectBundleTree(input io.Reader) (*bundleTree, error) {
+	tree := &bundleTree{items: map[string]bundleTreeEntry{}}
+	items := tree.items
 	reader := tar.NewReader(io.LimitReader(input, MaxSourceBundleBytes+1))
 	var total int64
+	buffer := make([]byte, 32<<10)
 	for {
 		h, err := reader.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return errors.New("invalid Source archive")
+			return nil, errors.New("invalid Source archive")
 		}
 		if !bundlePath(h.Name) || h.Mode < 0 || h.Mode & ^int64(0777) != 0 || len(items) >= maxSourceEntries {
-			return ErrPath
+			return nil, ErrPath
 		}
 		if h.Uid != 1000 || h.Gid != 1000 {
-			return ErrPath
+			return nil, ErrPath
 		}
 		if _, exists := items[h.Name]; exists {
-			return errors.New("duplicate Source archive path")
+			return nil, errors.New("duplicate Source archive path")
 		}
 		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeSymlink && h.Typeflag != tar.TypeLink {
-			return errors.New("unsupported Source archive entry")
+			return nil, errors.New("unsupported Source archive entry")
 		}
-		if h.Typeflag == tar.TypeSymlink && !bundleLink(h.Name, h.Linkname) {
-			return ErrPath
+		if h.Size < 0 || (h.Typeflag != tar.TypeReg && h.Size != 0) {
+			return nil, ErrPath
+		}
+		// Materialization uses nanosecond Unix timestamps. Refuse values that
+		// would overflow that representation rather than attest a different tree.
+		if !time.Unix(0, h.ModTime.UnixNano()).Equal(h.ModTime) ||
+			(!h.AccessTime.IsZero() && !time.Unix(0, h.AccessTime.UnixNano()).Equal(h.AccessTime)) {
+			return nil, errors.New("unsupported Source timestamp")
+		}
+		// Linux symlink permissions are always 0777; chmod cannot restore a
+		// different archive value without following the link.
+		if h.Typeflag == tar.TypeSymlink && (h.Mode != 0777 || !bundleLink(h.Name, h.Linkname)) {
+			return nil, ErrPath
 		}
 		if h.Typeflag == tar.TypeLink && (!bundlePath(h.Linkname) || h.Linkname == ".") {
-			return ErrPath
+			return nil, ErrPath
 		}
 		if h.Name == "." && h.Typeflag != tar.TypeDir {
-			return ErrPath
+			return nil, ErrPath
 		}
+		var attrNamesBytes int
 		for key, value := range h.PAXRecords {
 			if key == "path" || key == "linkpath" || key == "mtime" || key == "atime" {
 				continue
 			}
 			if !strings.HasPrefix(key, "FACTORY.xattr.") {
-				return errors.New("unsupported Source PAX metadata")
+				return nil, errors.New("unsupported Source PAX metadata")
 			}
-			name, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(key, "FACTORY.xattr."))
-			if err != nil || !strings.HasPrefix(string(name), "user.") || strings.ContainsRune(string(name), 0) {
-				return ErrPath
+			encodedName := strings.TrimPrefix(key, "FACTORY.xattr.")
+			name, err := base64.RawURLEncoding.DecodeString(encodedName)
+			if err != nil || !strings.HasPrefix(string(name), "user.") || strings.ContainsRune(string(name), 0) ||
+				base64.RawURLEncoding.EncodeToString(name) != encodedName {
+				return nil, ErrPath
 			}
-			if _, err := base64.StdEncoding.DecodeString(value); err != nil {
-				return ErrPath
+			data, err := base64.StdEncoding.DecodeString(value)
+			if err != nil || base64.StdEncoding.EncodeToString(data) != value {
+				return nil, ErrPath
+			}
+			attrNamesBytes += len(name) + 1
+			if attrNamesBytes > 1<<20 || len(data) > 1<<20 {
+				return nil, ErrTooLarge
 			}
 		}
 		total += h.Size
 		if total > MaxSourceBundleBytes {
-			return ErrTooLarge
+			return nil, ErrTooLarge
 		}
-		items[h.Name] = item{*h}
-		ordered = append(ordered, h.Name)
+		entry := bundleTreeEntry{h: *h}
+		if h.Typeflag == tar.TypeReg {
+			content := sha256.New()
+			if n, err := io.CopyBuffer(content, reader, buffer); err != nil || n != h.Size {
+				return nil, errors.New("invalid Source archive content")
+			}
+			copy(entry.content[:], content.Sum(nil))
+		}
+		items[h.Name] = entry
+		tree.ordered = append(tree.ordered, h.Name)
 	}
 	if root, ok := items["."]; !ok || root.h.Typeflag != tar.TypeDir {
-		return ErrPath
+		return nil, ErrPath
 	}
+	// A hardlink group is named by its lexically first path, not whichever
+	// member the tar happens to store with data. Equal bytes in distinct inodes
+	// remain distinct topology; archive ordering and inode numbers do not.
+	links := map[string]string{}
 	for name, entry := range items {
 		if name != "." {
 			parent, exists := items[path.Dir(name)]
 			if !exists || parent.h.Typeflag != tar.TypeDir {
-				return ErrPath
+				return nil, ErrPath
 			}
 		}
 		if entry.h.Typeflag == tar.TypeLink {
 			target, exists := items[entry.h.Linkname]
 			if !exists || target.h.Typeflag != tar.TypeReg || entry.h.Uid != target.h.Uid || entry.h.Gid != target.h.Gid || entry.h.Mode != target.h.Mode || !entry.h.ModTime.Equal(target.h.ModTime) || !entry.h.AccessTime.Equal(target.h.AccessTime) || !reflect.DeepEqual(entry.h.PAXRecords, target.h.PAXRecords) {
-				return ErrPath
+				return nil, ErrPath
 			}
+			first, exists := links[entry.h.Linkname]
+			if !exists {
+				first = entry.h.Linkname
+			}
+			if name < first {
+				first = name
+			}
+			links[entry.h.Linkname] = first
 		}
 	}
+	sort.Strings(tree.ordered)
+	identity := sha256.New()
+	bundleIdentityString(identity, "Factory Source tree\x00v1")
+	bundleIdentityUint64(identity, uint64(len(items)))
+	for _, name := range tree.ordered {
+		entry := items[name]
+		h := entry.h
+		kind := h.Typeflag
+		if kind == tar.TypeLink {
+			kind = tar.TypeReg
+		}
+		bundleIdentityString(identity, name)
+		bundleIdentityUint64(identity, uint64(kind))
+		bundleIdentityUint64(identity, uint64(h.Mode))
+		bundleIdentityUint64(identity, uint64(h.Uid))
+		bundleIdentityUint64(identity, uint64(h.Gid))
+		bundleIdentityUint64(identity, uint64(h.ModTime.Unix()))
+		bundleIdentityUint64(identity, uint64(h.ModTime.Nanosecond()))
+		var attrs []string
+		for key := range h.PAXRecords {
+			if strings.HasPrefix(key, "FACTORY.xattr.") {
+				attrs = append(attrs, key)
+			}
+		}
+		sort.Strings(attrs)
+		bundleIdentityUint64(identity, uint64(len(attrs)))
+		for _, key := range attrs {
+			// Validation requires canonical, injective encodings of both the
+			// xattr name and binary value, including empty values.
+			bundleIdentityString(identity, key)
+			bundleIdentityString(identity, h.PAXRecords[key])
+		}
+		switch kind {
+		case tar.TypeReg:
+			target := name
+			if h.Typeflag == tar.TypeLink {
+				target = h.Linkname
+				entry = items[target]
+			}
+			first, exists := links[target]
+			if !exists {
+				first = target
+			}
+			bundleIdentityString(identity, first)
+			bundleIdentityUint64(identity, uint64(entry.h.Size))
+			bundleIdentityString(identity, string(entry.content[:]))
+		case tar.TypeSymlink:
+			bundleIdentityString(identity, h.Linkname)
+		}
+	}
+	// Only atime (ordinary authenticated reads can change it) and unrestorable
+	// ctime are excluded from saved filesystem metadata. Tar encoding details
+	// are not tree state. This proves neither ROOTFS nor process continuity.
+	tree.sha256 = hex.EncodeToString(identity.Sum(nil))
+	return tree, nil
+}
+
+func bundleIdentityUint64(output hash.Hash, value uint64) {
+	var data [8]byte
+	binary.BigEndian.PutUint64(data[:], value)
+	output.Write(data[:])
+}
+
+func bundleIdentityString(output hash.Hash, value string) {
+	bundleIdentityUint64(output, uint64(len(value)))
+	io.WriteString(output, value)
+}
+
+// MaterializeBundle creates a new, private staging checkout. It never writes
+// through an existing tree, follows archive links, reclones, or deletes old data.
+// The caller publishes this directory only after complete validation succeeds.
+func MaterializeBundle(input *os.File, destination string) error {
+	return materializeBundle(input, destination, unix.Syncfs)
+}
+
+func materializeBundle(input *os.File, destination string, syncFilesystem func(int) error) error {
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	tree, err := inspectBundleTree(input)
+	if err != nil {
+		return err
+	}
+	items, ordered := tree.items, tree.ordered
 	if err := os.Mkdir(destination, 0700); err != nil {
 		return err
 	}
+	// Keep the private staging directory open before restoring its final mode.
+	// One checked filesystem barrier below covers bytes, links and metadata;
+	// per-file fsync here would precede the metadata restoration.
+	directory, err := unix.Open(destination, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(directory)
 	// Parents must precede children regardless of adversarial archive order.
 	sort.Slice(ordered, func(i, j int) bool {
 		return strings.Count(ordered[i], "/") < strings.Count(ordered[j], "/") || (strings.Count(ordered[i], "/") == strings.Count(ordered[j], "/") && ordered[i] < ordered[j])
@@ -541,8 +698,10 @@ func MaterializeBundle(input *os.File, destination string) error {
 			}
 		}
 	}
-	input.Seek(0, io.SeekStart)
-	reader = tar.NewReader(input)
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	reader := tar.NewReader(input)
 	for {
 		h, err := reader.Next()
 		if err == io.EOF {
@@ -559,13 +718,12 @@ func MaterializeBundle(input *os.File, destination string) error {
 			return err
 		}
 		_, copyErr := io.CopyN(file, reader, h.Size)
-		syncErr := file.Sync()
-		file.Close()
+		closeErr := file.Close()
 		if copyErr != nil {
 			return copyErr
 		}
-		if syncErr != nil {
-			return syncErr
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 	for _, name := range ordered {
@@ -611,5 +769,5 @@ func MaterializeBundle(input *os.File, destination string) error {
 			return err
 		}
 	}
-	return nil
+	return syncFilesystem(directory)
 }

@@ -1,7 +1,7 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
-import { WorkspaceSharingBar } from "../../apps/factory/src/workspace-sharing";
-import { releaseAvailableWorkspaces } from "./workspace-sharing-commands";
+import { WorkspaceSharingBar } from "../../apps/factory/src/workspace/workspace-sharing";
+import { releaseAvailableWorkspaces, sharingDecisionCount } from "./workspace-sharing-commands";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "./ui-controls.css";
@@ -30,6 +30,9 @@ function SharingControls() {
       <p role="status" aria-label="Opened Workspace">
         {opened()}
       </p>
+      <output class="sr-only" aria-label="Sharing decisions">
+        {sharingDecisionCount()}
+      </output>
     </main>
   );
 }

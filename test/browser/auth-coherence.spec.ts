@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 import { test } from "../fixtures/browser-test";
 import { luminance, rgb } from "../support/visual-contrast";
 

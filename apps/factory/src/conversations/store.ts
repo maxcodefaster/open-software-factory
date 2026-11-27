@@ -1,14 +1,7 @@
 import { and, asc, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import type { z } from "zod";
-import type {
-  ConversationMode,
-  sourceCitationInput,
-} from "../../../../packages/conversation-domain/src/conversation";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
+import type { ConversationMode, sourceCitationInput } from "#conversation-domain/conversation";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
   agentTurn,
   change,
@@ -17,7 +10,7 @@ import {
   conversationEntry,
   ticket,
   ticketConversation,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { contextIn } from "./contexts";

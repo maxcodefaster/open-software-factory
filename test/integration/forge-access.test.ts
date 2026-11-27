@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
 import { z } from "zod";
+import { createForgejoAccess, forgeUsername } from "#forge/access";
+import { createForgejoClient } from "#forge/forge";
 import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
-import { createForgejoAccess, forgeUsername } from "../../packages/forge/src/access";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { installForgeBrowserLogout } from "../../scripts/factory/forge-logout";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -213,11 +213,19 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     // A separate native collaborator grant cannot bypass Factory Project membership.
     await access.repositoryGrant(foreign.owner, foreign.name, id, false);
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned developer',${input.email})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${id},${repository.name},'Owned product',${`${origin}/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${id},${repository.name},'Owned product',${`${origin}/${repository.owner}/${repository.name}`},'main','.factory/actor-template.json',${id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${id},${id},'developer',${id})`;
-    await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
-      VALUES('Factory',${`http://host.docker.internal:${discovery.port}/.well-known/openid-configuration`},${`${origin}/user/oauth2/Factory/callback`},${sourceID},'ready',${id})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,created_by,payload,completed_at)
+      VALUES(${crypto.randomUUID()},'access.forge_connection','installation','00000000-0000-0000-0000-000000000000','access.forge_connection:singleton','ready',${id},
+        ${JSON.stringify({
+          sourceName: "Factory",
+          discoveryUrl: `http://host.docker.internal:${discovery.port}/.well-known/openid-configuration`,
+          redirectUri: `${origin}/user/oauth2/Factory/callback`,
+          sourceId: sourceID,
+          intendedBy: id,
+          observedAt: new Date().toISOString(),
+        })}::jsonb,now())`;
     const reconcile = createForgeAccessReconciliation({
       database,
       forge: access,
@@ -231,12 +239,13 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     await reconcile.reconcile(id);
     expect(
       (
-        await database.client`SELECT state FROM factory.forge_account_intent WHERE user_id=${id}`
+        await database.client`SELECT state FROM factory.operation WHERE kind='forge.account' AND scope_id=${id}`
       )[0]?.["state"],
     ).toBe("ready");
     expect(
       (
-        await database.client`SELECT confirmed FROM factory.forge_grant_intent WHERE user_id=${id}`
+        await database.client`SELECT (result->>'confirmed')::boolean AS confirmed FROM factory.operation
+          WHERE kind='forge.grant' AND payload->>'userId'=${id}`
       )[0]?.["confirmed"],
     ).toBe(true);
     await access.repositoryGrant(repository.owner, repository.name, id, true);
@@ -279,12 +288,13 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     await reconcile.reconcile(id);
     expect(
       (
-        await database.client`SELECT state FROM factory.forge_account_intent WHERE user_id=${id}`
+        await database.client`SELECT state FROM factory.operation WHERE kind='forge.account' AND scope_id=${id}`
       )[0]?.["state"],
     ).toBe("disabled");
     expect(
       (
-        await database.client`SELECT confirmed FROM factory.forge_grant_intent WHERE user_id=${id}`
+        await database.client`SELECT (result->>'confirmed')::boolean AS confirmed FROM factory.operation
+          WHERE kind='forge.grant' AND payload->>'userId'=${id}`
       )[0]?.["confirmed"],
     ).toBe(false);
     wiredFactory = await factoryProcess(undefined, {
@@ -402,7 +412,8 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       await page.evaluate(async () => new URL((await fetch("/user/settings")).url).pathname),
     ).toBe("/user/settings");
     // Leave the native page before logout to avoid its logout SSE navigation.
-    await page.goto(`${origin}/assets/factory-sign-out.html`);
+    const logoutPage = await page.goto(`${origin}/assets/factory-sign-out.html`);
+    expect(logoutPage?.status()).toBe(200);
     await page.waitForURL(wiring.factoryURL, { timeout: 10_000 });
     await page.goto(`${origin}/user/login`);
     const nativeSession = await page.evaluate(async () => {
@@ -410,6 +421,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       return new URL(response.url).pathname;
     });
     expect(nativeSession).toBe("/user/login");
+    await page.screenshot({ path: ".factory/screenshots/forge-access-signed-out.png" });
     expect((await fetch(`${apiURL}user`, { headers: nativeAuth })).status).toBe(200);
     await access.repositoryGrant(
       repository.owner,
@@ -490,11 +502,12 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     const wiredDatabase = wiredFactory.connect();
     try {
       expect(
-        await wiredDatabase.client`SELECT id FROM factory.forge_connection WHERE state='ready'`,
+        await wiredDatabase.client`SELECT id FROM factory.operation WHERE kind='access.forge_connection' AND state='ready'`,
       ).toHaveLength(1);
       expect(await wiredDatabase.client`SELECT "clientId" FROM auth."oauthClient"`).toHaveLength(1);
       expect(
-        await wiredDatabase.client`SELECT username FROM factory.forge_account_intent WHERE state='ready'`,
+        await wiredDatabase.client`SELECT payload->>'username' AS username FROM factory.operation
+          WHERE kind='forge.account' AND state='ready'`,
       ).toHaveLength(1);
     } finally {
       await wiredDatabase.client.end();

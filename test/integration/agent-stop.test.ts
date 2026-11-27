@@ -1,5 +1,5 @@
-import type { DatabaseTransaction } from "../../packages/db/src/client";
 import { expect, test } from "bun:test";
+import type { DatabaseTransaction } from "#db/client";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { ensureConversationIn } from "../../apps/factory/src/conversations/store";

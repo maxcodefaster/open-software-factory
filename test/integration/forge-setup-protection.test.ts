@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { forgeUsername } from "#forge/access";
 import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
-import { forgeUsername } from "../../packages/forge/src/access";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -25,8 +25,10 @@ test("Change branch reconciliation persists exact text writers before confirming
           expect(input.writers).toEqual(expectedWriters);
           const [intent] = await owned.database.client<
             { writers: string[]; merger: string; confirmed: boolean }[]
-          >`SELECT writers,merger,confirmed FROM factory.forge_branch_intent
-            WHERE project_id=${owned.projectID} AND branch=${input.branch}`;
+          >`SELECT payload->'writers' AS writers,payload->>'merger' AS merger,
+              COALESCE((result->>'confirmed')::boolean, false) AS confirmed
+            FROM factory.operation
+            WHERE idempotency_key=${`forge.branch:${owned.projectID}:${input.branch}`}`;
           expect(intent).toEqual({
             writers: [...expectedWriters],
             merger: owner,
@@ -46,9 +48,12 @@ test("Change branch reconciliation persists exact text writers before confirming
       await forge.protectChange(owned.changeID, expectedWriters);
       const [intent] = await owned.database.client<
         { writers: string[]; merger: string; confirmed: boolean }[]
-      >`SELECT writers,merger,confirmed FROM factory.forge_branch_intent
-        WHERE project_id=${owned.projectID} AND branch=(
-          SELECT branch_name FROM factory.change WHERE id=${owned.changeID}
+      >`SELECT payload->'writers' AS writers,payload->>'merger' AS merger,
+          COALESCE((result->>'confirmed')::boolean, false) AS confirmed
+        FROM factory.operation
+        WHERE idempotency_key=(
+          SELECT 'forge.branch:' || ${owned.projectID} || ':' || branch_name
+          FROM factory.change WHERE id=${owned.changeID}
         )`;
       expect(intent).toEqual({ writers: [...expectedWriters], merger: owner, confirmed: true });
     }
@@ -58,7 +63,11 @@ test("Change branch reconciliation persists exact text writers before confirming
       "acknowledgement lost",
     );
     const [unconfirmed] = await owned.database.client<{ confirmed: boolean }[]>`
-      SELECT confirmed FROM factory.forge_branch_intent WHERE project_id=${owned.projectID} AND writers=${[...expectedWriters]}::text[]`;
+      SELECT COALESCE((result->>'confirmed')::boolean, false) AS confirmed
+      FROM factory.operation
+      WHERE kind='forge.branch'
+        AND payload->>'projectId'=${owned.projectID}
+        AND payload->'writers'=${JSON.stringify([...expectedWriters])}::jsonb`;
     expect(unconfirmed?.confirmed).toBe(false);
     loseProtectionResponse = false;
     await forge.protectChange(owned.changeID, expectedWriters);
@@ -73,8 +82,16 @@ test("account reconciliation preserves initial import setup's workflow ownership
   const database = host.connect(1);
   try {
     const owned = await fixture(undefined, undefined, database);
-    await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
-      VALUES('Factory','https://example.invalid/oidc','https://example.invalid/callback',1,'ready',${owned.userID})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,created_by,payload,completed_at)
+      VALUES(${crypto.randomUUID()},'access.forge_connection','installation','00000000-0000-0000-0000-000000000000','access.forge_connection:singleton','ready',${owned.userID},
+        ${JSON.stringify({
+          sourceName: "Factory",
+          discoveryUrl: "https://example.invalid/oidc",
+          redirectUri: "https://example.invalid/callback",
+          sourceId: 1,
+          intendedBy: owned.userID,
+          observedAt: new Date().toISOString(),
+        })}::jsonb,now())`;
     const protections: Array<{ branch: string; protectedFiles?: string }> = [];
     const forge = createForgeAccessReconciliation({
       database,
@@ -96,13 +113,15 @@ test("account reconciliation preserves initial import setup's workflow ownership
       WHERE id=${owned.projectID}`;
     await forge.reconcile(owned.userID);
     expect(protections.at(-1)?.protectedFiles).toBe(".forgejo/workflows/factory-verification.yml");
-    await database.client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
-      SELECT ${crypto.randomUUID()},${crypto.randomUUID()},${owned.userID},id,name,slug,'import','https://example.invalid/owned/import',${"a".repeat(64)},'committed'
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+      SELECT ${crypto.randomUUID()},'projects.repository_intent','project',id::text,'projects.repository_intent:' || id::text,'committed',
+        jsonb_build_object('setupId',${crypto.randomUUID()}::text,'name',name,'slug',slug,'kind','import','sourceUrl','https://example.invalid/owned/import','credentialKey',NULL,'fingerprint',${"a".repeat(64)}::text),
+        ${owned.userID},now()
       FROM factory.project WHERE id=${owned.projectID}`;
     await forge.reconcile(owned.userID);
     expect(protections.at(-1)?.protectedFiles).toBeUndefined();
-    await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-      VALUES(${owned.projectID},'configuration','ready',${crypto.randomUUID()})`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+      VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${owned.projectID},${`projects.setup_readiness:${owned.projectID}:configuration`},'ready',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${owned.userID},now())`;
     await forge.reconcile(owned.userID);
     expect(protections.at(-1)?.protectedFiles).toBe(".forgejo/workflows/factory-verification.yml");
   } finally {
@@ -125,12 +144,20 @@ test.each(["private", "public"] as const)(
       await database.client`UPDATE factory.project
         SET repository_url=${`${scope === "public" ? publicOrigin : origin}/factory/${repository}.git`}
         WHERE id=${owned.projectID}`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${other},${`foreign-${other}`},'External Project',${`https://foreign.invalid/factory/foreign-${other}`},'main','.devcontainer/devcontainer.json',${owned.userID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${other},${`foreign-${other}`},'External Project',${`https://foreign.invalid/factory/foreign-${other}`},'main','.factory/actor-template.json',${owned.userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${other},${owned.userID},'developer',${owned.userID})`;
-      await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
-        VALUES('Factory','https://example.invalid/oidc','https://example.invalid/callback',1,'ready',${owned.userID})`;
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,created_by,payload,completed_at)
+        VALUES(${crypto.randomUUID()},'access.forge_connection','installation','00000000-0000-0000-0000-000000000000','access.forge_connection:singleton','ready',${owned.userID},
+          ${JSON.stringify({
+            sourceName: "Factory",
+            discoveryUrl: "https://example.invalid/oidc",
+            redirectUri: "https://example.invalid/callback",
+            sourceId: 1,
+            intendedBy: owned.userID,
+            observedAt: new Date().toISOString(),
+          })}::jsonb,now())`;
       const grants: Array<{ repository: string; enabled: boolean }> = [];
       const access = createForgeAccessReconciliation({
         database,
@@ -152,12 +179,14 @@ test.each(["private", "public"] as const)(
       await access.reconcile(owned.userID);
       expect(grants).toEqual([{ repository, enabled: true }]);
       expect([
-        ...(await database.client`SELECT confirmed FROM factory.forge_grant_intent
-        WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`),
+        ...(await database.client`SELECT (result->>'confirmed')::boolean AS confirmed
+        FROM factory.operation
+        WHERE idempotency_key=${`forge.grant:${owned.projectID}:${owned.userID}`}`),
       ]).toEqual([{ confirmed: true }]);
       expect(
-        await database.client`SELECT project_id FROM factory.forge_grant_intent
-        WHERE project_id=${other}`,
+        await database.client`SELECT payload->>'projectId' AS project_id
+        FROM factory.operation
+        WHERE kind='forge.grant' AND payload->>'projectId'=${other}`,
       ).toHaveLength(0);
       for (const repositoryURL of [
         `${publicOrigin}/factory/wrong-repository.git`,
@@ -187,8 +216,16 @@ test.each(["lost-grant", "authority-loss"] as const)(
       const owned = await fixture(undefined, undefined, database);
       const repository = `build-turn-${owned.projectID.replaceAll("-", "").slice(0, 12)}`;
       await database.client`UPDATE factory.project SET repository_url=${`https://git.owned.test/factory/${repository}.git`} WHERE id=${owned.projectID}`;
-      await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
-        VALUES('Factory','https://factory.owned.test/oidc','https://git.owned.test/callback',7,'ready',${owned.userID})`;
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,created_by,payload,completed_at)
+        VALUES(${crypto.randomUUID()},'access.forge_connection','installation','00000000-0000-0000-0000-000000000000','access.forge_connection:singleton','ready',${owned.userID},
+          ${JSON.stringify({
+            sourceName: "Factory",
+            discoveryUrl: "https://factory.owned.test/oidc",
+            redirectUri: "https://git.owned.test/callback",
+            sourceId: 7,
+            intendedBy: owned.userID,
+            observedAt: new Date().toISOString(),
+          })}::jsonb,now())`;
       let fail = true;
       let accountCreated = false;
       const enabled: boolean[] = [];
@@ -222,7 +259,10 @@ test.each(["lost-grant", "authority-loss"] as const)(
             const [intent] = await database.client<
               { desired: boolean; confirmed: boolean | null }[]
             >`
-              SELECT desired,confirmed FROM factory.forge_grant_intent WHERE project_id=${owned.projectID} AND user_id=${userID}`;
+              SELECT (payload->>'desired')::boolean AS desired,
+                (result->>'confirmed')::boolean AS confirmed
+              FROM factory.operation
+              WHERE idempotency_key=${`forge.grant:${owned.projectID}:${userID}`}`;
             expect(intent).toEqual({ desired, confirmed: null });
             if (fail) {
               if (failure === "lost-grant") throw new Error("Owned grant acknowledgement lost");
@@ -236,16 +276,21 @@ test.each(["lost-grant", "authority-loss"] as const)(
       );
       expect(enabled).toEqual([false]);
       const [unsettled] = await database.client<{ state: string; source: number }[]>`
-        SELECT state,source_id::int AS source FROM factory.forge_account_intent WHERE user_id=${owned.userID}`;
+        SELECT state,(payload->>'sourceId')::int AS source FROM factory.operation
+        WHERE active_key=${`forge.account:${owned.userID}`}`;
       expect(unsettled).toEqual({ state: "create-intended", source: 7 });
       fail = false;
       await access.reconcile(owned.userID);
       const desired = failure === "lost-grant";
       const [settled] = await database.client<{ state: string; observed: number }[]>`
-        SELECT state,forge_user_id::int AS observed FROM factory.forge_account_intent WHERE user_id=${owned.userID}`;
+        SELECT state,(result->>'forgeUserId')::int AS observed FROM factory.operation
+        WHERE active_key=${`forge.account:${owned.userID}`}`;
       expect(settled).toEqual({ state: desired ? "ready" : "disabled", observed: 71 });
       const [grant] = await database.client<{ desired: boolean; confirmed: boolean }[]>`
-        SELECT desired,confirmed FROM factory.forge_grant_intent WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+        SELECT (payload->>'desired')::boolean AS desired,
+          (result->>'confirmed')::boolean AS confirmed
+        FROM factory.operation
+        WHERE idempotency_key=${`forge.grant:${owned.projectID}:${owned.userID}`}`;
       expect(grant).toEqual({ desired, confirmed: desired });
       expect(enabled).toEqual([false, false, desired]);
     } finally {

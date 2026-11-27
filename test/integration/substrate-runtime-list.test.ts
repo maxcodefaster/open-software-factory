@@ -11,9 +11,8 @@ test("Runtime inventory reads recorded state without native liveness claims or a
     if (!started?.native?.actorUID) throw Error("The native owner did not bind its original Actor");
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${started.id}`;
-    const [before] = await f.database.client`SELECT attempt.*,binding.observation
-      FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-        ON binding.runtime_attempt_id=attempt.id WHERE attempt.id=${started.id}`;
+    const [before] = await f.database
+      .client`SELECT * FROM factory.runtime_attempt WHERE id=${started.id}`;
     const calls = f.calls.length;
     f.beforeCall(async () => {
       throw Error("Owned native observation is unavailable");
@@ -66,11 +65,7 @@ test("Runtime inventory reads recorded state without native liveness claims or a
     expect(await runtime.list(f.projectID, stranger)).toEqual([]);
     expect(f.calls).toHaveLength(calls);
     expect(
-      (
-        await f.database.client`SELECT attempt.*,binding.observation
-      FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-        ON binding.runtime_attempt_id=attempt.id WHERE attempt.id=${started.id}`
-      )[0],
+      (await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${started.id}`)[0],
     ).toEqual(before);
     // An explicit live observation still needs its real owner and RPC result.
     await expect(runtime.get(started.id)).rejects.toThrow(

@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import type { LearningCase, LearningResult } from "#conversation-domain/learning";
+import {
+  LearningResultRejected,
+  learningCase,
+  sampleLearningCase,
+} from "#conversation-domain/learning";
 import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
 import { learningEnabledIn } from "../../apps/factory/src/learning/authority";
 import { calibrationCases } from "../../apps/factory/src/learning/calibration";
@@ -7,12 +13,6 @@ import { pendingReviewRequests } from "../../apps/factory/src/learning/requests"
 import { createLearningService } from "../../apps/factory/src/learning/service";
 import { collectLearningCases } from "../../apps/factory/src/learning/sources";
 import { createLearningWorker } from "../../apps/factory/src/learning/worker";
-import type { LearningCase, LearningResult } from "../../packages/conversation-domain/src/learning";
-import {
-  LearningResultRejected,
-  learningCase,
-  sampleLearningCase,
-} from "../../packages/conversation-domain/src/learning";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { calibratedResult } from "../fixtures/learning";
@@ -150,9 +150,8 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
     };
     await database.client`INSERT INTO factory.skill_library(id,storage_key,scope,owner_id)
       VALUES(${library},'owned-private-guidance','personal',${owned.userID})`;
-    await database.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by)
-      VALUES(${skill},'owned-private-guidance',1,${JSON.stringify(content)}::jsonb,${"a".repeat(64)},${owned.userID})`;
-    await database.client`INSERT INTO factory.skill_library_revision(library_id,revision_id) VALUES(${library},${skill})`;
+    await database.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by,library_id)
+      VALUES(${skill},'owned-private-guidance',1,${JSON.stringify(content)}::jsonb,${"a".repeat(64)},${owned.userID},${library})`;
     const turns: string[] = [];
     for (const scope of ["shared-risk", "personal", "clean"] as const) {
       const personal = scope === "personal";
@@ -179,7 +178,9 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
         VALUES(${id},${command},${owned.projectID},${owned.ticketID},${owned.changeID},${owned.userID},
           ${JSON.stringify(input)}::jsonb,${"b".repeat(64)},${JSON.stringify(authority)}::jsonb,'running',${crypto.randomUUID()},now()+interval '1 minute')`;
       if (personal)
-        await database.client`INSERT INTO factory.agent_turn_skill(turn_id,revision_id) VALUES(${id},${skill})`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload)
+          VALUES(${crypto.randomUUID()},'coding.turn_skill','agent_turn',${id},${`coding.turn_skill:${id}:${skill}`},NULL,'loaded',
+            ${JSON.stringify({ turnId: id, revisionId: skill, loadedAt: new Date().toISOString() })}::jsonb)`;
       await database.client`UPDATE factory.agent_turn SET state='completed',owner_token=NULL,owner_expires_at=NULL,
         outcome_summary=${personal ? null : "Owned completed Build summary"},updated_at=now() WHERE id=${id}`;
       await database.client`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,settled_at,outcome)
@@ -198,15 +199,15 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
     fixtureValue(receipt.jobs[0], "receipt.jobs[0]").attempt = 2;
     fixtureValue(receipt.jobs[0]?.steps[0], "receipt.jobs[0]?.steps[0]").status = "skipped";
     fixtureValue(receipt.changes, "receipt.changes").tests = true;
-    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
-      summary,diagnosis,created_by,completed_at) VALUES(${verification},${owned.changeID},${"b".repeat(40)},1,1,'owned-learning-runner','succeeded',
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,state,
+      summary,diagnosis,created_by,completed_at) VALUES(${verification},${owned.changeID},${"b".repeat(40)},1,1,'succeeded',
       'Owned exact-commit workflow passed',${JSON.stringify({ receipt })}::jsonb,${owned.userID},now())`;
     await database.client`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
       expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
       VALUES(${cleanTurn},${owned.changeID},${owned.attemptID},2,${branch},${"a".repeat(40)},${"c".repeat(40)},${"c".repeat(40)},
       'Owned clean check',${`owned:${cleanTurn}`},'succeeded',${owned.userID},now())`;
-    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
-      diagnosis,created_by,completed_at) VALUES(${crypto.randomUUID()},${owned.changeID},${"c".repeat(40)},1,2,'owned-clean-learning-runner','succeeded',
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,state,
+      diagnosis,created_by,completed_at) VALUES(${crypto.randomUUID()},${owned.changeID},${"c".repeat(40)},1,2,'succeeded',
       ${JSON.stringify({ receipt: verificationReceipt("c".repeat(40), { runId: 2 }) })}::jsonb,${owned.userID},now())`;
     await collectLearningCases(database);
     const rows = await database.client<
@@ -301,11 +302,11 @@ test("long source excerpts cannot starve approved scope, Verification or editabl
       await database.client`INSERT INTO factory.skill_library(id,storage_key,scope,owner_id,project_id)
         VALUES(${skill.library},${`owned-guidance-${index}`},${index === 5 ? "personal" : "project"},
           ${index === 5 ? owned.userID : null},${index === 5 ? null : owned.projectID})`;
-      await database.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by)
-        VALUES(${skill.id},${`owned-guidance-${index}`},1,${JSON.stringify(skill.content)}::jsonb,${"a".repeat(64)},${owned.userID})`;
-      await database.client`INSERT INTO factory.skill_library_revision(library_id,revision_id)
-        VALUES(${skill.library},${skill.id})`;
-      await database.client`INSERT INTO factory.agent_turn_skill(turn_id,revision_id) VALUES(${turn},${skill.id})`;
+      await database.client`INSERT INTO factory.skill_revision(id,skill_key,revision,content,content_digest,created_by,library_id)
+        VALUES(${skill.id},${`owned-guidance-${index}`},1,${JSON.stringify(skill.content)}::jsonb,${"a".repeat(64)},${owned.userID},${skill.library})`;
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload)
+        VALUES(${crypto.randomUUID()},'coding.turn_skill','agent_turn',${turn},${`coding.turn_skill:${turn}:${skill.id}`},NULL,'loaded',
+          ${JSON.stringify({ turnId: turn, revisionId: skill.id, loadedAt: new Date().toISOString() })}::jsonb)`;
     }
     await database.client.begin((sql) =>
       retainLearningArtifactsIn(sql, { id: turn, command: input }, [
@@ -321,9 +322,9 @@ test("long source excerpts cannot starve approved scope, Verification or editabl
       expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
       VALUES(${turn},${owned.changeID},${owned.attemptID},1,${branch},${"a".repeat(40)},${commit},${commit},
         'Owned exact candidate',${`owned:${turn}`},'succeeded',${owned.userID},now())`;
-    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,state,
       summary,diagnosis,created_by,completed_at)
-      VALUES(${verification},${owned.changeID},${commit},1,1,'owned-budget-runner','failed',
+      VALUES(${verification},${owned.changeID},${commit},1,1,'failed',
         'The exact candidate failed its approved check.',
         ${JSON.stringify({
           kind: "check-failed",
@@ -500,7 +501,7 @@ test("retrospective review is calibrated, batched, private, immutable and never 
       await database.client`SELECT id FROM factory.change WHERE ticket_id=${created.ticketId}`,
     ).toHaveLength(0);
     expect(
-      await database.client`SELECT id FROM factory.learning_command WHERE id=${command.commandId}`,
+      await database.client`SELECT id FROM factory.audit_event WHERE dedupe_key=${`learning.command:${command.commandId}`}`,
     ).toHaveLength(1);
     const [document] =
       await database.client`SELECT author_kind FROM factory.ticket_document_revision WHERE ticket_id=${created.ticketId}`;
@@ -594,14 +595,20 @@ test("source collection retains real personal scope and never treats an unsuppor
       }),
     ).rejects.toThrow("Owned retention rollback");
     expect(
-      await database.client`SELECT ordinal FROM factory.learning_source_artifact WHERE turn_id=${turn}`,
+      await database.client`SELECT (payload->>'ordinal')::int AS ordinal FROM factory.operation
+        WHERE kind='learning.source_artifact' AND scope_type='agent_turn' AND scope_id=${turn}`,
     ).toHaveLength(0);
     await database.client.begin((sql) =>
       retainLearningArtifactsIn(sql, { id: turn, command: input }, artifacts),
     );
     expect([
-      ...(await database.client`SELECT ordinal,reference,body,truncated FROM factory.learning_source_artifact
-          WHERE turn_id=${turn} ORDER BY ordinal`),
+      ...(await database.client`SELECT (payload->>'ordinal')::int AS ordinal,
+          payload->>'reference' AS reference,
+          payload->>'body' AS body,
+          (payload->>'truncated')::boolean AS truncated
+          FROM factory.operation
+          WHERE kind='learning.source_artifact' AND scope_type='agent_turn' AND scope_id=${turn}
+          ORDER BY (payload->>'ordinal')::int`),
     ]).toEqual(
       artifacts.slice(1, 4).map((artifact, ordinal) => ({
         ordinal,
@@ -625,8 +632,9 @@ test("source collection retains real personal scope and never treats an unsuppor
     });
     await expect(
       database.client.begin(async (sql) => {
-        await sql`INSERT INTO factory.learning_policy(scope_key,project_id,owner_id,enabled,version,updated_by)
-          VALUES(${`${owned.projectID}:project`},${owned.projectID},NULL,false,1,${owned.userID})`;
+        await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+          VALUES(${crypto.randomUUID()},'learning.policy','project',${owned.projectID},${`learning.policy:${owned.projectID}:project`},NULL,'disabled',${owned.userID},
+            ${JSON.stringify({ scopeKey: `${owned.projectID}:project`, projectId: owned.projectID, ownerId: null, enabled: false, automaticSkills: false, version: 1, updatedBy: owned.userID })}::jsonb)`;
         expect(await learningEnabledIn(sql, owned.projectID, null)).toBe(false);
         expect(await learningEnabledIn(sql, owned.projectID, crypto.randomUUID())).toBe(false);
         throw new Error("Owned policy rollback");
@@ -642,7 +650,8 @@ test("source collection retains real personal scope and never treats an unsuppor
       ]),
     );
     expect(
-      await database.client`SELECT ordinal FROM factory.learning_source_artifact WHERE turn_id=${turn}`,
+      await database.client`SELECT (payload->>'ordinal')::int AS ordinal FROM factory.operation
+        WHERE kind='learning.source_artifact' AND scope_type='agent_turn' AND scope_id=${turn}`,
     ).toHaveLength(3);
     await policy.set(owned.userID, {
       commandId: crypto.randomUUID(),
@@ -724,14 +733,16 @@ test("a Wiki generation is one reviewed case with the generation outcome, even a
         SELECT id,outcome,snapshot FROM factory.learning_case WHERE id=${`wiki:${generation}`}`;
     }
     const succeeded = crypto.randomUUID();
-    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state)
-      VALUES(${succeeded},${owned.projectID},${commit},${owned.userID},'running')`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+      VALUES(${succeeded},'knowledge.generation','project',${owned.projectID},${`knowledge.generation:${succeeded}`},${`knowledge.generation:${owned.projectID}`},'running',${owned.userID},
+        ${JSON.stringify({ id: succeeded, projectId: owned.projectID, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: owned.userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     await calls(succeeded, 4);
     // The calls settle before the generation does. A scan in between must not lose it.
     let cursor = await collectLearningCases(database);
     expect(await wikiCases(succeeded)).toHaveLength(0);
-    await database.client`UPDATE factory.knowledge_generation SET state='succeeded',page_count=5,conflict_count=0,completed_at=now()
-      WHERE id=${succeeded}`;
+    await database.client`UPDATE factory.operation SET state='succeeded',active_key=NULL,
+      payload=payload || '{"pageCount":5,"conflictCount":0}'::jsonb,completed_at=now()
+      WHERE id=${succeeded} AND kind='knowledge.generation'`;
     cursor = await collectLearningCases(database, cursor);
     cursor = await collectLearningCases(database, cursor);
     const [first, ...others] = await wikiCases(succeeded);
@@ -744,8 +755,9 @@ test("a Wiki generation is one reviewed case with the generation outcome, even a
     expect(JSON.stringify(first?.snapshot)).not.toContain("completedAt");
 
     const failed = crypto.randomUUID();
-    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state,failure,completed_at)
-      VALUES(${failed},${owned.projectID},${commit},${owned.userID},'failed','The result did not match the required format.',now())`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,error,created_by,completed_at,payload)
+      VALUES(${failed},'knowledge.generation','project',${owned.projectID},${`knowledge.generation:${failed}`},NULL,'failed','The result did not match the required format.',${owned.userID},now(),
+        ${JSON.stringify({ id: failed, projectId: owned.projectID, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: "The result did not match the required format.", createdBy: owned.userID, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
     await calls(failed, 0);
     await collectLearningCases(database, cursor);
     const [lost, ...rest] = await wikiCases(failed);
@@ -968,8 +980,8 @@ test("pending Review now requests preserve exact visibility, strict timestamps a
           scope: ownerId ? "personal" : "project",
         };
         const [saved] = await sql<{ requestedAt: Date }[]>`
-          INSERT INTO factory.learning_command(id,actor_id,input,result,created_at)
-          VALUES(${id},${ownerId ?? owned.userID},${JSON.stringify(input)}::jsonb,'{}'::jsonb,
+          INSERT INTO factory.audit_event(id,kind,scope_type,scope_id,dedupe_key,actor_id,payload,created_at)
+          VALUES(${id},'learning.command','learning',${projectId},${`learning.command:${id}`},${ownerId ?? owned.userID},${JSON.stringify({ input, result: {} })}::jsonb,
             now()-make_interval(secs=>${age})) RETURNING created_at AS "requestedAt"`;
         return {
           id,
@@ -1013,7 +1025,7 @@ test("pending Review now requests preserve exact visibility, strict timestamps a
             ${kind},'work-review/v1','owned','owned-request-selector','uncertain','[]'::jsonb,
             ${"a".repeat(64)},${crypto.randomUUID()},now(),
             CASE WHEN ${equalToRequest} THEN
-              (SELECT created_at FROM factory.learning_command WHERE id=${scope.id})
+              (SELECT created_at FROM factory.audit_event WHERE id=${scope.id})
               ELSE now()-interval '1 second' END)`;
       }
       await review(shared, "calibration");
@@ -1073,7 +1085,9 @@ test.each(["allowlisted", "unknown", "proposal-link"] as const)(
         expect(view.comparisons).toHaveLength(0);
         expect(view.applications).toHaveLength(0);
         expect(await database.client`SELECT id FROM factory.learning_proposal`).toHaveLength(0);
-        expect(await database.client`SELECT id FROM factory.learning_trial`).toHaveLength(0);
+        expect(
+          await database.client`SELECT id FROM factory.operation WHERE kind='learning.trial'`,
+        ).toHaveLength(0);
         for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
         expect(calls).toEqual(["calibration", "work"]);
         expect(
@@ -1165,7 +1179,7 @@ test("Review now starts the calibrated batch for fresh cases once, idempotently,
       "already requested",
     );
     expect(
-      await database.client`SELECT id FROM factory.learning_command WHERE input->>'kind'='review-now'`,
+      await database.client`SELECT id FROM factory.audit_event WHERE kind='learning.command' AND payload->'input'->>'kind'='review-now'`,
     ).toHaveLength(1);
     const requested = await service.get(owned.userID, owned.projectID);
     expect(requested.reviewRequestedAt).not.toBeNull();

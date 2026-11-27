@@ -68,6 +68,10 @@ test.each([
                 : [],
             cursor: {},
           });
+        if (url.pathname === `/api/session/${sessionID}`)
+          return Response.json({
+            data: { id: sessionID, location: { directory: "/workspace/project" } },
+          });
         const id = url.pathname.includes(childID) ? childID : sessionID;
         if (hasLateConsumption && loseChildLog && id === childID)
           throw Error("Owned late child log became unavailable");
@@ -119,6 +123,7 @@ test.each([
       });
       expect((await runtime.stop(f.attemptID))?.state).toBe("stopped");
       expect(f.calls.filter((call) => call.method === "DeleteActor")).toHaveLength(1);
+      expect(f.calls.filter((call) => call.method === "SuspendActor")).toHaveLength(0);
       if (connected && !loseChildLog) {
         expect(entriesAtDeletion.map((entry) => entry["source"]).sort()).toEqual([
           "compaction",

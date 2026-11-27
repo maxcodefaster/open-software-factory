@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { MCPAssignment } from "#conversation-domain/mcp-library";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import { createMCPLibrary, mcpDigest } from "../../apps/factory/src/mcp/controller";
 import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";
-import type { MCPAssignment } from "../../packages/conversation-domain/src/mcp-library";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -41,9 +41,9 @@ test("MCP admission reads native writes and rolls back typed assignments in the 
     await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${userId},'Owned transaction manager',${`${userId}@transaction.test`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userId})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectId},${`transaction-${projectId}`},'Owned transaction Project',
-        'https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${userId})`;
+        'https://example.invalid/owned.git','main','.factory/actor-template.json',${userId})`;
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,created_by)
       VALUES(${conversationId},${projectId},${userId})`;
     const { turn } = await createAgentTurnStore(database).admit(
@@ -69,8 +69,9 @@ test("MCP admission reads native writes and rolls back typed assignments in the 
         await sql`INSERT INTO factory.mcp_connection(id,revision_id,state,version,credential_epoch,tools,allowed_tools,authorized_by)
           VALUES(${libraryId},${revisionId},'ready',${policyVersion},${credentialEpoch},
             ${JSON.stringify(tools)}::jsonb,${JSON.stringify(tools.map(({ name, digest }) => ({ name, digest })))}::jsonb,${userId})`;
-        await sql`INSERT INTO factory.mcp_choice(library_id,scope,context_id,user_id,role,state,revision_id,version)
-          VALUES(${libraryId},'personal',${projectId},${userId},'planning','enable',${revisionId},1)`;
+        await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload)
+          VALUES(${crypto.randomUUID()},'mcp.choice','personal',${projectId},${`mcp.choice:${libraryId}:personal:${projectId}:${userId}:planning`},NULL,'enable',
+            ${JSON.stringify({ libraryId, scope: "personal", contextId: projectId, userId, role: "planning", state: "enable", revisionId, version: 1 })}::jsonb)`;
         expect(await library.connectionIn(sql, libraryId)).toMatchObject({
           version: policyVersion,
           credentialEpoch,
@@ -84,7 +85,8 @@ test("MCP admission reads native writes and rolls back typed assignments in the 
         await library.admitIn(sql, turn.id, projectId, userId, "planning");
         await library.admitIn(sql, turn.id, projectId, userId, "planning");
         expect([
-          ...(await sql`SELECT connection_id,policy_version::float8 AS policy_version,tools FROM factory.agent_turn_mcp WHERE turn_id=${turn.id}`),
+          ...(await sql`SELECT payload->>'connectionId' AS connection_id,(payload->>'policyVersion')::float8 AS policy_version,payload->'tools' AS tools
+            FROM factory.operation WHERE kind='coding.turn_mcp' AND scope_type='agent_turn' AND scope_id=${turn.id}`),
         ]).toEqual([{ connection_id: libraryId, policy_version: policyVersion, tools }]);
         expect(await library.assignments(turn.id)).toEqual([]);
         if (rollbackAfterWrite) throw rollback;
@@ -145,7 +147,7 @@ test("MCP saves fence replay digests and concurrent revisions without leaving pa
       ...(await database.client`SELECT id FROM factory.mcp_library WHERE id=${foreignLibraryId}`),
     ]).toEqual([]);
     expect([
-      ...(await database.client`SELECT library_id FROM factory.mcp_library_cover WHERE library_id=${foreignLibraryId}`),
+      ...(await database.client`SELECT id FROM factory.mcp_library WHERE id=${foreignLibraryId} AND cover_key IS NOT NULL`),
     ]).toEqual([]);
     const candidates = ["First", "Second"].map((name) => ({
       ...input,
@@ -229,7 +231,7 @@ test("MCP credential recovery supersedes lost writes after base-key, epoch, disc
       ).rejects.toThrow("Could not connect");
       const [pending] = await database.client<
         Array<{ id: string; epoch: string; state: string }>
-      >`SELECT id,credential_epoch AS epoch,state FROM factory.mcp_secret_write WHERE connection_id=${libraryId}`;
+      >`SELECT id,payload->>'credentialEpoch' AS epoch,state FROM factory.operation WHERE kind='mcp.secret_write' AND scope_type='connection' AND scope_id=${libraryId}`;
       if (!pending) throw new Error("Owned credential write intent missing");
       expect(pending).toMatchObject({ epoch: commandId, state: "intended" });
       if (change === "base-key")
@@ -246,7 +248,7 @@ test("MCP credential recovery supersedes lost writes after base-key, epoch, disc
       if (!before) throw new Error("Owned recovery connection missing");
       await connections.recover();
       const [settled] =
-        await database.client`SELECT state FROM factory.mcp_secret_write WHERE id=${pending.id}`;
+        await database.client`SELECT state FROM factory.operation WHERE id=${pending.id} AND kind='mcp.secret_write'`;
       expect(settled?.["state"]).toBe("superseded");
       expect([
         ...(await database.client`SELECT secret_key,credential_epoch,state FROM factory.mcp_connection WHERE id=${libraryId}`),
@@ -318,8 +320,8 @@ test("MCP library keeps private definitions private, grants exact read tools and
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Owned MCP account',${`${id}@mcp.test`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
     for (const id of [project, foreign]) {
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${id},${`mcp-${id}`},'Owned MCP Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${id},${`mcp-${id}`},'Owned MCP Project','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${id},${author},'product-contributor',false,${manager})`;
     }
@@ -450,13 +452,14 @@ test("MCP library keeps private definitions private, grants exact read tools and
     expect(assignments[0]?.tools).toEqual(assignment.tools);
     await expect(
       (async () =>
-        await database.client`UPDATE factory.agent_turn_mcp SET required=false WHERE turn_id=${admitted.turn.id}`)(),
+        await database.client`UPDATE factory.operation SET payload=jsonb_set(payload,'{required}','false'::jsonb)
+          WHERE kind='coding.turn_mcp' AND scope_type='agent_turn' AND scope_id=${admitted.turn.id}`)(),
     ).rejects.toThrow();
     expect(await call()).toEqual({ content: "Owned issue 42", isError: false });
     expect(calls).toBe(1);
     const [approvals] = await database.client<
       Array<{ count: number }>
-    >`SELECT count(*)::float8 AS count FROM factory.mcp_policy_approval WHERE connection_id=${libraryId}`;
+    >`SELECT count(*)::float8 AS count FROM factory.audit_event WHERE kind='mcp.policy_approval' AND scope_type='connection' AND scope_id=${libraryId}`;
     expect(approvals?.count).toBe(1);
     await expect(call("delete_issue")).rejects.toThrow("not admitted");
     expect(calls).toBe(1);
@@ -625,8 +628,8 @@ test("completed private Project turns do not expose personal MCP definitions and
     for (const id of [manager, author, reader])
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${id},'Owned MCP revision account',${`${id}@mcp.test`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`mcp-${project}`},'Owned MCP revision Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`mcp-${project}`},'Owned MCP revision Project','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
     for (const id of [manager, author, reader])
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${project},${id},'product-contributor',${id === manager},${manager})`;

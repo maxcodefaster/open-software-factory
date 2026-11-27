@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -27,8 +27,8 @@ test.beforeEach(async ({ page }) => {
   projectID = crypto.randomUUID();
   slug = `journey-${projectID.slice(0, 8)}`;
   await mkdir(captures, { recursive: true });
-  await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES (${projectID},${slug},'Requirements journey','https://example.invalid/journey.git','main','.devcontainer/devcontainer.json',${userID})`;
+  await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES (${projectID},${slug},'Requirements journey','https://example.invalid/journey.git','main','.factory/actor-template.json',${userID})`;
   // This browser journey exercises planning only, never creates compute for the fake repository.
   await mockFactoryFunctions(page, {
     workspaces: {
@@ -814,15 +814,11 @@ test("real Luna finds scoped Wiki and Tickets, then proposes and confirms larger
   await expect
     .poll(
       async () =>
-        (await db.client`SELECT id FROM factory.epic_confirmation WHERE project_id=${projectID}`)
-          .length,
+        (
+          await db.client`SELECT id FROM factory.audit_event WHERE kind='tickets.epic_confirmation' AND scope_type='project' AND scope_id=${projectID}`
+        ).length,
     )
     .toBe(1);
-  expect(
-    (
-      await db.client`SELECT ticket_id FROM factory.requirements_entry_intent WHERE ticket_id IN (SELECT id FROM factory.ticket WHERE project_id=${projectID})`
-    ).length,
-  ).toBe(0);
   expect(
     (await db.client`SELECT id FROM factory.change WHERE project_id=${projectID}`).length,
   ).toBe(0);

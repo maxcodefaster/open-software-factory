@@ -1,11 +1,11 @@
 import type { CompositeTreeNode } from "@theia/core/lib/browser/tree/tree";
-import type { FileStat } from "@theia/filesystem/lib/common/files";
 import type URI from "@theia/core/lib/common/uri";
 import { injectable } from "@theia/core/shared/inversify";
+import type { FileStat } from "@theia/filesystem/lib/common/files";
 import {
   FileNavigatorTree,
-  type WorkspaceRootNode,
   type WorkspaceNode,
+  type WorkspaceRootNode,
 } from "@theia/navigator/lib/browser/navigator-tree";
 import { workspaceScheme } from "./factory-workspace-files";
 

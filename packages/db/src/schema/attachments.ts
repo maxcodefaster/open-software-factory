@@ -10,11 +10,9 @@ import {
   primaryKey,
   text,
   timestamp,
-  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 import { authUser } from "./auth";
-import { agentTurn } from "./coding";
 import { factorySchema } from "./namespaces";
 import { project } from "./projects";
 
@@ -76,35 +74,6 @@ export const attachment = factorySchema.table(
   ],
 );
 
-export const attachmentStorage = factorySchema.table(
-  "attachment_storage",
-  {
-    singleton: boolean("singleton").default(true).primaryKey().notNull(),
-    id: uuid("id").notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    unique("attachment_storage_id_key").on(table.id),
-    check("attachment_storage_singleton_check", sql`(${table.singleton})`),
-  ],
-);
-
-export const attachmentTurnContext = factorySchema.table(
-  "attachment_turn_context",
-  {
-    turnId: uuid("turn_id").notNull(),
-    source: text("source").default("admission").notNull(),
-    content: text("content").notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.turnId],
-      foreignColumns: [agentTurn.id],
-      name: "attachment_turn_context_turn_id_fkey",
-    }),
-    primaryKey({ columns: [table.turnId, table.source], name: "attachment_turn_context_pkey" }),
-  ],
-);
-
 export const attachmentReference = factorySchema.table(
   "attachment_reference",
   {
@@ -135,30 +104,5 @@ export const attachmentReference = factorySchema.table(
       "attachment_reference_kind_check",
       sql`${table.kind} = ANY (ARRAY['ticket'::text, 'requirement'::text, 'knowledge'::text, 'conversation'::text, 'feedback'::text, 'turn'::text])`,
     ),
-  ],
-);
-
-export const attachmentDraft = factorySchema.table(
-  "attachment_draft",
-  {
-    id: uuid("id").notNull(),
-    ownerId: uuid("owner_id").notNull(),
-    projectId: uuid("project_id").notNull(),
-    sequence: bigint("sequence", { mode: "number" }).notNull(),
-    attachmentIds: uuid("attachment_ids").array().notNull(),
-  },
-  (table): PgTableExtraConfigValue[] => [
-    foreignKey({
-      columns: [table.ownerId],
-      foreignColumns: [authUser.id],
-      name: "attachment_draft_owner_id_fkey",
-    }),
-    foreignKey({
-      columns: [table.projectId],
-      foreignColumns: [project.id],
-      name: "attachment_draft_project_id_fkey",
-    }),
-    primaryKey({ columns: [table.id, table.ownerId], name: "attachment_draft_pkey" }),
-    check("attachment_draft_sequence_check", sql`${table.sequence} >= 0`),
   ],
 );

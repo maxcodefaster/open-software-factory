@@ -1,5 +1,5 @@
-import { type ForgeRepository } from "../../../../packages/forge/src/contracts";
-import { boundForgeRepositoryFromURL } from "../../../../packages/forge/src/repository";
+import type { ForgeRepository } from "#forge/contracts";
+import { boundForgeRepositoryFromURL } from "#forge/repository";
 import { CommandError } from "../command-error";
 
 export function factoryForgeSource(

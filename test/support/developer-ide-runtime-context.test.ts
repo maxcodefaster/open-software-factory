@@ -288,16 +288,83 @@ test("failed explicit preparation is visible and is never repeated by observatio
 test("every compute state is described honestly in the Run, Git and Terminal panels", () => {
   const copy = (state: string, failure: string | null = null) =>
     runtimePreparationCopy({ ...runtime, state, failure });
-  expect(copy("paused")).toContain("paused");
-  expect(copy("resuming")).toContain("Preparing");
-  expect(copy("stopping")).toContain("stopping");
-  expect(copy("cleanup-failed")).toContain("unconfirmed");
-  expect(copy("cleanup-failed")).toContain("Start is blocked");
-  expect(copy("cleanup-failed")).not.toContain("is stopping");
+  expect(runtimePreparationCopy(undefined)).toBe("Select a Workspace to use its environment.");
+  expect(copy("stopped")).toBe(
+    "Environment stopped. Start it when you need a terminal or preview.",
+  );
+  expect(copy("paused")).toBe(
+    "Environment paused. Resume to use terminals or previews — opening files resumes it automatically.",
+  );
+  expect(copy("pausing")).toBe("Pausing environment for everyone… Your files are saved.");
+  expect(copy("starting")).toBe("Starting environment… Your open files stay intact.");
+  expect(copy("resuming")).toBe("Starting environment… Your open files stay intact.");
+  expect(copy("stopping")).toBe("Stopping environment… Your open files stay intact.");
+  expect(copy("cleanup-failed")).toBe(
+    "Previous environment shutdown is unconfirmed. Start is paused until cleanup completes; your files are safe.",
+  );
+  expect(copy("cleanup-failed")).not.toContain("Stopping");
   expect(copy("failed", "Dev Container build failed")).toBe("Dev Container build failed");
+  expect(copy("resuming", `restore failed ${"criu log line ".repeat(60)}`)).toBe(
+    "Could not confirm environment resume. Your files are safe — check status before retrying.",
+  );
   expect(
-    copy("resuming", `restore failed ${"criu log line ".repeat(60)}`).length,
+    copy("failed", `restore failed ${"criu log line ".repeat(60)}`).length,
   ).toBeLessThanOrEqual(241);
+});
+
+test("a capacity-wait rejection on ensure stays visible across starting observations until ready or retried", async () => {
+  const capacityError =
+    "Waiting for available compute capacity — no worker has room for this Workspace yet. Your files are safe; retry shortly.";
+  let serverState = "stopped";
+  let capacityAvailable = false;
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      const method = init?.method ?? "GET";
+      calls.push(method);
+      if (method === "POST") {
+        serverState = "starting";
+        if (!capacityAvailable) return Response.json({ error: capacityError }, { status: 503 });
+        serverState = "ready";
+        return Response.json({ ...runtime, state: "ready", failure: null }, { status: 202 });
+      }
+      return Response.json({ ...runtime, state: serverState, failure: null });
+    },
+  );
+  context.select(runtime.workspaceID);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  expect(context.value?.state).toBe("stopped");
+  await context.prepare();
+  expect(context.value).toMatchObject({ state: "failed", failure: capacityError });
+  expect(runtimePreparationCopy(context.value)).toBe(capacityError);
+  // Periodic observation sees the persisted "starting" attempt with failure=null.
+  // It must keep surfacing the capacity wait without hanging in a polling loop.
+  await context.observe();
+  expect(context.value).toMatchObject({
+    attemptID: runtime.attemptID,
+    state: "failed",
+    failure: capacityError,
+  });
+  expect(runtimePreparationCopy(context.value)).toBe(capacityError);
+  expect(calls).toEqual(["GET", "POST", "GET"]);
+  // Retrying once capacity frees up clears the preparation failure and reaches ready.
+  capacityAvailable = true;
+  await context.prepare();
+  expect(context.value).toMatchObject({
+    attemptID: runtime.attemptID,
+    state: "ready",
+    failure: null,
+  });
+  // A later pause must not resurrect the earlier preparation failure.
+  serverState = "paused";
+  await context.observe();
+  expect(context.value).toMatchObject({
+    attemptID: runtime.attemptID,
+    state: "paused",
+    failure: null,
+  });
 });
 
 test("a native failure settles without offering an unsupported destructive recovery", async () => {
@@ -344,6 +411,126 @@ test("an unknown restore outcome stays quarantined with no Start fresh", async (
   context.setWritable(runtime.workspaceID, true);
   await Bun.sleep(50);
   expect(calls.every((call) => call.startsWith("GET"))).toBe(true);
-  expect(runtimePreparationCopy(context.value)).toContain("could not be confirmed");
+  expect(runtimePreparationCopy(context.value)).toContain("Could not confirm environment resume");
   expect(runtimePreparationCopy(context.value)).not.toContain("Start fresh");
+});
+
+test("Pause shows pending immediately, keeps the original Attempt and resumes only explicitly", async () => {
+  const pending = Promise.withResolvers<Response>();
+  const calls: Array<{ path: string; method: string; body: unknown }> = [];
+  let state = "ready";
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      const path = String(input);
+      calls.push({
+        path,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+      });
+      if (path.endsWith("/pause")) return pending.promise;
+      if (path.endsWith("/ensure")) state = "ready";
+      return Response.json({ ...runtime, state, failure: null });
+    },
+  );
+  context.select(runtime.workspaceID);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  const paused = context.pause();
+  expect(context.value).toMatchObject({ ...runtime, state: "pausing" });
+  expect(runtimePreparationCopy(context.value)).toContain("Pausing");
+  await context.pause();
+  expect(calls.filter((call) => call.path.endsWith("/pause"))).toHaveLength(1);
+  expect(calls.at(-1)).toMatchObject({
+    method: "POST",
+    body: { requestID: expect.any(String) },
+  });
+  state = "paused";
+  pending.resolve(Response.json({ id: runtime.attemptID, state }));
+  await paused;
+  expect(context.value).toMatchObject({ ...runtime, state: "paused" });
+  expect(runtimePreparationCopy(context.value)).toContain("opening files resumes it automatically");
+  expect(calls.filter((call) => call.path.endsWith("/ensure"))).toHaveLength(0);
+  await context.prepare();
+  expect(context.value).toMatchObject({ ...runtime, state: "ready" });
+  expect(calls.filter((call) => call.path.endsWith("/ensure"))).toHaveLength(1);
+});
+
+test("a lost Pause reply retains its exact requestID and never becomes a new Start or Pause", async () => {
+  const requests: string[] = [];
+  let lost = true;
+  let observationLost = false;
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      if (String(input).endsWith("/pause")) {
+        requests.push(JSON.parse(String(init?.body)).requestID);
+        if (lost) throw new Error("Owned lost Pause response");
+        return Response.json({ state: "uncertain" });
+      }
+      expect(init?.method).not.toBe("POST");
+      if (observationLost) throw new Error("Owned lost compute observation");
+      return Response.json({ ...runtime, state: "ready", failure: null });
+    },
+  );
+  context.select(runtime.workspaceID);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  await context.pause();
+  expect(context.value).toMatchObject({ ...runtime, state: "pause-uncertain" });
+  expect(context.value?.failure).toContain(requests[0]);
+  await context.prepare();
+  await context.observe();
+  await context.use();
+  observationLost = true;
+  await context.observe();
+  await context.prepare();
+  expect(requests).toHaveLength(1);
+  expect(context.value?.state).toBe("pause-uncertain");
+  expect(context.value?.attemptID).toBe(runtime.attemptID);
+  observationLost = false;
+  context.select(runtime.workspaceID);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  await context.prepare();
+  expect(requests).toHaveLength(1);
+  expect(context.value?.state).toBe("pause-uncertain");
+  lost = false;
+  await context.pause();
+  expect(requests).toHaveLength(2);
+  expect(new Set(requests).size).toBe(1);
+  expect(context.value?.state).toBe("pause-uncertain");
+});
+
+test("observers cannot pause and a delayed Pause cannot replace another selected Workspace", async () => {
+  const pending = Promise.withResolvers<Response>();
+  const other = "44444444-4444-4444-8444-444444444444";
+  const writes: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      if (init?.method === "POST") {
+        writes.push(String(input));
+        return pending.promise;
+      }
+      return Response.json({
+        ...runtime,
+        workspaceID: String(input).includes(other) ? other : runtime.workspaceID,
+        state: "ready",
+        failure: null,
+      });
+    },
+  );
+  context.select(runtime.workspaceID);
+  await Bun.sleep(0);
+  await context.pause();
+  expect(writes).toHaveLength(0);
+  context.setWritable(runtime.workspaceID, true);
+  const paused = context.pause();
+  context.select(other);
+  await Bun.sleep(0);
+  pending.resolve(Response.json({ id: runtime.attemptID, state: "paused" }));
+  await paused;
+  expect(context.value).toMatchObject({ workspaceID: other, state: "ready" });
+  expect(writes).toHaveLength(1);
 });

@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { repositoryDocumentsSchema } from "../../apps/factory/src/knowledge/contracts";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -97,9 +97,9 @@ for (const touch of [false, true]) {
         `;
         if (!admin) throw new Error("Owned responsive fixture has no administrator.");
         await database.client`
-          INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+          INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
           VALUES(${projectId},${slug},${projectName},'https://example.invalid/responsive.git',
-            'main','.devcontainer/devcontainer.json',${admin.id})
+            'main','.factory/actor-template.json',${admin.id})
         `;
         for (const [index, title] of ["Product guide", "Review guide"].entries()) {
           const id = crypto.randomUUID();
@@ -109,9 +109,11 @@ for (const touch of [false, true]) {
               ${`Saved ${title} content.`},${commit},${admin.id})
           `;
         }
+        const generationId = crypto.randomUUID();
         await database.client`
-          INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
-          VALUES(${crypto.randomUUID()},${projectId},${commit},'succeeded',${admin.id},now())
+          INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,completed_at,payload)
+          VALUES(${generationId},'knowledge.generation','project',${projectId},${`knowledge.generation:${generationId}`},NULL,'succeeded',${admin.id},now(),
+            ${JSON.stringify({ id: generationId, projectId, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: admin.id, modelId: null, attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)
         `;
         await mockFactoryFunctions(page, {
           knowledge: {

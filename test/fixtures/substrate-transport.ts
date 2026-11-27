@@ -1,7 +1,7 @@
 import { chmod, lstat, rm } from "node:fs/promises";
 import { connect, createServer, type Socket } from "node:net";
 
-// Same opaque Unix-socket technique as verification-pool-transport: the owned
+// Opaque Unix-socket relay: the owned
 // Docker network cannot dial host listeners through this host's firewall.
 // Neither firewall changes nor TLS termination/credential forwarding is needed.
 export async function substrateTestTransport(path: string, port: number) {

@@ -2,13 +2,9 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import * as Y from "yjs";
+import { auditEvent, developmentWorkspace, workspaceSharedDocument } from "#db/schema";
 import { createWorkspaceCollaboration } from "../../apps/factory/src/workspace/collaboration";
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
-import {
-  developmentWorkspace,
-  workspaceCollaborationDecision,
-  workspaceSharedDocument,
-} from "../../packages/db/src/schema";
 import { factoryProcess } from "../fixtures/factory-process";
 
 const encoded = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
@@ -31,8 +27,8 @@ async function fixture() {
     await database.client`INSERT INTO auth.session(id,token,user_id,expires_at,created_at,updated_at,login_method,authenticated_at)
       VALUES(${sessionID},${crypto.randomUUID()},${id},now()+interval '1 hour',now(),now(),'password',now())`;
   }
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-    VALUES(${projectID},${`shared-${projectID}`},'Shared editor','https://github.com/example/project','main','.devcontainer/devcontainer.json',${owner})`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+    VALUES(${projectID},${`shared-${projectID}`},'Shared editor','https://github.com/example/project','main','.factory/actor-template.json',${owner})`;
   for (const id of [owner, guest])
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)VALUES(${projectID},${id},'developer',${owner})`;
   await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by,collaboration_enabled)
@@ -268,12 +264,12 @@ test.each(["disk CAS", "lost Save acknowledgement"] as const)(
       );
       const [stored] = await f.database.db
         .select({
-          dirty: workspaceSharedDocument.dirty,
+          syncState: workspaceSharedDocument.syncState,
           diskVersion: workspaceSharedDocument.diskVersion,
         })
         .from(workspaceSharedDocument)
         .where(eq(workspaceSharedDocument.workspaceId, f.workspaceID));
-      expect(stored).toEqual({ dirty: true, diskVersion: version("original\n") });
+      expect(stored).toEqual({ syncState: "dirty", diskVersion: version("original\n") });
       await f.restart();
       const observed = await f.collaboration.read(f.owner, f.workspaceID, "file.txt");
       expect(observed.content).toBe("retained draft original\n");
@@ -369,7 +365,12 @@ test("collaboration enablement retains its exact decision and cannot be rebound 
     await expect(f.collaboration.enable(f.guest, otherWorkspaceID, commandID)).rejects.toThrow(
       "decision identity differs",
     );
-    expect(await f.database.db.select().from(workspaceCollaborationDecision)).toHaveLength(1);
+    expect(
+      await f.database.db
+        .select()
+        .from(auditEvent)
+        .where(eq(auditEvent.kind, "workspace.collaboration_decision")),
+    ).toHaveLength(1);
     const [other] = await f.database.db
       .select({ enabled: developmentWorkspace.collaborationEnabled })
       .from(developmentWorkspace)

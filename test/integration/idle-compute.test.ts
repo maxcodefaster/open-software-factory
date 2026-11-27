@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import {
   createIdleCompute,
@@ -6,7 +7,6 @@ import {
   executionQuietMS,
   executionReviewMS,
 } from "../../apps/factory/src/runtime/idle";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -57,14 +57,17 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
       INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
       SELECT gen_random_uuid(),${owned.projectID},'personal',users.id,'main',${"a".repeat(40)},${owned.userID} FROM users
       RETURNING id,owner_user_id
-    ), attempts AS (INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
-      create_intended_at,created_by,updated_at)
-      SELECT CASE WHEN users.name='fairness-65' THEN ${tail}::uuid ELSE gen_random_uuid() END,
-        ${owned.projectID},workspaces.id,1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},
-        CASE WHEN users.name='fairness-65' THEN now() ELSE now()-interval '1 minute' END
-      FROM workspaces JOIN users ON users.id=workspaces.owner_user_id RETURNING id)
-      INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        SELECT id,'fa-' || replace(id::text,'-',''),'runtime-' || replace(id::text,'-',''),'{}'::jsonb FROM attempts`;
+    ), prepared AS (
+      SELECT CASE WHEN users.name='fairness-65' THEN ${tail}::uuid ELSE gen_random_uuid() END AS id,
+        workspaces.id AS workspace_id,
+        CASE WHEN users.name='fairness-65' THEN now() ELSE now()-interval '1 minute' END AS updated_at
+      FROM workspaces JOIN users ON users.id=workspaces.owner_user_id
+    )
+    INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,
+      create_intended_at,created_by,updated_at,atespace,actor_name,binding_intent)
+      SELECT id,${owned.projectID},workspace_id,1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${owned.userID},
+        updated_at,'fa-' || replace(id::text,'-',''),'runtime-' || replace(id::text,'-',''),'{}'::jsonb
+      FROM prepared`;
     await database.client`UPDATE factory.runtime_attempt SET state='ready'
       WHERE project_id=${owned.projectID} AND id<>${owned.attemptID}`;
     await idle.close();
@@ -230,9 +233,9 @@ test.each([
       const jobHandle = `owned-idle-${verificationID}`;
       const pending = ["pending", "capacity-wait", "accounting-wait"].includes(kind);
       await database.client`INSERT INTO factory.verification
-        (id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,runner_uuid,runner_token,runner_job_handle,
+        (id,change_id,commit_sha,pull_request_number,action_run_id,runner_uuid,runner_token,runner_job_handle,
           state,updated_at,completed_at,created_by)
-        VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-idle-review',1,
+        VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,1,
           ${runnerUUID},'owned-runner-token',${jobHandle},
           ${pending ? "pending" : "failed"},
           CASE WHEN ${kind === "recent-verdict"} THEN now() ELSE now()-interval '2 hours' END,
@@ -242,21 +245,21 @@ test.each([
         const atespaceUID = crypto.randomUUID();
         const templateUID = crypto.randomUUID();
         await database.client.begin(async (sql) => {
-          await sql`INSERT INTO factory.substrate_verification(verification_id,runtime_attempt_id,generation,intent,
-            atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
-            VALUES(${verificationID},${attemptID},1,jsonb_build_object(
+          await sql`INSERT INTO factory.substrate_provision(owner_id,kind,runtime_attempt_id,generation,intent,resources)
+            VALUES(${verificationID},'verification',${attemptID},1,jsonb_build_object(
               'configuration',jsonb_build_object('projectID',${owned.projectID}::text,'database',current_database()),
               'revision',${"a".repeat(40)}::text,'runnerUUID',${runnerUUID}::text,'jobHandle',${jobHandle}::text,
               'templateSHA256',${"d".repeat(64)}::text),
-              now(),${JSON.stringify({ metadata: { uid: atespaceUID } })},
-              now(),'{}',now(),${JSON.stringify({ metadata: { uid: templateUID, version: "1" } })})`;
+              jsonb_build_object(
+                'atespace',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify({ metadata: { uid: atespaceUID } })}::text::jsonb),
+                'policy',jsonb_build_object('attemptedAt',to_jsonb(now()),'value','{}'::jsonb),
+                'template',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify({ metadata: { uid: templateUID, version: "1" } })}::text::jsonb)))`;
           await sql`INSERT INTO factory.runtime_attempt(
-            id,project_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
-            create_intended_at,created_by,isolated_kind,verification_id)
+            id,project_id,generation,revision,state,parent_connector_token_hash,
+            create_intended_at,created_by,isolated_kind,verification_id,atespace,actor_name,binding_intent)
             VALUES(${attemptID},${owned.projectID},1,${"a".repeat(40)},'create-intended',
-              ${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},'verification',${verificationID})`;
-          await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-            VALUES(${attemptID},${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},
+              ${"b".repeat(64)},now(),${owned.userID},'verification',${verificationID},
+              ${`fa-${attemptID.replaceAll("-", "")}`},${`runtime-${attemptID.replaceAll("-", "")}`},
               ${JSON.stringify({
                 projectID: owned.projectID,
                 generation: 1,
@@ -265,11 +268,13 @@ test.each([
                 templateUID,
                 templateVersion: "1",
                 templateSHA256: "d".repeat(64),
-              })})`;
+              })}::jsonb)`;
           await sql`UPDATE factory.verification SET runtime_attempt_id=${attemptID} WHERE id=${verificationID}`;
           await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${attemptID}`;
-          await sql`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-            VALUES(${attemptID},${kind === "capacity-wait" ? "compute-capacity" : "accounting-incomplete"})`;
+          await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+            VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${attemptID},
+              ${`runtime.compute_wait:${attemptID}`},'waiting',
+              ${JSON.stringify({ reason: kind === "capacity-wait" ? "compute-capacity" : "accounting-incomplete" })}::jsonb)`;
         });
       }
       let claims = 0;

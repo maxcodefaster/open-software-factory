@@ -1,21 +1,19 @@
 import type { Accessor, SourceAccessor } from "solid-js";
 import { createMemo } from "solid-js";
-import {
-  clarificationAction,
-  unansweredClarification,
-} from "../../../../packages/conversation-domain/src/clarification";
-import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
-import { assistantContext } from "../../../../packages/interface-domain/src/assistant-context";
-import { workspacePresence } from "../../../../packages/interface-domain/src/workspace-presence";
-import { type AgentView, type WriterView } from "../agent/contracts";
+import { clarificationAction, unansweredClarification } from "#conversation-domain/clarification";
+import type { ConversationMode } from "#conversation-domain/conversation";
+import type { CodingReasoning } from "#conversation-domain/model-settings";
+import { assistantContext } from "#interface-domain/assistant-context";
+import { workspacePresence } from "#interface-domain/workspace-presence";
+import type { AgentView, WriterView } from "../agent/contracts";
 import { buildAgentNeedsStart } from "../agent-view-state";
 import { groupConversationActivities } from "../conversation-activity";
 import { conversationTimeline } from "../conversation-timeline";
-import { type ConversationView } from "../project-agent/contracts";
+import type { ConversationView } from "../project-agent/contracts";
 import { requirementContent } from "../projects/ticket-content";
+import { isActiveTurnState } from "../tickets/client";
 import type { WorkspaceTab, WorkspaceView } from "../workspace-tabs";
-import type { FactoryDesktopProps, TicketDetail } from "./contracts";
+import type { TicketDetail } from "./contracts";
 
 interface AssistantPresentationDependencies {
   selectedTicketID: SourceAccessor<string | undefined>;
@@ -263,7 +261,7 @@ export function createAssistantPresentation(dependencies: AssistantPresentationD
 
   const agentTurnBusy = () =>
     ["starting", "working"].includes(dependencies.agent().state) ||
-    ["pending", "dispatching", "running"].includes(dependencies.agent().turn?.state ?? "");
+    isActiveTurnState(dependencies.agent().turn?.state);
 
   const agentNeedsResolution = () => dependencies.agent().turn?.state === "uncertain";
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type createIdentityConfiguration } from "../access/api";
+import type { createIdentityConfiguration } from "../access/api";
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import type { createWorkspaceContainerFiles } from "./container-files";

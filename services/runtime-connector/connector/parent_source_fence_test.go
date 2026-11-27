@@ -3,20 +3,41 @@ package connector
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
+
+func TestParentOperationCannotForgeNativeWorkDrainOrFallBackToDocker(t *testing.T) {
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "private-daemon-was-called")
+	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte("#!/bin/sh\n: > '"+marker+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	assignment := validAssignment()
+	assignment.SetNativeSource(http.NotFoundHandler())
+	for _, data := range []string{"", "checkpoint-a"} {
+		response := handleParentOperation(t.Context(), assignment, Message{
+			OperationID: "checkpoint-a", Action: "source-drain", Data: data,
+		})
+		if !strings.Contains(response.Error, "native Work writer barrier") {
+			t.Fatalf("generic Parent acknowledged an unproven native drain: %#v", response)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("Source drain reached the removed private Docker engine")
+	}
+}
 
 func TestParentSourceFenceDrainsConcurrentWritersAndRejectsLateOperations(t *testing.T) {
 	var fence parentSourceFence
 	entered, release, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var writes atomic.Int32
-	handle := fence.wrap(func(_ context.Context, message Message) Message {
+	handle := fence.Wrap(func(_ context.Context, message Message) Message {
 		if message.Action == "browser-call" {
 			close(entered)
 			<-release
@@ -65,7 +86,7 @@ func TestParentSourceFenceDrainsConcurrentWritersAndRejectsLateOperations(t *tes
 func TestParentSourceFenceRetainsCheckpointAfterFailedOrLostDrainReply(t *testing.T) {
 	var fence parentSourceFence
 	var calls int
-	handle := fence.wrap(func(_ context.Context, message Message) Message {
+	handle := fence.Wrap(func(_ context.Context, message Message) Message {
 		calls++
 		return Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action, Error: "owned drain failure"}
 	})
@@ -86,67 +107,5 @@ func TestParentSourceFenceRetainsCheckpointAfterFailedOrLostDrainReply(t *testin
 	}
 	if calls != 2 {
 		t.Fatal("a different operation was dispatched after the uncertain drain")
-	}
-}
-
-func TestParentControlKeepsGitAndBrowserFencedAfterSourceDrain(t *testing.T) {
-	assignment := validAssignment()
-	assignment.nativeSource = http.NotFoundHandler()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
-	replies := make(chan Message, 4)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		connection, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer connection.Close()
-		for _, message := range []Message{
-			{Type: "operation-request", Action: "source-drain", OperationID: "checkpoint-a"},
-			{Type: "operation-request", Action: "workspace-git", OperationID: "late-git"},
-			{Type: "operation-request", Action: "browser-call", OperationID: "late-browser"},
-		} {
-			if connection.WriteJSON(message) != nil {
-				return
-			}
-			var reply Message
-			if connection.ReadJSON(&reply) != nil {
-				return
-			}
-			replies <- reply
-		}
-		if connection.WriteJSON(Message{Type: "stop"}) != nil {
-			return
-		}
-		var stopped Message
-		if connection.ReadJSON(&stopped) == nil {
-			replies <- stopped
-		}
-	}))
-	defer server.Close()
-	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
-	control, err := dialControl(ctx, assignment, "parent", "owned-test-capability")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.close()
-	var dispatched atomic.Int32
-	err = serveParentControl(ctx, assignment, "owned-test-capability", &control, nil, func(_ context.Context, message Message) Message {
-		dispatched.Add(1)
-		return Message{Type: "operation-response", OperationID: message.OperationID, Action: message.Action}
-	})
-	if err != nil || dispatched.Load() != 1 {
-		t.Fatalf("Parent dispatched a writer after Source drain: calls=%d, error=%v", dispatched.Load(), err)
-	}
-	for index := range 3 {
-		select {
-		case reply := <-replies:
-			if (reply.Error != "") != (index != 0) {
-				t.Fatalf("Parent control did not retain the Source fence: %#v", reply)
-			}
-		case <-ctx.Done():
-			t.Fatal("Parent control did not settle Source drain and late-writer replies")
-		}
 	}
 }

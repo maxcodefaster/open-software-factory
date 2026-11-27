@@ -7,24 +7,24 @@ import {
   type TicketDraft,
   ticketDocumentSaveSchema,
 } from "../../apps/factory/src/change/contracts";
+import { MarkdownEditor } from "../../apps/factory/src/editor/markdown-editor";
+import { MarkdownReader } from "../../apps/factory/src/editor/markdown-reader";
 import { Icon } from "../../apps/factory/src/icon";
 import {
   type KnowledgeGeneration,
   type KnowledgePage,
   knowledgeSaveSchema,
 } from "../../apps/factory/src/knowledge/contracts";
-import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge-workspace";
-import { MarkdownEditor } from "../../apps/factory/src/markdown-editor";
-import { MarkdownReader } from "../../apps/factory/src/markdown-reader";
+import { KnowledgeWorkspace } from "../../apps/factory/src/knowledge/knowledge-workspace";
 import { ChatSkillPicker } from "../../apps/factory/src/skills/chat-picker";
 import {
   TicketWorkspace,
   type TicketWorkspaceProps,
-} from "../../apps/factory/src/ticket-workspace";
+} from "../../apps/factory/src/tickets/ticket-workspace";
 import { CopyButton } from "../../apps/factory/src/ui/feedback";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import "../../apps/factory/src/tokens.css";
-import "../../apps/factory/src/knowledge-workspace.css";
+import "../../apps/factory/src/knowledge/knowledge-workspace.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";

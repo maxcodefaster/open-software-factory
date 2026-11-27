@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createDatabase, type DatabaseTransaction } from "#db/client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import {

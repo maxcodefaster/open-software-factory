@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
-import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
+import { mergeGeneratedDocument } from "#knowledge-domain/document-merge";
 import type {
   WikiGenerationOutput,
   WikiGenerationProgress,
   WikiPageSnapshot,
-} from "../../../../packages/knowledge-domain/src/generation";
+} from "#knowledge-domain/generation";
 import { generateWiki, maximumTopicConcurrency } from "./generation-workflow";
 import { prepareWikiPublication } from "./publication";
 
@@ -51,6 +51,7 @@ async function scenario(options: {
   completedPageIDs?: readonly string[];
   changedPaths?: string[];
   commit?: string;
+  actorTemplatePath?: string;
   sources?: Array<{ path: string; content: string }>;
   inventory?: Array<{ path: string; sha: string; size: number }>;
   readFiles?(paths: string[]): Promise<Array<{ path: string; content: string }>>;
@@ -163,6 +164,7 @@ async function scenario(options: {
     const outcome = await generateWiki({
       name: "Speed fixture",
       commit,
+      ...(options.actorTemplatePath ? { actorTemplatePath: options.actorTemplatePath } : {}),
       modelId: "controlled-wiki",
       connection: {
         provider: "openai",
@@ -223,6 +225,40 @@ async function scenario(options: {
 const count = (seen: Seen[], role: Role) => seen.filter((entry) => entry.role === role).length;
 const page = (body: string, sources: string[] = ["src/file-0.ts"]) => ({
   pages: [{ body, sources }],
+});
+
+test("the actual Wiki planner receives the configured native ActorTemplate in its bounded map", async () => {
+  const actorTemplatePath = "ops/native/project-runtime.json";
+  const result = await scenario({
+    actorTemplatePath,
+    inventory: [
+      ...fileList(60).map((file, index) => ({
+        ...file,
+        path: `packages/package-${index}/package.json`,
+      })),
+      { path: actorTemplatePath, sha: "b".repeat(40), size: 50 },
+      { path: ".factory/system.json", sha: "c".repeat(40), size: 50 },
+    ],
+    reply: ({ role }) =>
+      role === "planner"
+        ? { output: { topics: [topic("overview", [actorTemplatePath], null)] } }
+        : role === "writer"
+          ? {
+              output: page("Use the configured native Project environment.", [actorTemplatePath]),
+            }
+          : { output: { issues: [], advisory: [] } },
+  });
+  const planner = result.seen.find((entry) => entry.role === "planner");
+  expect(planner?.prompt["repository"]).toMatchObject({
+    manifests: [
+      actorTemplatePath,
+      ".factory/system.json",
+      ...Array.from({ length: 60 }, (_, index) => `packages/package-${index}/package.json`)
+        .sort()
+        .slice(0, 38),
+    ],
+  });
+  expect(result.published).toHaveLength(1);
 });
 
 test("the checker reviews the human-merged material overview before publication", async () => {

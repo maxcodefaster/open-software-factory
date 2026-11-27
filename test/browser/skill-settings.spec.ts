@@ -1,10 +1,10 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Locator, type Page } from "@playwright/test";
+import { skillLibraryView } from "#conversation-domain/skill-library";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
-import { createDatabase } from "../../packages/db/src/client";
 import { observeBrowserErrors } from "../fixtures/browser-errors";
 import { test } from "../fixtures/browser-host-test";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -196,7 +196,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
       Array<{ id: string }>
     >`SELECT user_id AS id FROM factory.administrator`;
     if (!admin) throw new Error("Owned admin missing");
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES (${projectId},${`skills-${projectId}`},${projectName},'https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${admin.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES (${projectId},${`skills-${projectId}`},${projectName},'https://example.invalid/owned.git','main','.factory/actor-template.json',${admin.id})`;
     const password = "owned-skill-browser-password";
     const authorEmail = `product-${projectId}@factory.local`;
     const managerEmail = `manager-${projectId}@factory.local`;

@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import type { APIRequestContext } from "@playwright/test";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { SystemContractError } from "#system-contract/system-contract";
 import { createRuntimeService } from "../../apps/factory/src/runtime/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { type createDatabase, drizzleTransaction } from "../../packages/db/src/client";
-import { SystemContractError } from "../../packages/system-contract/src/system-contract";
 import {
   callFactoryFunction,
   compiledFactoryEndpoint,
@@ -11,6 +11,8 @@ import {
   factoryFunctionRequest,
   requestFunction,
 } from "../fixtures/server-functions";
+import { substrateFixture } from "../fixtures/substrate";
+import { recordUncreatedWorkspaceAttempt } from "../fixtures/uncreated-workspace-attempt";
 
 test("the native Stop client defers its socket idle budget to the lifecycle owner while preserving explicit cancellation and ordinary read bounds", async () => {
   let options: BunFetchRequestInit | undefined;
@@ -113,8 +115,8 @@ test("compiled runtime commands retain trusted System Contract failures without 
   expect(await call()).toMatchObject({ ok: false, status: 500 });
 });
 
-test("compiled Stop confirms an authorized prebuild without rejecting its settled outcome", async () => {
-  const origin = "https://owned-prebuild-stop.test",
+test("compiled Stop confirms authorized isolated Staging without rejecting its settled outcome", async () => {
+  const origin = "https://owned-staging-stop.test",
     actor = crypto.randomUUID(),
     project = crypto.randomUUID(),
     attemptID = crypto.randomUUID(),
@@ -122,7 +124,7 @@ test("compiled Stop confirms an authorized prebuild without rejecting its settle
   const stopped = {
     id: attemptID,
     projectId: project,
-    runtimeKind: "prebuild",
+    runtimeKind: "staging",
     state: "stop-intended",
     generation: "1",
     revision: "a".repeat(40),
@@ -174,11 +176,54 @@ test("compiled Stop confirms an authorized prebuild without rejecting its settle
     ok: true,
     value: {
       id: attemptID,
-      runtimeKind: "prebuild",
+      runtimeKind: "staging",
       state: "stop-intended",
       createdAt: stopped.createdAt.toISOString(),
       updatedAt: stopped.updatedAt.toISOString(),
     },
   });
   expect(events).toEqual(["authorize", "stop", "revoke", "suspend"]);
+});
+
+test("the public isolated Stop command cannot delete a retained Workspace or revoke its editor", async () => {
+  const f = await substrateFixture();
+  const events: string[] = [];
+  try {
+    await recordUncreatedWorkspaceAttempt(f.database, {
+      workspaceID: f.workspaceID,
+      generation: 1,
+      createdBy: f.userID,
+      parentHash: "a".repeat(64),
+      childHash: "b".repeat(64),
+      connectorURL: "wss://owned.factory.invalid/internal/runtime-connect",
+    });
+    const runtime = createRuntimeService({
+      database: f.database,
+      access: {
+        async requireRuntime(userID: string, attemptID: string) {
+          expect([userID, attemptID]).toEqual([f.userID, f.attemptID]);
+          events.push("authorize");
+        },
+      },
+      runtime: {
+        async stop() {
+          events.push("delete");
+          throw new Error("Workspace deletion was dispatched");
+        },
+      },
+      revokeAttempt: () => events.push("revoke"),
+      suspendAttempt: () => events.push("suspend"),
+    } as unknown as Parameters<typeof createRuntimeService>[0]);
+    await expect(runtime.stop(f.userID, f.attemptID)).rejects.toMatchObject({
+      code: "conflict",
+      message: "Use Pause compute for this Workspace. Stop is reserved for isolated execution.",
+    });
+    expect(events).toEqual(["authorize"]);
+    expect(
+      await f.database
+        .client`SELECT id FROM factory.runtime_attempt WHERE id=${f.attemptID} AND stop_intended_at IS NULL`,
+    ).toHaveLength(1);
+  } finally {
+    await f.dispose();
+  }
 });

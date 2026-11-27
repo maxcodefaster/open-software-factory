@@ -133,6 +133,29 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		sourceError(response, http.StatusBadRequest, "Invalid source request")
 		return
 	}
+	if operation == "attest" {
+		service.writes.Lock()
+		defer service.writes.Unlock()
+		if service.writable ||
+			input.CheckpointID == "" || input.CheckpointID != service.checkpointID {
+			sourceError(response, 409, "Preserved Source is not fenced for its original checkpoint")
+			return
+		}
+		file, err := os.CreateTemp("", "factory-source-attest-*")
+		if err != nil {
+			service.error(response, err)
+			return
+		}
+		defer func() { file.Close(); os.Remove(file.Name()) }()
+		bundle, err := service.source.ExportBundle(file)
+		if err != nil {
+			service.error(response, err)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(response).Encode(bundle)
+		return
+	}
 	if operation == "checkpoint" || operation == "chunk" {
 		service.writes.Lock()
 		defer service.writes.Unlock()

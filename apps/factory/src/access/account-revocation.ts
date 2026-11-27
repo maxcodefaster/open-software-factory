@@ -1,12 +1,6 @@
 import { and, eq, inArray, isNotNull, notExists } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  administrator,
-  agentTurn,
-  change,
-  changeWriter,
-  projectMembership,
-} from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { administrator, agentTurn, change, changeWriter, projectMembership } from "#db/schema";
 
 export function createAccountRevocation(options: {
   database: ReturnType<typeof createDatabase>;

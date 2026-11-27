@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import { isAbsolute, resolve } from "node:path";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
-import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { runCommand } from "#runtime-kubernetes/command";
+import { kubernetesCommand } from "#runtime-kubernetes/config";
 
 type Execute = typeof runCommand;
 type ContainerIntent = {

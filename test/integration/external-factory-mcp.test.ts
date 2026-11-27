@@ -4,6 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { hashPassword } from "better-auth/crypto";
+import { emergencyAdministratorID } from "#auth/policy";
+import {
+  nativeActor,
+  type SubstrateCall,
+  SubstrateRPCError,
+} from "#runtime-kubernetes/substrate-control";
+import { personalWorkspaceIdentity } from "#workspace-domain/workspace";
 import { createExternalFactoryMCP } from "../../apps/factory/src/mcp/external";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { removeRuntimeRepository } from "../../apps/factory/src/runtime/git-http";
@@ -11,15 +18,9 @@ import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/
 import { createWorkspaceSharing } from "../../apps/factory/src/workspace/sharing";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import { emergencyAdministratorID } from "../../packages/auth/src/policy";
-import {
-  nativeActor,
-  type SubstrateCall,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
-import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMCPAuthorization } from "../fixtures/mcp-authorization";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { substrateFixture } from "../fixtures/substrate";
 
 function mcpValue(result: Awaited<ReturnType<Client["callTool"]>>) {
@@ -29,13 +30,21 @@ function mcpValue(result: Awaited<ReturnType<Client["callTool"]>>) {
   return JSON.parse(text.text);
 }
 
-async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
+async function mcpFirstStartFixture(
+  kind: "personal" | "ticket" = "personal",
+  templateContent = nativeProjectTemplate.content,
+) {
   const f = await substrateFixture("a".repeat(40), kind);
   const directory = await mkdtemp(join(tmpdir(), "factory-mcp-first-start-"));
   const clients: Client[] = [];
   let server: ReturnType<typeof Bun.serve> | undefined;
   const sources = createSubstrateSources(f.database, f.hub);
-  const workspaceSources = createWorkspaceSourceController(f.database, f.hub, sources);
+  const workspaceSources = createWorkspaceSourceController(f.database, f.hub, {
+    ...sources,
+    // This fixture owns lifecycle intent, not Source process/native acceptance.
+    // Source-only admission is real SQL; materialization stays unconfirmed.
+    available: async () => false,
+  });
   async function dispose() {
     for (const client of clients) await client.close();
     await server?.stop(true);
@@ -67,6 +76,7 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
         ],
       }),
     );
+    await writeFile(join(repository, nativeProjectTemplate.path), templateContent);
     await Bun.$`git -C ${repository} add .`.quiet();
     await Bun.$`git -C ${repository} -c user.name=Owned -c user.email=owned@example.invalid commit -m initial`.quiet();
     await f.database
@@ -96,10 +106,12 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
       afterStart: undefined as (() => Promise<void>) | undefined,
       previewGrants: [] as Array<{ attemptID: string; appChannel: string }>,
     };
-    async function retainedIntent() {
+    async function retainedIntent(requireNativeIntent = true) {
       const commands = await f.database
-        .client`SELECT workspace_id,actor_id,action,dispatch_attempted_at
-        FROM factory.workspace_lifecycle_command WHERE workspace_id=${f.workspaceID}`;
+        .client`SELECT scope_id AS workspace_id,created_by AS actor_id,
+          payload->>'action' AS action,payload->>'dispatchAttemptedAt' AS dispatch_attempted_at
+        FROM factory.operation
+        WHERE kind='workspace.lifecycle' AND scope_type='workspace' AND scope_id=${f.workspaceID}`;
       expect(commands.length).toBeGreaterThan(0);
       for (const command of commands) {
         expect(command).toMatchObject({
@@ -109,10 +121,11 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
         });
         expect(command["dispatch_attempted_at"]).not.toBeNull();
       }
-      expect(
-        await f.database
-          .client`SELECT workspace_id FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID}`,
-      ).toHaveLength(1);
+      if (requireNativeIntent)
+        expect(
+          await f.database
+            .client`SELECT owner_id FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace'`,
+        ).toHaveLength(1);
     }
     const call: SubstrateCall = async (method, input) => {
       // Check from another connection before *every* native dispatch, including reads.
@@ -175,7 +188,9 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
         },
         async requireReady() {
           probe.calls.push("requireReady");
-          await retainedIntent();
+          // Existing Workspace capacity preflight can precede native intent.
+          // Every actual native RPC above still requires both persisted intents.
+          await retainedIntent(false);
         },
       },
     });
@@ -234,6 +249,7 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
     }
     return {
       ...f,
+      repository,
       probe,
       connect,
       client: await connect(),
@@ -247,6 +263,57 @@ async function mcpFirstStartFixture(kind: "personal" | "ticket" = "personal") {
     throw cause;
   }
 }
+
+test.each(["project", "workspace", "unopened project"])(
+  "MCP %s Start retains an actionable native-template rejection without dispatch or replay",
+  async (selector) => {
+    const invalid = JSON.parse(nativeProjectTemplate.content);
+    invalid.containers.find((container: { name: string }) => container.name === "work").image =
+      "node:24";
+    const f = await mcpFirstStartFixture("personal", JSON.stringify(invalid));
+    const requestID = crypto.randomUUID();
+    try {
+      if (selector !== "unopened project") {
+        const opened = await f.client.callTool({
+          name: "openWorkspace",
+          arguments: { projectID: f.projectID },
+        });
+        expect(opened.isError).not.toBe(true);
+      }
+      const arguments_ =
+        selector === "workspace"
+          ? { workspaceID: f.workspaceID, requestID }
+          : { projectID: f.projectID, requestID };
+      const rejected = await f.client.callTool({ name: "startWorkspace", arguments: arguments_ });
+      expect(rejected.isError).toBe(true);
+      const result = mcpValue(rejected);
+      expect(result.error).toEqual({
+        code: "invalid",
+        message: expect.stringContaining("immutable OCI image digest"),
+      });
+      expect(f.probe.calls.filter((method) => method !== "requireReady")).toEqual([]);
+      for (const table of ["runtime_attempt", "substrate_provision"])
+        expect(await f.database.client.unsafe(`SELECT * FROM factory.${table}`)).toHaveLength(0);
+      const [command] = await f.database.client`
+        SELECT completed_at,result FROM factory.operation WHERE id=${requestID} AND kind='workspace.lifecycle'`;
+      expect(command).toBeDefined();
+      expect(command?.["completed_at"]).not.toBeNull();
+      expect(command?.["result"]).toEqual(result);
+      // Observation must return the retained rejection, not re-read now-unavailable
+      // configuration or try a different native operation under the same request.
+      await rm(f.repository, { recursive: true, force: true });
+      f.recreateHandler();
+      const beforeReplay = [...f.probe.calls];
+      const replay = await f.client.callTool({ name: "startWorkspace", arguments: arguments_ });
+      expect(replay.isError).toBe(true);
+      expect(mcpValue(replay)).toEqual(result);
+      expect(f.probe.calls).toEqual(beforeReplay);
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test("MCP explicit Project Start initializes a fresh personal native Workspace with retained request intent", async () => {
   const f = await mcpFirstStartFixture();
@@ -262,13 +329,16 @@ test("MCP explicit Project Start initializes a fresh personal native Workspace w
       name: "openWorkspace",
       arguments: { projectID: f.projectID },
     });
-    expect(unopened.isError).toBe(true);
-    expect(mcpValue(unopened).error.message).toContain(
-      "No compute or legacy Workspace was created",
-    );
-    expect(await f.database.client`SELECT id FROM factory.development_workspace`).toHaveLength(0);
+    expect(unopened.isError, JSON.stringify(unopened)).not.toBe(true);
+    expect(mcpValue(unopened)).toMatchObject({
+      workspaceID: f.workspaceID,
+      state: "preparing",
+      failure: null,
+    });
+    expect(await f.database.client`SELECT id FROM factory.development_workspace`).toHaveLength(1);
+    expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     expect(
-      await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`,
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle'`,
     ).toHaveLength(0);
     expect(probe.calls).toHaveLength(0);
     const started = await client.callTool({
@@ -315,7 +385,7 @@ test("MCP explicit Project Start initializes a fresh personal native Workspace w
     ]);
     expect([
       ...(await f.database
-        .client`SELECT id FROM factory.workspace_lifecycle_command WHERE completed_at IS NOT NULL`),
+        .client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle' AND completed_at IS NOT NULL`),
     ]).toEqual([{ id: requestID }]);
     // The existing Workspace selector still admits a distinct, deliberate Start.
     const existing = await client.callTool({
@@ -327,8 +397,8 @@ test("MCP explicit Project Start initializes a fresh personal native Workspace w
     expect(probe.creates.get("Actor")).toBe(1);
     // Observing a dispatched request is not a new Start and needs no fresh setup.
     await f.database
-      .client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-      VALUES(${f.projectID},'configuration','pending',${crypto.randomUUID()})`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by)
+      VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${f.projectID},${`projects.setup_readiness:${f.projectID}:configuration`},'pending',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${f.userID})`;
     const beforeBlockedReplay = probe.calls.length;
     expect(
       mcpValue(
@@ -338,13 +408,17 @@ test("MCP explicit Project Start initializes a fresh personal native Workspace w
         }),
       ),
     ).toEqual(mcpValue(started));
-    const blocked = await client.callTool({
+    expect(probe.calls).toHaveLength(beforeBlockedReplay);
+    // Pending Project setup does not block ordinary development compute.
+    // A distinct explicit Start observes the same running native Actor.
+    const continued = await client.callTool({
       name: "startWorkspace",
       arguments: { projectID: f.projectID, requestID: crypto.randomUUID() },
     });
-    expect(blocked.isError).toBe(true);
-    expect(mcpValue(blocked).error.code).toBe("unavailable");
-    expect(probe.calls).toHaveLength(beforeBlockedReplay);
+    expect(continued.isError, JSON.stringify(continued)).not.toBe(true);
+    expect(mcpValue(continued).id).toBe(f.attemptID);
+    expect(probe.creates.get("Actor")).toBe(1);
+    expect(probe.calls.slice(beforeBlockedReplay)).not.toContain("ResumeActor");
   } finally {
     await f.dispose();
   }
@@ -363,8 +437,8 @@ test("MCP explicit Project Start requires exactly one target and current Develop
       VALUES(${f.projectID},${contributor},'product-contributor',${f.userID})`;
     const otherProject = crypto.randomUUID();
     await f.database
-      .client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      SELECT ${otherProject},${`other-mcp-${otherProject}`},'Other MCP Project',repository_url,default_branch,devcontainer_path,created_by
+      .client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      SELECT ${otherProject},${`other-mcp-${otherProject}`},'Other MCP Project',repository_url,default_branch,actor_template_path,created_by
       FROM factory.project WHERE id=${f.projectID}`;
     await f.database
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
@@ -377,15 +451,17 @@ test("MCP explicit Project Start requires exactly one target and current Develop
       expect(
         (await f.client.callTool({ name: "startWorkspace", arguments: arguments_ })).isError,
       ).toBe(true);
-    for (const name of ["pauseWorkspace", "stopWorkspace"])
-      expect(
-        (
-          await f.client.callTool({
-            name,
-            arguments: { projectID: f.projectID, requestID: crypto.randomUUID() },
-          })
-        ).isError,
-      ).toBe(true);
+    expect((await f.client.listTools()).tools.map((tool) => tool.name)).not.toContain(
+      "stopWorkspace",
+    );
+    expect(
+      (
+        await f.client.callTool({
+          name: "pauseWorkspace",
+          arguments: { projectID: f.projectID, requestID: crypto.randomUUID() },
+        })
+      ).isError,
+    ).toBe(true);
     for (const [userID, code] of [
       [contributor, "forbidden"],
       [stranger, "not-found"],
@@ -408,12 +484,11 @@ test("MCP explicit Project Start requires exactly one target and current Develop
       }),
     ).rejects.toThrow("Tool startWorkspace not found");
     expect(f.probe.calls).toHaveLength(0);
-    for (const table of [
-      "development_workspace",
-      "substrate_workspace",
-      "workspace_lifecycle_command",
-    ])
+    for (const table of ["development_workspace", "substrate_provision"])
       expect(await f.database.client.unsafe(`SELECT * FROM factory.${table}`)).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle'`,
+    ).toHaveLength(0);
   } finally {
     await f.dispose();
   }
@@ -431,8 +506,8 @@ test("MCP explicit Project Start rejects request reuse across Projects, actors a
     const otherProject = crypto.randomUUID(),
       developer = crypto.randomUUID();
     await f.database
-      .client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      SELECT ${otherProject},${`other-mcp-${otherProject}`},'Other MCP Project',repository_url,default_branch,devcontainer_path,created_by
+      .client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      SELECT ${otherProject},${`other-mcp-${otherProject}`},'Other MCP Project',repository_url,default_branch,actor_template_path,created_by
       FROM factory.project WHERE id=${f.projectID}`;
     await f.database
       .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
@@ -444,14 +519,14 @@ test("MCP explicit Project Start rejects request reuse across Projects, actors a
       VALUES(${f.projectID},${developer},'developer',${f.userID})`;
     const before = f.probe.calls.length;
     const retained = [
-      ...(await f.database.client`SELECT * FROM factory.workspace_lifecycle_command`),
+      ...(await f.database
+        .client`SELECT * FROM factory.operation WHERE kind='workspace.lifecycle'`),
     ];
     const other = await f.connect(developer);
     for (const [client, name, target] of [
       [f.client, "startWorkspace", { projectID: otherProject }],
       [other, "startWorkspace", { projectID: f.projectID }],
       [f.client, "pauseWorkspace", { workspaceID: f.workspaceID }],
-      [f.client, "stopWorkspace", { workspaceID: f.workspaceID }],
     ] as const) {
       const denied = await client.callTool({ name, arguments: { ...target, requestID } });
       expect(denied.isError, JSON.stringify(denied)).toBe(true);
@@ -462,13 +537,16 @@ test("MCP explicit Project Start rejects request reuse across Projects, actors a
       { id: f.workspaceID },
     ]);
     expect([
-      ...(await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`),
+      ...(await f.database
+        .client`SELECT owner_id AS workspace_id FROM factory.substrate_provision WHERE kind='workspace'`),
     ]).toEqual([{ workspace_id: f.workspaceID }]);
     expect([
-      ...(await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`),
+      ...(await f.database
+        .client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle'`),
     ]).toEqual([{ id: requestID }]);
     expect([
-      ...(await f.database.client`SELECT * FROM factory.workspace_lifecycle_command`),
+      ...(await f.database
+        .client`SELECT * FROM factory.operation WHERE kind='workspace.lifecycle'`),
     ]).toEqual(retained);
     await f.database.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
@@ -524,7 +602,7 @@ test("MCP explicit Project Start retains a lost native reply and never redispatc
     expect(f.probe.calls).toHaveLength(before);
     expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     const [intent] = await f.database
-      .client`SELECT completed_at,result FROM factory.workspace_lifecycle_command WHERE id=${requestID}`;
+      .client`SELECT completed_at,result FROM factory.operation WHERE id=${requestID} AND kind='workspace.lifecycle'`;
     expect(intent).toEqual({ completed_at: null, result: null });
     // A distinct explicit Start can reconcile the same normal native intent.
     const recovered = await f.client.callTool({
@@ -586,7 +664,8 @@ test("MCP explicit Project Start observes a concurrent duplicate while the first
     expect(f.probe.calls).toHaveLength(before);
     expect(f.probe.creates.get("Actor")).toBe(1);
     expect([
-      ...(await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`),
+      ...(await f.database
+        .client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle'`),
     ]).toEqual([{ id: requestID }]);
   } finally {
     release.resolve();
@@ -692,7 +771,8 @@ test("MCP retained lists keep personal privacy and current Project grants separa
     }
     expect(f.probe.calls).toHaveLength(0);
     expect([
-      ...(await f.database.client`SELECT id FROM factory.workspace_lifecycle_command`),
+      ...(await f.database
+        .client`SELECT id FROM factory.operation WHERE kind='workspace.lifecycle'`),
     ]).toEqual([]);
   } finally {
     await f.dispose();
@@ -729,8 +809,8 @@ test("public Factory MCP uses explicit OAuth and current Workspace grants throug
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${guest},'MCP collaborator',${`${guest}@factory.invalid`})`;
     await database.client`INSERT INTO auth.account(id,user_id,account_id,provider_id,password)
       VALUES(${crypto.randomUUID()},${guest},${guest},'credential',${await hashPassword(password)})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`external-mcp-${project}`},'Owned external MCP','https://github.com/example/project','main','.devcontainer/devcontainer.json',${owner})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`external-mcp-${project}`},'Owned external MCP','https://github.com/example/project','main','.factory/actor-template.json',${owner})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${guest},'developer',${owner})`;
     const workspaceID = personalWorkspaceIdentity(project, owner).workspaceID;
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)

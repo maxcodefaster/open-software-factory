@@ -1,7 +1,7 @@
 import { and, desc, eq, sql as expression } from "drizzle-orm";
-import { type DatabaseTransaction, drizzleTransaction } from "../../../../packages/db/src/client";
-import { knowledgePage, knowledgeRevision } from "../../../../packages/db/src/schema";
-import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { knowledgePage, knowledgeRevision } from "#db/schema";
+import { knowledgeEditInput } from "#knowledge-domain/knowledge";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 

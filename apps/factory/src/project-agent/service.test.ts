@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ZodError } from "zod";
-import { type ConversationStreamEvent } from "./contracts";
+import type { ConversationStreamEvent } from "./contracts";
 import { createConversationService } from "./service";
 
 type Service = ReturnType<typeof createConversationService>;

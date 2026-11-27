@@ -1,7 +1,7 @@
-import { type PullRow } from "@rocicorp/zero";
+import type { PullRow } from "@rocicorp/zero";
 import { z } from "zod";
-import { wikiGenerationProgress } from "../../../../packages/knowledge-domain/src/generation";
-import { type FactoryZeroSchema } from "../../../../packages/zero-schema/src";
+import { wikiGenerationProgress } from "#knowledge-domain/generation";
+import type { FactoryZeroSchema } from "#zero-schema";
 import { optionalNumber, optionalString } from "../optional-values";
 
 export const codeReference = z

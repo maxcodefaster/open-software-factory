@@ -1,22 +1,98 @@
 package connector
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/writergate"
 )
+
+func TestChildSourceResumeCannotRefreshOrThawFencedWriter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var refreshes atomic.Int32
+	gate := writergate.NewGate(func(context.Context) error {
+		refreshes.Add(1)
+		return fmt.Errorf("explicit Source resume must not refresh reconnect authority")
+	})
+	gate.SetFrozen(true)
+	peers := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer owned-fenced-child" ||
+			r.Header.Get("X-Factory-Connector-Role") != "child" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		peer, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer peer.Close()
+		peers <- peer
+		<-ctx.Done()
+	}))
+	assignment := validAssignment()
+	assignment.WorkspaceFolder, assignment.Channels = t.TempDir(), nil
+	assignment.ControlURL = "ws" + strings.TrimPrefix(server.URL, "http")
+	assignment.SetNativeWriters(gate)
+	done := make(chan error, 1)
+	go func() { done <- RunChild(ctx, assignment, "owned-fenced-child") }()
+	t.Cleanup(func() {
+		cancel()
+		server.Close()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error("owned Child did not stop cleanly:", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("owned Child did not join")
+		}
+	})
+	var peer *websocket.Conn
+	select {
+	case peer = <-peers:
+	case <-ctx.Done():
+		t.Fatal("fenced Child did not connect")
+	}
+	deadline, _ := ctx.Deadline()
+	peer.SetReadDeadline(deadline)
+	peer.SetWriteDeadline(deadline)
+	var hello Message
+	if err := peer.ReadJSON(&hello); err != nil || hello.Type != "hello" || hello.Role != "child" {
+		t.Fatal("fenced Child did not announce its original connection:", err)
+	}
+	for _, action := range []string{"source-resume", "source-resume", "command-start"} {
+		request := Message{Type: "operation-request", Action: action, OperationID: "arbitrary-operation", Data: "{}"}
+		if err := peer.WriteJSON(request); err != nil {
+			t.Fatal(err)
+		}
+		var reply Message
+		if err := peer.ReadJSON(&reply); err != nil || reply.Type != "operation-response" ||
+			reply.OperationID != request.OperationID || reply.Action != action || reply.Error != "native Source writers are fenced" {
+			t.Fatalf("retired operation bypassed the Child fence: %+v %v", reply, err)
+		}
+	}
+	started := false
+	if refreshes.Load() != 0 || !gate.Frozen() ||
+		gate.Start(func() error { started = true; return nil }) == nil || started {
+		t.Fatal("arbitrary Source resume refreshed authority or admitted a writer")
+	}
+}
 
 func TestManagedAppReceivesGracefulStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -26,8 +102,8 @@ func TestManagedAppReceivesGracefulStop(t *testing.T) {
 	assignment.WorkspaceFolder = directory
 	assignment.Processes = []Process{{Name: "app", Command: []string{"sh", "-c", "trap 'touch terminated; exit 0' TERM INT; touch ready; while :; do sleep 0.1; done"}}}
 	manager := newProcessManager(ctx, assignment, io.Discard)
-	defer manager.stopAll()
-	if err := manager.start("app"); err != nil {
+	defer manager.StopAll()
+	if err := manager.Start("app"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -40,7 +116,7 @@ func TestManagedAppReceivesGracefulStop(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := manager.stop("app"); err != nil {
+	if err := manager.Stop("app"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(directory, "terminated")); err != nil {
@@ -221,7 +297,9 @@ func TestDevelopmentChildServesAgentWhilePreviewIsUnhealthy(t *testing.T) {
 	}))
 	defer control.Close()
 	assignment := validAssignment()
-	assignment = effectiveChildAssignment(assignment, devcontainerResult{RemoteWorkspaceFolder: workspace, checkoutFolder: checkout})
+	assignment.WorkspaceFolder = workspace
+	assignment.RemoteWorkspaceFolder = workspace
+	assignment.CheckoutFolder = checkout
 	assignment.ControlURL = "ws" + strings.TrimPrefix(control.URL, "http")
 	assignment.Channels = []Channel{
 		{Name: "app", Kind: "app", Target: preview.URL, HealthPath: "/"},
@@ -263,13 +341,13 @@ func TestFailedDevelopmentCommandDoesNotBlockOtherProcesses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager := newProcessManager(ctx, assignment, io.Discard)
-	defer manager.stopAll()
-	if err := manager.startAll(); err != nil {
+	defer manager.StopAll()
+	if err := manager.StartAll(); err != nil {
 		t.Fatalf("App failure blocked IDE process: %v", err)
 	}
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-	if manager.processes["ide"].state != "running" || manager.processes["app"].state != "failed" {
+	ideState, _, _ := manager.State("ide")
+	appState, _, _ := manager.State("app")
+	if ideState != "running" || appState != "failed" {
 		t.Fatal("independent process states were not retained")
 	}
 }
@@ -282,13 +360,13 @@ func TestFailedDevelopmentAgentDoesNotEndIDE(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager := newProcessManager(ctx, assignment, io.Discard)
-	defer manager.stopAll()
-	if err := manager.startAll(); err != nil {
+	defer manager.StopAll()
+	if err := manager.StartAll(); err != nil {
 		t.Fatalf("Agent failure blocked IDE: %v", err)
 	}
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-	if manager.processes["ide"].state != "running" || manager.processes["agent"].state != "failed" {
+	ideState, _, _ := manager.State("ide")
+	agentState, _, _ := manager.State("agent")
+	if ideState != "running" || agentState != "failed" {
 		t.Fatal("independent process states were not retained")
 	}
 }
@@ -396,23 +474,6 @@ func TestDevelopmentChildAcceptsTerminalBeforeAgentReady(t *testing.T) {
 	}
 }
 
-func TestProcessOutputKeepsItsProcessIdentity(t *testing.T) {
-	var output bytes.Buffer
-	manager := &processManager{
-		output: &output,
-		recent: make(map[string][]byte),
-	}
-	writer := managedProcessWriter{name: "app", manager: manager}
-	content := []byte("server ready on 4300\n")
-	if _, err := writer.Write(content); err != nil {
-		t.Fatalf("write process output: %v", err)
-	}
-	expected := "FACTORY_PROCESS_OUTPUT app " + base64.StdEncoding.EncodeToString(content) + "\n"
-	if output.String() != expected {
-		t.Fatalf("unexpected process output: %q", output.String())
-	}
-}
-
 func TestTheiaConnectionTokenValidation(t *testing.T) {
 	for _, token := range []string{"token", "token-123_A.b~c"} {
 		if !validTheiaConnectionToken(token) {
@@ -436,10 +497,10 @@ func TestTerminalSessionSurvivesBrowserDetach(t *testing.T) {
 		messages <- message
 		return nil
 	})
-	defer manager.closeAll()
+	defer manager.CloseAll()
 
-	manager.attach(Message{StreamID: "stream-1", Path: "/terminal-a"})
-	first := manager.observation()
+	manager.Attach(Message{StreamID: "stream-1", Path: "/terminal-a"})
+	first := manager.Observation()
 	if first.TerminalCount == nil || *first.TerminalCount != 1 || first.TerminalRevision == nil {
 		t.Fatal("created PTY has no bounded activity observation")
 	}
@@ -447,7 +508,7 @@ func TestTerminalSessionSurvivesBrowserDetach(t *testing.T) {
 		return message.Type == "websocket-ready" && message.StreamID == "stream-1"
 	})
 	command := base64.StdEncoding.EncodeToString([]byte("export FACTORY_REATTACH_PROOF=original; printf 'terminal-replay-%s\\n' ok\n"))
-	handled, err := manager.write(Message{
+	handled, err := manager.Write(Message{
 		StreamID:    "stream-1",
 		MessageType: websocket.BinaryMessage,
 		Data:        command,
@@ -459,15 +520,15 @@ func TestTerminalSessionSurvivesBrowserDetach(t *testing.T) {
 		content, _ := base64.StdEncoding.DecodeString(message.Data)
 		return message.StreamID == "stream-1" && strings.Contains(string(content), "terminal-replay-ok")
 	})
-	if !manager.detach("stream-1") {
+	if !manager.Detach("stream-1") {
 		t.Fatal("expected terminal stream to detach")
 	}
-	detached := manager.observation()
+	detached := manager.Observation()
 	if detached.TerminalCount == nil || *detached.TerminalCount != 1 {
 		t.Fatal("detaching a browser incorrectly reports an idle PTY")
 	}
 
-	manager.attach(Message{StreamID: "stream-2", Path: "/terminal-a"})
+	manager.Attach(Message{StreamID: "stream-2", Path: "/terminal-a"})
 	waitForMessage(t, messages, func(message Message) bool {
 		return message.Type == "websocket-ready" && message.StreamID == "stream-2"
 	})
@@ -475,7 +536,7 @@ func TestTerminalSessionSurvivesBrowserDetach(t *testing.T) {
 		content, _ := base64.StdEncoding.DecodeString(message.Data)
 		return message.StreamID == "stream-2" && strings.Contains(string(content), "terminal-replay-ok")
 	})
-	handled, err = manager.write(Message{
+	handled, err = manager.Write(Message{
 		StreamID: "stream-2", MessageType: websocket.BinaryMessage,
 		Data: base64.StdEncoding.EncodeToString([]byte("printf 'after-reattach=%s\\n' \"$FACTORY_REATTACH_PROOF\"\n")),
 	})
@@ -486,29 +547,23 @@ func TestTerminalSessionSurvivesBrowserDetach(t *testing.T) {
 		content, _ := base64.StdEncoding.DecodeString(message.Data)
 		return message.StreamID == "stream-2" && strings.Contains(string(content), "after-reattach=original")
 	})
-	if err := manager.close("terminal-a"); err != nil {
+	if err := manager.Close("terminal-a"); err != nil {
 		t.Fatalf("close terminal session: %v", err)
 	}
-	manager.mutex.Lock()
-	remaining := len(manager.sessions)
-	manager.mutex.Unlock()
-	if remaining != 0 {
+	if remaining := manager.SessionCount(); remaining != 0 {
 		t.Fatalf("expected terminal session to close, got %d", remaining)
 	}
-	closed := manager.observation()
+	closed := manager.Observation()
 	if closed.TerminalCount == nil || *closed.TerminalCount != 0 || closed.TerminalRevision == nil || *closed.TerminalRevision <= *first.TerminalRevision {
 		t.Fatal("PTY close did not advance its activity observation")
 	}
 
-	manager.attach(Message{StreamID: "stream-3", Path: "/terminal-b"})
+	manager.Attach(Message{StreamID: "stream-3", Path: "/terminal-b"})
 	waitForMessage(t, messages, func(message Message) bool {
 		return message.Type == "websocket-ready" && message.StreamID == "stream-3"
 	})
-	manager.closeAll()
-	manager.mutex.Lock()
-	remaining = len(manager.sessions)
-	manager.mutex.Unlock()
-	if remaining != 0 {
+	manager.CloseAll()
+	if remaining := manager.SessionCount(); remaining != 0 {
 		t.Fatalf("expected workspace stop to close every terminal, got %d", remaining)
 	}
 }
@@ -524,29 +579,27 @@ func TestTerminalLimitRejectsNinthSessionAndCloseFreesCapacity(t *testing.T) {
 		messages <- message
 		return nil
 	})
-	defer manager.closeAll()
+	defer manager.CloseAll()
 	for index := 0; index < 8; index++ {
 		stream := fmt.Sprintf("limit-stream-%d", index)
-		manager.attach(Message{StreamID: stream, Path: fmt.Sprintf("/limit-terminal-%d", index)})
+		manager.Attach(Message{StreamID: stream, Path: fmt.Sprintf("/limit-terminal-%d", index)})
 		waitForMessage(t, messages, func(message Message) bool {
 			return message.Type == "websocket-ready" && message.StreamID == stream
 		})
 	}
-	manager.attach(Message{StreamID: "ninth", Path: "/ninth"})
+	manager.Attach(Message{StreamID: "ninth", Path: "/ninth"})
 	waitForMessage(t, messages, func(message Message) bool {
 		return message.Type == "stream-error" && message.StreamID == "ninth" && message.Error == "terminal session limit reached"
 	})
-	manager.mutex.Lock()
-	_, ninthCreated := manager.sessions["ninth"]
-	count := len(manager.sessions)
-	manager.mutex.Unlock()
+	ninthCreated := manager.HasSession("ninth")
+	count := manager.SessionCount()
 	if ninthCreated || count != 8 {
 		t.Fatalf("terminal limit created extra work: ninth=%v count=%d", ninthCreated, count)
 	}
-	if err := manager.close("limit-terminal-0"); err != nil {
+	if err := manager.Close("limit-terminal-0"); err != nil {
 		t.Fatal(err)
 	}
-	manager.attach(Message{StreamID: "replacement", Path: "/replacement"})
+	manager.Attach(Message{StreamID: "replacement", Path: "/replacement"})
 	waitForMessage(t, messages, func(message Message) bool {
 		return message.Type == "websocket-ready" && message.StreamID == "replacement"
 	})
@@ -562,24 +615,18 @@ func TestManagedAppReportsItsRealExitCode(t *testing.T) {
 		Command: []string{"sh", "-c", "exit 7"},
 	}}
 	manager := newProcessManager(ctx, assignment, io.Discard)
-	if err := manager.start("app"); err != nil {
+	if err := manager.Start("app"); err != nil {
 		t.Fatalf("start managed App: %v", err)
 	}
-	manager.mutex.Lock()
-	done := manager.processes["app"].done
-	manager.mutex.Unlock()
+	_, _, done := manager.State("app")
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for managed App exit")
 	}
-	manager.mutex.Lock()
-	process := manager.processes["app"]
-	state := process.state
-	exitCode := *process.exitCode
-	manager.mutex.Unlock()
-	if state != "failed" || exitCode != 7 {
-		t.Fatalf("expected failed exit 7, got state=%q exit=%d", state, exitCode)
+	state, exitCode, _ := manager.State("app")
+	if state != "failed" || exitCode == nil || *exitCode != 7 {
+		t.Fatalf("expected failed exit 7, got state=%q exit=%v", state, exitCode)
 	}
 }
 
@@ -596,6 +643,206 @@ func waitForMessage(t *testing.T, messages <-chan Message, accept func(Message) 
 		case <-timer.C:
 			t.Fatal("timed out waiting for Connector message")
 		}
+	}
+}
+
+func TestChildWebSocketAppAuthorization(t *testing.T) {
+	for _, test := range []struct {
+		name, channel, kind, authorization string
+		undeclared, invalid                bool
+	}{
+		{name: "isolated-app", channel: "app", kind: "app", authorization: "Bearer isolated-app"},
+		{name: "additional-app", channel: "app-forms", kind: "app", authorization: "Bearer isolated-app"},
+		{name: "generic-authorization-stays-stripped", channel: "app", kind: "app"},
+		{name: "byte-limit", channel: "app", kind: "app", authorization: "Bearer " + strings.Repeat("x", maxAppAuthorizationBytes-7)},
+		{name: "multibyte-limit", channel: "app", kind: "app", authorization: "Basic " + strings.Repeat("é", (maxAppAuthorizationBytes-6)/2)},
+		{name: "oversized", channel: "app", kind: "app", authorization: strings.Repeat("x", maxAppAuthorizationBytes+1), invalid: true},
+		{name: "multibyte-oversized", channel: "app", kind: "app", authorization: "Basic " + strings.Repeat("é", maxAppAuthorizationBytes/2), invalid: true},
+		{name: "CR", channel: "app", kind: "app", authorization: "Bearer isolated-app\rX-Injected: owned", invalid: true},
+		{name: "LF", channel: "app", kind: "app", authorization: "Bearer isolated-app\nX-Injected: owned", invalid: true},
+		{name: "NUL", channel: "app", kind: "app", authorization: "Bearer isolated-app\x00", invalid: true},
+		{name: "tab", channel: "app", kind: "app", authorization: "Bearer isolated\tapp", invalid: true},
+		{name: "DEL", channel: "app", kind: "app", authorization: "Bearer isolated-app\x7f", invalid: true},
+		{name: "non-byte", channel: "app", kind: "app", authorization: "Bearer isolated-app\u0100", invalid: true},
+		{name: "agent", channel: "agent", kind: "agent", authorization: "Bearer isolated-app", invalid: true},
+		{name: "ide", channel: "ide", kind: "ide", authorization: "Bearer isolated-app", invalid: true},
+		{name: "verification", channel: "verification", kind: "verification", authorization: "Bearer isolated-app", invalid: true},
+		{name: "app-name-is-not-app-kind", channel: "app", kind: "agent", authorization: "Bearer isolated-app", invalid: true},
+		{name: "undeclared", channel: "app", kind: "app", authorization: "Bearer isolated-app", undeclared: true, invalid: true},
+		{name: "terminal", channel: "terminal", kind: "ide", authorization: "Bearer isolated-app", invalid: true},
+		{name: "terminal-cannot-alias-app", channel: "terminal", kind: "app", authorization: "Bearer isolated-app", invalid: true},
+		{name: "language", channel: "language", kind: "ide", authorization: "Bearer isolated-app", invalid: true},
+		{name: "language-cannot-alias-app", channel: "language", kind: "app", authorization: "Bearer isolated-app", invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var upstreamConnections atomic.Int32
+			observed := make(chan *http.Request, 1)
+			applicationDone := make(chan struct{})
+			applicationUpgrader := websocket.Upgrader{
+				Subprotocols: []string{"owned-hmr"}, CheckOrigin: func(*http.Request) bool { return true },
+			}
+			application := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(applicationDone)
+				observed <- r.Clone(ctx)
+				connection, err := applicationUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer connection.Close()
+				stop := context.AfterFunc(ctx, func() { connection.Close() })
+				defer stop()
+				for {
+					kind, data, err := connection.ReadMessage()
+					if err != nil || connection.WriteMessage(kind, data) != nil {
+						return
+					}
+				}
+			}))
+			application.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					upstreamConnections.Add(1)
+				}
+			}
+			application.Start()
+			defer application.Close()
+			accepted := make(chan *websocket.Conn, 1)
+			controlUpgrader := websocket.Upgrader{Subprotocols: []string{ConnectorProtocol}}
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer child-control-only" {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				connection, err := controlUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer connection.Close()
+				accepted <- connection
+				<-ctx.Done()
+			}))
+			defer control.Close()
+			dialer := websocket.Dialer{Subprotocols: []string{ConnectorProtocol}}
+			child, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(control.URL, "http"),
+				http.Header{"Authorization": {"Bearer child-control-only"}})
+			if response != nil {
+				response.Body.Close()
+			}
+			if err != nil {
+				t.Fatal("Child control handshake failed", err)
+			}
+			remote := <-accepted
+			_ = remote.SetReadDeadline(time.Now().Add(4 * time.Second))
+			defer remote.Close()
+			assignment := Assignment{
+				WorkspaceFolder: t.TempDir(),
+				Channels:        []Channel{{Name: test.channel, Kind: test.kind, Target: application.URL}},
+				Processes:       []Process{{Name: "agent", Env: map[string]string{"OPENCODE_PASSWORD": "agent-only-password"}}},
+			}
+			if test.undeclared {
+				assignment.Channels[0].Name = "another-app"
+			}
+			runtime := &childRuntime{
+				assignment: assignment, streams: make(map[string]*websocket.Conn),
+				control: newControlConnection(child),
+			}
+			runtime.terminals = newTerminalManager(ctx, assignment, runtime.send)
+			finished := make(chan error, 1)
+			go func() { finished <- runtime.readLoop(ctx, runtime.control) }()
+			t.Cleanup(func() {
+				cancel()
+				runtime.closeStream("owned-auth")
+				runtime.terminals.CloseAll()
+				runtime.control.Close()
+				select {
+				case <-finished:
+				case <-time.After(2 * time.Second):
+					t.Error("Child control loop did not stop")
+				}
+				<-runtime.control.ReaderDone()
+			})
+			if err := remote.WriteJSON(Message{
+				Type: "websocket-open", StreamID: "owned-auth", Channel: test.channel, Path: "/hmr?q=original",
+				Protocol: "owned-hmr", AppAuthorization: test.authorization,
+				Headers: map[string]string{
+					"Authorization":       "Bearer factory-must-not-forward",
+					"aUtHoRiZaTiOn":       "Bearer alternate-must-not-forward",
+					"Proxy-Authorization": "Bearer parent-must-not-forward",
+					"Proxy-Connection":    "keep-alive", "X-Factory-Parent-Token": "parent-only-capability",
+					"X-Factory-Connector-Role": "parent", "ATE-Target-Actor": "foreign/actor",
+					"Host": "foreign.test", "cookie": "app_session=owned", "X-App": "ordinary",
+					"origin": "http://app.factory.invalid",
+				},
+			}); err != nil {
+				t.Fatal("Child WebSocket request failed", err)
+			}
+			var first Message
+			if err := remote.ReadJSON(&first); err != nil {
+				t.Fatal("Child WebSocket response unavailable", err)
+			}
+			if test.invalid {
+				if first.Type != "stream-error" || first.StreamID != "owned-auth" || first.Error != "invalid App authorization" {
+					t.Fatal("invalid App authorization was not rejected before dispatch")
+				}
+				if upstreamConnections.Load() != 0 {
+					t.Fatal("denied authorization connected to upstream")
+				}
+				if runtime.terminals.SessionCount() != 0 {
+					t.Fatal("App authorization attached a terminal")
+				}
+				return
+			}
+			if first.Type != "websocket-ready" || first.StreamID != "owned-auth" || first.Protocol != "owned-hmr" {
+				t.Fatal("declared App WebSocket was not confirmed")
+			}
+			request := <-observed
+			wantAuthHeaders := 0
+			if test.authorization != "" {
+				wantAuthHeaders = 1
+			}
+			if request.URL.RequestURI() != "/hmr?q=original" ||
+				request.Host != strings.TrimPrefix(application.URL, "http://") ||
+				request.Header.Get("Authorization") != test.authorization ||
+				len(request.Header.Values("Authorization")) != wantAuthHeaders ||
+				request.Header.Get("Cookie") != "app_session=owned" || request.Header.Get("X-App") != "ordinary" {
+				t.Fatal("Child changed App-only authorization, target or ordinary App headers")
+			}
+			for _, name := range []string{"Proxy-Authorization", "Proxy-Connection", "X-Factory-Parent-Token", "X-Factory-Connector-Role", "ATE-Target-Actor"} {
+				if request.Header.Get(name) != "" {
+					t.Fatal("foreign capability header reached App", name)
+				}
+			}
+			for _, kind := range []int{websocket.TextMessage, websocket.BinaryMessage} {
+				payload := []byte("owned text")
+				if kind == websocket.BinaryMessage {
+					payload = []byte{0, 255, 7}
+				}
+				if err := remote.WriteJSON(Message{Type: "websocket-message", StreamID: "owned-auth",
+					MessageType: kind, Data: base64.StdEncoding.EncodeToString(payload)}); err != nil {
+					t.Fatal(err)
+				}
+				var echoed Message
+				if err := remote.ReadJSON(&echoed); err != nil {
+					t.Fatal("App echo unavailable", err)
+				}
+				if echoed.Type != "websocket-message" || echoed.MessageType != kind ||
+					echoed.Data != base64.StdEncoding.EncodeToString(payload) {
+					t.Fatal("authenticated App WebSocket changed a text/binary frame")
+				}
+			}
+			if err := remote.WriteJSON(Message{Type: "stream-close", StreamID: "owned-auth"}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-applicationDone:
+			case <-ctx.Done():
+				t.Fatal("authenticated App WebSocket did not close")
+			}
+			if upstreamConnections.Load() != 1 {
+				t.Fatal("App handshake was replayed")
+			}
+		})
 	}
 }
 
@@ -753,7 +1000,7 @@ func TestChildBoundsFiniteResponsesWithoutTruncatingNativeEventStreams(t *testin
 			defer connection.Close()
 			runtime := childRuntime{
 				assignment: Assignment{Channels: []Channel{{Name: "owned", Kind: test.kind, Target: application.URL}}},
-				control:    &controlConnection{connection: connection, done: make(chan struct{})},
+				control:    newControlConnection(connection),
 				httpClient: application.Client(),
 			}
 			runtime.handleHTTPRequest(context.Background(), Message{

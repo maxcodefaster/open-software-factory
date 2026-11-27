@@ -44,8 +44,8 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Owned monitoring account',${`${id}@monitoring.test`},true)`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
     for (const id of [project, foreign])
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${id},${`monitoring-${id}`},'Owned monitoring Project','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${id},${`monitoring-${id}`},'Owned monitoring Project','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${project},${contributor},'product-contributor',true,${manager})`;
     await database.client`INSERT INTO factory.mcp_library(id,scope,project_id) VALUES(${connection},'project',${project})`;

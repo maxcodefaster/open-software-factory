@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { technicalPlanningBaseInput } from "#requirement-domain/technical-design";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { type AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-record";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createTicketService } from "../../apps/factory/src/change/service";
@@ -14,7 +15,6 @@ import {
   saveTechnicalDesignIn,
   technicalPlanningOutstandingIn,
 } from "../../apps/factory/src/technical-design/store";
-import { technicalPlanningBaseInput } from "../../packages/requirement-domain/src/technical-design";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { planningDesign, planningProduct } from "../fixtures/technical-planning";

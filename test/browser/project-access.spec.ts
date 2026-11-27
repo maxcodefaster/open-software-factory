@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -65,9 +65,9 @@ test("managers create accounts and Project access; developers see only their Pro
       [projectID, name],
       [otherProjectID, otherName],
     ] as const) {
-      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
         VALUES (${id}, ${`access-qa-${id}`}, ${projectName}, 'https://example.invalid/access-qa.git',
-          'main', '.devcontainer/devcontainer.json', ${administrator})`;
+          'main', '.factory/actor-template.json', ${administrator})`;
     }
     await openProjectMenu(page);
     await page.locator(".project-choice", { hasText: name }).click();
@@ -169,7 +169,7 @@ test("managers create accounts and Project access; developers see only their Pro
     try {
       if (administrator) {
         for (const id of [projectID, otherProjectID]) {
-          await database.client`DELETE FROM factory.forge_grant_intent WHERE project_id=${id}
+          await database.client`DELETE FROM factory.operation WHERE kind='forge.grant' AND payload->>'projectId'=${id}
             AND EXISTS(SELECT 1 FROM factory.project WHERE id=${id} AND created_by=${administrator} AND slug=${`access-qa-${id}`})
             AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id=${id})`;
           await database.client`DELETE FROM factory.project WHERE id = ${id} AND created_by = ${administrator}
@@ -186,10 +186,15 @@ test("managers create accounts and Project access; developers see only their Pro
           // Reconciliation records denied grants for other Projects too. Serialize
           // with that writer and remove only this exact fixture account's rows.
           await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`forge-account:${owned.id}`},0))`;
-          await sql`DELETE FROM factory.forge_grant_intent WHERE user_id=${owned.id}`;
+          await sql`SET LOCAL session_replication_role = replica`;
+          await sql`DELETE FROM factory.audit_event WHERE actor_id=${owned.id}`;
+          await sql`SET LOCAL session_replication_role = origin`;
+          await sql`DELETE FROM factory.operation
+            WHERE (kind='forge.grant' AND payload->>'userId'=${owned.id})
+               OR (kind='forge.account' AND scope_type='user' AND scope_id=${owned.id})
+               OR (kind='workspace.developer_ide' AND scope_type='user' AND scope_id=${owned.id} AND state='stopped')
+               OR (created_by=${owned.id} AND kind<>'workspace.developer_ide')`;
           await sql`DELETE FROM auth.account WHERE user_id=${owned.id}`;
-          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${owned.id}`;
-          await sql`DELETE FROM factory.developer_ide WHERE user_id=${owned.id} AND state='stopped'`;
           await sql`DELETE FROM auth."user" WHERE id=${owned.id} AND email=${email}
             AND NOT EXISTS(SELECT 1 FROM factory.project_membership WHERE user_id=${owned.id})`;
         });

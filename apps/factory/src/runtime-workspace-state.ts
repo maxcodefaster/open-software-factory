@@ -1,4 +1,4 @@
-import { type AppPreview, type RuntimeAttempt } from "./runtime/contracts";
+import type { AppPreview, RuntimeAttempt } from "./runtime/contracts";
 import { type WorkspaceTab, workspaceTabRuntimeURL } from "./workspace-tabs";
 
 export function retryableMainPreview(attempt: RuntimeAttempt | undefined, projectID: string) {

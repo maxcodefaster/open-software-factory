@@ -1,5 +1,5 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
-import type { PrerequisiteView } from "../../../../packages/ticket-domain/src/dependency";
+import type { DatabaseTransaction } from "#db/client";
+import type { PrerequisiteView } from "#ticket-domain/dependency";
 import { CommandError } from "../command-error";
 
 // Call after acquiring the dependent Ticket lock and checking Project access.

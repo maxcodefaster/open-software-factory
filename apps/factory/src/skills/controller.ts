@@ -1,28 +1,16 @@
 import { createHash } from "node:crypto";
 import { and, asc, eq, sql as expression, inArray } from "drizzle-orm";
-import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
-import {
-  librarySkillAssignments,
-  skillChoiceInput,
-} from "../../../../packages/conversation-domain/src/skill-library";
+import { agentTurnAuthorityInput } from "#conversation-domain/agent-turn";
+import { librarySkillAssignments, skillChoiceInput } from "#conversation-domain/skill-library";
 import {
   type SkillContent,
   type SkillRevision,
   type SkillRole,
   skillContentInput,
   skillRevisionInput,
-} from "../../../../packages/conversation-domain/src/skills";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  agentTurn,
-  change,
-  skillPublication,
-  skillRevision,
-} from "../../../../packages/db/src/schema";
+} from "#conversation-domain/skills";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { agentTurn, change, skillRevision } from "#db/schema";
 import { projectAuthorityIn, requireSystemManagerIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { createSkillLibraryController } from "./library-controller";
@@ -111,10 +99,14 @@ export function createSkillController(database: ReturnType<typeof createDatabase
         await lock(sql);
         await requireSystemManagerIn(sql, userID);
         const [changed] = await drizzleTransaction(sql)
-          .update(skillPublication)
-          .set({ published, updatedBy: userID, updatedAt: expression`now()` })
-          .where(eq(skillPublication.revisionId, revisionID))
-          .returning({ revisionId: skillPublication.revisionId });
+          .update(skillRevision)
+          .set({
+            published,
+            publishedUpdatedBy: userID,
+            publishedUpdatedAt: expression`now()`,
+          })
+          .where(eq(skillRevision.id, revisionID))
+          .returning({ revisionId: skillRevision.id });
         if (!changed) throw new CommandError("not-found", "Skill revision not found");
         return { revisionId: changed.revisionId, published };
       });
@@ -160,10 +152,9 @@ export function createSkillController(database: ReturnType<typeof createDatabase
           revision: skillRevision.revision,
           content: skillRevision.content,
           digest: skillRevision.contentDigest,
-          published: skillPublication.published,
+          published: skillRevision.published,
         })
         .from(skillRevision)
-        .innerJoin(skillPublication, eq(skillPublication.revisionId, skillRevision.id))
         .where(inArray(skillRevision.id, ids));
       const revisions = rows.map((row) =>
         skillRevisionInput.parse({ ...row, content: skillContentInput.parse(row.content) }),

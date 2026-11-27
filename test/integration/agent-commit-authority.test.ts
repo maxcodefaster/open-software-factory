@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import type { ServerWebSocket } from "bun";
 import { createHash } from "node:crypto";
+import type { ServerWebSocket } from "bun";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { fixture } from "../fixtures/change-agent-turns";
 
 async function until(check: () => Promise<boolean>) {

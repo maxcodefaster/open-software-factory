@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
@@ -10,10 +11,6 @@ import {
   observeActorRPCIn,
 } from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { substrateFixture } from "../fixtures/substrate";
 
 test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
@@ -53,12 +50,11 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
       actor = initial;
       await f.database.client.begin(async (sql) => {
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,
-        revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        revision,state,parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent,actor_uid,create_attempted_at,observation)
         VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},
-          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
-        actor_uid,create_attempted_at,observation)
-        VALUES(${f.attemptID},${f.atespace},${initial.metadata.name},
+          'create-intended',${"b".repeat(64)},now(),${f.userID},
+          ${f.atespace},${initial.metadata.name},
           ${JSON.stringify({
             ...f.config,
             actorSelector: f.config.workerSelector,
@@ -75,8 +71,8 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
           state: "ACTOR_STATE_RUNNING",
           workerAssignment: { sandboxRuntime: f.config.runtime },
         };
-        await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(initial)}::jsonb
-        WHERE runtime_attempt_id=${f.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(initial)}::jsonb
+        WHERE id=${f.attemptID}`;
         await observeActorRPCIn(sql, f.attemptID, resume, initial);
         const pause = await intendActorRPCIn(sql, f.attemptID, "suspend", null, initial);
         await dispatchActorRPCIn(sql, f.attemptID, pause);
@@ -102,8 +98,8 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
           lastAssignedGeneration: 1,
           snapshots: [checkpoint],
         };
-        await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(initial)}::jsonb,
-        checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE runtime_attempt_id=${f.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(initial)}::jsonb,
+        checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE id=${f.attemptID}`;
         await observeActorRPCIn(sql, f.attemptID, pause, initial, checkpoint);
         await sql`UPDATE factory.runtime_attempt SET state='paused',ready_at=now() WHERE id=${f.attemptID}`;
         await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -273,6 +269,13 @@ test.each(["complete", "stop-during-cleanup", "committed-stopped"] as const)(
       expect(session?.turnID).toBe(previous.id);
       expect(effects.filter((effect) => effect === "DeleteActor")).toHaveLength(1);
       expect(effects).toContain("independent-source");
+      expect(actor).toBeNull();
+      const [retired] = await f.database.client`
+        SELECT state,stop_intended_at,deleted_at
+        FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
+      expect(retired?.["state"]).toBe("stopped");
+      expect(retired?.["stop_intended_at"]).not.toBeNull();
+      expect(retired?.["deleted_at"]).not.toBeNull();
       // Explicit user Stop still cancels the newly admitted work. The exemption
       // belongs only to its exact, lease-owned previous-runtime handoff.
       await runtime.stop(f.attemptID);

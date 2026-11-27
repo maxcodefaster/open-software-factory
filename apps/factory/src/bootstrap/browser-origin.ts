@@ -1,4 +1,4 @@
-import { type Bootstrap } from "./contracts";
+import type { Bootstrap } from "./contracts";
 
 export function browserBootstrap(value: Bootstrap, development: boolean, origin: string) {
   if (!development) return value;

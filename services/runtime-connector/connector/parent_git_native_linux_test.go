@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/gitops"
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/workspacefiles"
 )
 
@@ -46,7 +47,7 @@ func TestNativeIntegrationAndPushKeepCredentialsOutsideSource(t *testing.T) {
 		if directory == workspace && developmentOwned {
 			// Observational status can refresh index metadata. Match the real
 			// native owner instead of making the test itself replace it as root.
-			command = workspaceGitCommand(context.WithValue(context.Background(), nativeCommitGitKey{}, true), directory, arguments...)
+			command = workspaceGitCommand(gitops.WithNativeCommitGit(context.Background(), true), directory, arguments...)
 		}
 		output, err := command.CombinedOutput()
 		if err != nil {
@@ -122,7 +123,8 @@ func TestNativeIntegrationAndPushKeepCredentialsOutsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	developmentOwned = true
-	assignment := Assignment{WorkspaceFolder: workspace, nativeActorUID: "owned-native-actor"}
+	assignment := Assignment{WorkspaceFolder: workspace}
+	assignment.SetNativeActorUID("owned-native-actor")
 	message := Message{Action: "git-prepare-integration", OperationID: "owned-native-integration", ExpectedSHA: expected, MergeParentSHA: parent, RepositoryURL: server.URL + "/remote.git", Branch: "ticket", Username: "owned", Password: "owned-private-native-password", CommitMessage: "Integrate owned upstream", AuthorName: "Factory", AuthorEmail: "owned@example.invalid"}
 	result := handleParentOperation(context.Background(), assignment, message)
 	if result.Error != "" || !validCommitSHA(result.CommitSHA) {

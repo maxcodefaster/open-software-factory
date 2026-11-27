@@ -2,38 +2,43 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
+import {
+  createSubstrateControl,
+  nativeActor,
+  nativeMetadata,
+} from "#runtime-kubernetes/substrate-control";
 import { substrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { nativeEnvironmentImage } from "../fixtures/native-environment-image";
 import { requireNativeLiveHost } from "../fixtures/native-live-configuration";
-import { nativeRegistryInputs } from "../fixtures/native-registry-inputs";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import { callFactoryFunction } from "../fixtures/server-functions";
-import { fixtureValue } from "../fixtures/value";
 
-test("registered Project automatically prebuilds and uses exact secure Development/Main-Preview values in hooks, app and PTY", async () => {
+test("native Project starts use exact protected variables without image production on save", async () => {
   const nativeConfiguration = process.env["FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION"];
   if (!nativeConfiguration)
     throw Error("Explicit owned native configuration is required for the live Environment proof");
-  const registryFile = process.env["FACTORY_NATIVE_REGISTRY_FIXTURE"];
   const tokenFile = process.env["FACTORY_NATIVE_RUNTIME_FORGE_TOKEN_FILE"];
   const apiURL = process.env["FACTORY_FORGEJO_API_URL"];
   const publicURL = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
   const owner = process.env["FACTORY_FORGEJO_OWNER"];
-  if (!registryFile || !tokenFile || !apiURL || !publicURL || !owner)
-    throw Error("Explicit owned native registry, Forge credentials and TLS origins are required");
+  if (!tokenFile || !apiURL || !publicURL || !owner)
+    throw Error("Explicit owned Forge credentials and TLS origins are required");
   requireNativeLiveHost();
-  const registry = nativeRegistryInputs(
-    await Bun.file(registryFile).json(),
-    substrateInstallationConfiguration(await Bun.file(nativeConfiguration).json()),
+  const installation = substrateInstallationConfiguration(
+    await Bun.file(nativeConfiguration).json(),
   );
+  const runtimeArtifacts = await requirePublishedRuntimeArtifacts(".factory");
+  const developmentImage = nativeEnvironmentImage(runtimeArtifacts, installation);
+  const nativeControl = createSubstrateControl(installation.connection);
   const directory = await mkdtemp(join(tmpdir(), "factory-owned-environment-proof-"));
   const bao = await localOpenBao(directory);
   const configuration = await bao.start();
-  const runtimeArtifacts = await requirePublishedRuntimeArtifacts(".factory");
   const forgeToken = (await readFile(tokenFile, "utf8")).trim();
   const factory = await factoryProcess(
     { runtimeHostImage: runtimeArtifacts["runtime-host"], forgejoToken: forgeToken },
@@ -77,7 +82,8 @@ test("registered Project automatically prebuilds and uses exact secure Developme
         failure: string | null;
         kind: string | null;
       }>
-    >`SELECT id,state,failure,isolated_kind::text AS kind FROM factory.runtime_attempt WHERE project_id=${projectID}`;
+    >`SELECT id,state,failure,isolated_kind::text AS kind FROM factory.runtime_attempt
+      WHERE project_id=${projectID} ORDER BY id`;
   async function retainNativeFixture() {
     let cleanupFailure: unknown;
     let stopConfirmed = false;
@@ -123,7 +129,7 @@ test("registered Project automatically prebuilds and uses exact secure Developme
           sourceRetentionConfirmed: stopConfirmed,
           nativeResourceInventoryRetained: true,
           openBaoDirectory: directory,
-          commissionedRegistryUnchanged: true,
+          projectImage: developmentImage,
         }),
       );
     } finally {
@@ -146,25 +152,25 @@ test("registered Project automatically prebuilds and uses exact secure Developme
       default_branch: "main",
     });
     created = true;
-    const files: Record<string, string> = {
-      ".devcontainer/devcontainer.json": JSON.stringify({
-        build: {
-          dockerfile: "Dockerfile",
-          context: "..",
-          options: ["--secret", "id=BUILD_TOKEN,src=/run/factory-build-secrets/BUILD_TOKEN"],
+    // Use the published immutable native image. Project Environment settings
+    // do not supply image-pull authority or produce images.
+    const actorTemplate = JSON.stringify({
+      containers: [
+        {
+          name: "work",
+          image: developmentImage,
+          command: [
+            "node",
+            "-e",
+            "if(!process.env.APP_TOKEN||process.env.UNGRANTED_TOKEN||process.env.VERIFICATION_ONLY)process.exit(2);require('fs').writeFileSync('hook.json',JSON.stringify({token:process.env.APP_TOKEN,multiline:process.env.MULTILINE}));",
+          ],
+          volumeMounts: [{ name: "source", mountPath: "/workspace" }],
         },
-        workspaceFolder: "/workspace/project",
-        workspaceMount: `source=\${localWorkspaceFolder},target=/workspace/project,type=bind`,
-        remoteUser: "node",
-        runArgs: ["--cap-drop=ALL"],
-        features: { "./feature": {}, [registry.feature]: {} },
-        onCreateCommand: [
-          "node",
-          "-e",
-          "if(!process.env.APP_TOKEN)process.exit(2);require('fs').writeFileSync('hook.json',JSON.stringify({token:process.env.APP_TOKEN,multiline:process.env.MULTILINE}));",
-        ],
-      }),
-      ".devcontainer/Dockerfile": `FROM ${registry.developmentImage}\nRUN --mount=type=secret,id=BUILD_TOKEN node -e "const fs=require('fs');if(fs.existsSync('/run/secrets/BUILD_TOKEN'))fs.writeFileSync('/opt/build-grant',String(fs.readFileSync('/run/secrets/BUILD_TOKEN').length));else fs.writeFileSync('/opt/build-grant','not-granted');"\n`,
+      ],
+      volumes: [{ name: "source", durableDir: {} }],
+    });
+    const files: Record<string, string> = {
+      ".factory/actor-template.json": actorTemplate,
       ".factory/system.json": JSON.stringify({
         version: 1,
         primaryApp: "web",
@@ -181,18 +187,6 @@ test("registered Project automatically prebuilds and uses exact secure Developme
       "app.mjs":
         "import{createServer}from'node:http';createServer((q,r)=>{r.setHeader('content-type','application/json');r.end(JSON.stringify({configured:!!process.env.APP_TOKEN,token:process.env.APP_TOKEN,multiline:process.env.MULTILINE}));}).listen(4300,'0.0.0.0');\n",
     };
-    files[".devcontainer/feature/devcontainer-feature.json"] = JSON.stringify({
-      id: "owned",
-      version: "1.0.0",
-      name: "Owned Feature",
-      postCreateCommand: ["node", "-e", "require('fs').writeFileSync('feature-hook.txt','ran')"],
-    });
-    files[".devcontainer/feature/install.sh"] =
-      "#!/bin/sh\nset -eu\nprintf prepared > /opt/owned-feature\n";
-    files[".devcontainer/devcontainer.json"] = fixtureValue(
-      files[".devcontainer/devcontainer.json"],
-      'files[".devcontainer/devcontainer.json"]',
-    ).replace(/}$/, ", // authored JSONC\n}");
     for (const [path, content] of Object.entries(files))
       await forge(`repos/${owner}/${name}/contents/${path}`, "POST", {
         branch: "main",
@@ -201,7 +195,7 @@ test("registered Project automatically prebuilds and uses exact secure Developme
       });
     await factory.start();
     cookie = await factory.signIn();
-    const preparationStarted = performance.now();
+    const environmentStarted = performance.now();
     const registration = await serverCall(
       callFactoryFunction(
         factory.base,
@@ -212,7 +206,7 @@ test("registered Project automatically prebuilds and uses exact secure Developme
             name: "Owned environment journey",
             repositoryUrl: `${publicURL}/${owner}/${name}.git`,
             defaultBranch: "main",
-            devcontainerPath: ".devcontainer/devcontainer.json",
+            actorTemplatePath: ".factory/actor-template.json",
           },
         ],
         { cookie },
@@ -220,22 +214,27 @@ test("registered Project automatically prebuilds and uses exact secure Developme
     );
     projectID = registration.id;
     const variables = (value: string) => [
-      { name: "APP_TOKEN", value, runtime: true, build: false, verification: false },
+      { name: "APP_TOKEN", value, runtime: true, verification: false },
       {
         name: "MULTILINE",
         value: "owned line one\nline two",
         runtime: true,
-        build: false,
         verification: false,
       },
       {
-        name: "BUILD_TOKEN",
-        value: "owned-build-sentinel",
+        name: "UNGRANTED_TOKEN",
+        value: "owned-ungranted-sentinel",
         runtime: false,
-        build: true,
         verification: false,
       },
+      {
+        name: "VERIFICATION_ONLY",
+        value: "owned-verification-only-sentinel",
+        runtime: false,
+        verification: true,
+      },
     ];
+    expect(await attempts()).toHaveLength(0);
     for (const environment of ["development", "main-preview"] as const) {
       const saved = await callFactoryFunction(
         factory.base,
@@ -247,40 +246,21 @@ test("registered Project automatically prebuilds and uses exact secure Developme
             commandID: crypto.randomUUID(),
             version: 0,
             variables: variables(`owned-${environment}-sentinel`),
-            registries: [
-              {
-                host: registry.host,
-                username: registry.username,
-                password: registry.password,
-                certificate: registry.certificate,
-                verification: false,
-                publish: true,
-              },
-            ],
           },
         ],
         { cookie },
       );
       expect(saved.ok).toBe(true);
       expect(JSON.stringify(saved)).not.toContain("sentinel");
+      const current = await serverCall(
+        callFactoryFunction(factory.base, "getEnvironment", [projectID, environment], { cookie }),
+      );
+      expect(current.version).toBe(1);
+      expect(current).not.toHaveProperty("preparation");
     }
-    await eventually(
-      async () => {
-        const rows = await database.client<
-          Array<{ state: string; version: string; failure: string | null }>
-        >`SELECT state,environment_version::text AS version,failure FROM factory.project_image_preparation WHERE project_id=${projectID} AND environment_version=1`;
-        if (rows.some((row) => row.state === "failed")) {
-          const failed = (await attempts()).find((row) => row.kind === "prebuild" && row.failure);
-          throw new Error(failed?.failure ?? "Automatic Project preparation failed");
-        }
-        return rows;
-      },
-      (rows) => rows.length === 2 && rows.every((row) => row.state === "succeeded"),
-      "Automatic secure Project preparation did not succeed",
-      300_000,
-    );
-    timings["registrationThroughBothPreparedImagesMS"] = Math.round(
-      performance.now() - preparationStarted,
+    expect(await attempts()).toHaveLength(0);
+    timings["registrationAndEnvironmentSavesMS"] = Math.round(
+      performance.now() - environmentStarted,
     );
     const runtimeStarted = performance.now();
     const ensured = await serverCall(
@@ -324,12 +304,15 @@ test("registered Project automatically prebuilds and uses exact secure Developme
     );
     timings["sourceReadyMS"] = Math.round(performance.now() - sourceStarted);
     terminal = await ownedRuntimeTerminal(factory.base, cookie, attemptID);
-    timings["preparedDevelopmentTerminalMS"] = Math.round(performance.now() - runtimeStarted);
+    timings["nativeDevelopmentTerminalMS"] = Math.round(performance.now() - runtimeStarted);
     expect(await terminal.evaluate<string | null>("return process.env.APP_TOKEN")).toBe(
       "owned-development-sentinel",
     );
     expect(
-      await terminal.evaluate<string | null>("return process.env.BUILD_TOKEN??null"),
+      await terminal.evaluate<string | null>("return process.env.UNGRANTED_TOKEN??null"),
+    ).toBeNull();
+    expect(
+      await terminal.evaluate<string | null>("return process.env.VERIFICATION_ONLY??null"),
     ).toBeNull();
     expect(await terminal.evaluate<string | null>("return process.env.MULTILINE")).toBe(
       "owned line one\nline two",
@@ -341,54 +324,56 @@ test("registered Project automatically prebuilds and uses exact secure Developme
     ).toBe("owned-development-sentinel");
     expect(
       await terminal.evaluate<string | null>(
-        "return require('fs').readFileSync('/opt/build-grant','utf8')",
-      ),
-    ).toBe(String("owned-build-sentinel".length));
-    expect(
-      await terminal.evaluate<string | null>(
         "return (await fetch('http://127.0.0.1:4300/health').then(r=>r.json())).token",
       ),
     ).toBe("owned-development-sentinel");
-    // Use the authenticated Dev Container PTY, never a worker/host runtime exec.
-    const inspection = await terminal.evaluate<string>(
-      `const cp=require("node:child_process");const ids=cp.execFileSync("docker",["ps","-q","--filter",${JSON.stringify(`label=factory.dev/runtime-attempt=${attemptID}`)}],{encoding:"utf8"}).trim().split(/\\s+/).filter(Boolean);if(!ids.length)throw Error("No owned Dev Container");return cp.execFileSync("docker",["inspect",...ids],{encoding:"utf8"});`,
+    // Match retained source and the actual native Actor/ActorTemplate, not
+    // nested Docker containers or a preference labelled as preparation.
+    const [provision] = await database.client<
+      Array<{ template: { content: string } }>
+    >`SELECT provision.intent->'projectTemplate' AS template FROM factory.substrate_provision provision
+      JOIN factory.runtime_attempt attempt ON attempt.workspace_id=provision.owner_id
+        AND provision.kind='workspace' AND attempt.generation=provision.generation WHERE attempt.id=${attemptID}`;
+    expect(provision?.template.content).toBe(actorTemplate);
+    expect(JSON.parse(provision?.template.content ?? "{}").containers[0].image).toBe(
+      developmentImage,
     );
-    expect(inspection).not.toContain("owned-development-sentinel");
-    expect(inspection).not.toContain("owned-build-sentinel");
-    expect(inspection).not.toContain(registry.password);
-    const privateManifest = await fetch(
-      `https://${registry.host}/v2/${registry.developmentImage.slice(registry.host.length + 1).split("@")[0]}/manifests/${registry.developmentImage.split("@")[1]}`,
-      { tls: { ca: registry.certificate }, signal: AbortSignal.timeout(10_000) },
+    const [binding] = await database.client<
+      Array<{ atespace: string; actorName: string; actorUID: string }>
+    >`SELECT atespace,actor_name AS "actorName",actor_uid AS "actorUID"
+      FROM factory.runtime_attempt WHERE id=${attemptID} AND atespace IS NOT NULL`;
+    if (!binding) throw new Error("Owned native Actor binding is missing");
+    const actor = nativeActor.parse(
+      await nativeControl("GetActor", {
+        actor: { atespace: binding.atespace, name: binding.actorName },
+      }),
     );
-    expect(privateManifest.status).toBe(401);
-    expect(
-      await terminal.evaluate<string>(
-        "return require('fs').readFileSync('/opt/owned-feature','utf8')",
-      ),
-    ).toBe("prepared");
-    expect(
-      await terminal.evaluate<string>(
-        "return require('fs').readFileSync('feature-hook.txt','utf8')",
-      ),
-    ).toBe("ran");
-    expect(
-      await terminal.evaluate<string>(
-        "return require('fs').readFileSync('/opt/owned-remote-feature','utf8')",
-      ),
-    ).toBe("prepared");
-    expect(
-      await terminal.evaluate<string>(
-        "return require('fs').readFileSync('remote-feature-hook.txt','utf8')",
-      ),
-    ).toBe("ran");
-    const containers = JSON.parse(inspection) as Array<{
-      Config: { Image: string; Labels: Record<string, string> };
-    }>;
-    const [prepared] = await database.client<
-      Array<{ image: string }>
-    >`SELECT image FROM factory.project_image_preparation WHERE project_id=${projectID} AND environment='development' AND environment_version=1 AND state='succeeded'`;
-    expect(containers[0]?.Config.Image).toBe(prepared?.image);
-    expect(containers[0]?.Config.Labels["factory.dev/prebuild-input"]).toMatch(/^[a-f0-9]{64}$/);
+    expect(actor.metadata.uid).toBe(binding.actorUID);
+    expect(actor.status.state).toBe("ACTOR_STATE_RUNNING");
+    const template = z
+      .object({
+        metadata: nativeMetadata,
+        containers: z.array(
+          z.object({ name: z.string(), image: z.string(), command: z.array(z.string()) }),
+        ),
+      })
+      .passthrough()
+      .parse(await nativeControl("GetActorTemplate", { actorTemplate: actor.actorTemplate }));
+    expect(template.metadata.atespace).toBe(binding.atespace);
+    expect(template.containers.find(({ name }) => name === "work")).toMatchObject({
+      image: developmentImage,
+      command: ["/opt/factory-tools/usr/local/bin/factory-runtime-connector", "native-project"],
+    });
+    const inspection = JSON.stringify(template);
+    const persistedInspection = JSON.stringify(
+      await database.client`SELECT binding_intent AS intent FROM factory.runtime_attempt WHERE id=${attemptID}`,
+    );
+    for (const nativeConfiguration of [inspection, persistedInspection]) {
+      expect(nativeConfiguration).not.toContain("owned-development-sentinel");
+      expect(nativeConfiguration).not.toContain("owned-ungranted-sentinel");
+      expect(nativeConfiguration).not.toContain("owned-verification-only-sentinel");
+    }
+    const initialAttempts = await attempts();
     const modified = await callFactoryFunction(
       factory.base,
       "saveEnvironment",
@@ -399,12 +384,12 @@ test("registered Project automatically prebuilds and uses exact secure Developme
           commandID: crypto.randomUUID(),
           version: 1,
           variables: variables("owned-new-development"),
-          registries: [],
         },
       ],
       { cookie },
     );
     expect(modified.ok).toBe(true);
+    expect(await attempts()).toEqual(initialAttempts);
     expect(await terminal.evaluate<string | null>("return process.env.APP_TOKEN")).toBe(
       "owned-development-sentinel",
     );
@@ -457,9 +442,11 @@ test("registered Project automatically prebuilds and uses exact secure Developme
         ).json()
       ).token,
     ).toBe("owned-main-preview-sentinel");
-    timings["preparedMainPreviewMS"] = Math.round(performance.now() - previewStarted);
+    timings["nativeMainPreviewMS"] = Math.round(performance.now() - previewStarted);
     expect(
-      JSON.stringify(await database.client`SELECT * FROM factory.runtime_environment_intent`),
+      JSON.stringify(
+        await database.client`SELECT * FROM factory.operation WHERE kind='runtime.environment_intent'`,
+      ),
     ).not.toContain("sentinel");
   } catch (cause) {
     workFailure = cause;

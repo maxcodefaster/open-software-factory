@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 import { desktopBackgrounds, orderedDesktopBackgrounds } from "./artworks";
 
 const wallpaperBudget = 350_000;

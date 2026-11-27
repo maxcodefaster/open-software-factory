@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
+import { visualReviewSchema } from "#conversation-domain/visual-review";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { CommandError } from "../../apps/factory/src/command-error";
@@ -15,7 +16,6 @@ import {
 } from "../../apps/factory/src/runtime/embedding";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
 import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
@@ -305,14 +305,54 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
       ["reload-zero-frame", "Reload the initial frame", "boundary"],
       ["empty", "Empty title", "error"],
       ["reload-same-frame", "Reload the same frame", "boundary"],
-    ])
-      await f.database
-        .client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,status,ended_at,media_started_ms,observed)
-        VALUES(${f.reviewID},${fixtureValue(id, "id")},${fixtureValue(title, "title")},${fixtureValue(category, "category")},1,'Form state is retained','passed',now(),${id === "save" || id === "reload-zero-frame" ? 0 : 1000},'Draft remains visible after the interaction.')`;
-    await f.database.client`INSERT INTO factory.review_scenario(
-      review_id,id,title,category,criterion,expected,status,ended_at,observed)
-      VALUES(${f.reviewID},'untimed','Missing recording position','boundary',1,
-        'This case has no seek position.','passed',now(),'The browser observation remains available.')`;
+    ]) {
+      const scenarioID = fixtureValue(id, "id");
+      const mediaStartedMs = id === "save" || id === "reload-zero-frame" ? 0 : 1000;
+      await f.database.client`WITH ts AS (SELECT clock_timestamp() AS now)
+        INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at,completed_at)
+        SELECT ${crypto.randomUUID()},'review.scenario','candidate_review',${f.reviewID},
+          ${`review.scenario:${f.reviewID}:${scenarioID}`},'passed',
+          jsonb_build_object(
+            'reviewId',${f.reviewID}::text,
+            'id',${scenarioID}::text,
+            'title',${fixtureValue(title, "title")}::text,
+            'category',${fixtureValue(category, "category")}::text,
+            'criterion',1,
+            'expected','Form state is retained'::text,
+            'startedAt',ts.now::text,
+            'endedAt',ts.now::text,
+            'observed','Draft remains visible after the interaction.'::text,
+            'mediaStartedMs',${mediaStartedMs}::bigint,
+            'mediaSessionId',NULL,
+            'status','passed'::text,
+            'observationKind',NULL
+          ),
+          ts.now,ts.now,ts.now
+        FROM ts`;
+    }
+    await f.database.client`WITH ts AS (SELECT clock_timestamp() AS now)
+      INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,state,payload,created_at,updated_at,completed_at)
+      SELECT ${crypto.randomUUID()},'review.scenario','candidate_review',${f.reviewID},
+        ${`review.scenario:${f.reviewID}:untimed`},'passed',
+        jsonb_build_object(
+          'reviewId',${f.reviewID}::text,
+          'id','untimed'::text,
+          'title','Missing recording position'::text,
+          'category','boundary'::text,
+          'criterion',1,
+          'expected','This case has no seek position.'::text,
+          'startedAt',ts.now::text,
+          'endedAt',ts.now::text,
+          'observed','The browser observation remains available.'::text,
+          'mediaStartedMs',NULL,
+          'mediaSessionId',NULL,
+          'status','passed'::text,
+          'observationKind',NULL
+        ),
+        ts.now,ts.now,ts.now
+      FROM ts`;
     await page.goto(
       `${base}/?change=${f.changeID}&user=${f.userID}&attempt=${f.attemptID}&project=${f.projectID}`,
     );

@@ -6,7 +6,7 @@ const declaredProcess = z.strictObject({
   command: z.array(z.string()).min(1),
 });
 export const stagingConfiguration = z.strictObject({
-  devcontainerPath: z.string().min(1),
+  actorTemplatePath: z.string().min(1),
   channels: z
     .array(
       z.strictObject({

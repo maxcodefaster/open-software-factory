@@ -1,11 +1,11 @@
 import { createSignal, For, Show, untrack } from "solid-js";
-import type { LibraryCoverKey } from "../../../../packages/conversation-domain/src/library-covers";
+import type { LibraryCoverKey } from "#conversation-domain/library-covers";
 import type {
   SkillLibraryEntry,
   SkillLibraryView,
   SkillScope,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+} from "#conversation-domain/skill-library";
+import type { SkillRole } from "#conversation-domain/skills";
 import { LibraryCoverPicker } from "../library-covers/picker";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import { type ChooseSkill, SkillChoiceControls } from "./choice-controls";

@@ -25,8 +25,12 @@ test("native Forge connection confirms independently while failed account reconc
           clientCalls++;
           expect(
             (
-              await database.client`SELECT discovery_url,redirect_uri,intended_by,state
-              FROM factory.forge_connection`
+              await database.client`SELECT payload->>'discoveryUrl' AS discovery_url,
+                payload->>'redirectUri' AS redirect_uri,
+                payload->>'intendedBy' AS intended_by,
+                state
+              FROM factory.operation
+              WHERE kind='access.forge_connection'`
             )[0],
           ).toEqual({
             discovery_url: discoveryURL,
@@ -55,7 +59,9 @@ test("native Forge connection confirms independently while failed account reconc
       });
     fresh = false;
     await expect(route(clientRequest(), id)).rejects.toThrow("not fresh");
-    expect(await database.client`SELECT id FROM factory.forge_connection`).toHaveLength(0);
+    expect(
+      await database.client`SELECT id FROM factory.operation WHERE kind='access.forge_connection'`,
+    ).toHaveLength(0);
     fresh = true;
     expect((await route(clientRequest("https://other.test/discovery"), id))?.status).toBe(400);
     expect(clientCalls).toBe(0);
@@ -70,22 +76,27 @@ test("native Forge connection confirms independently while failed account reconc
       });
     expect((await route(request(7), id))?.status).toBe(204);
     expect(
-      (await database.client`SELECT state,source_id FROM factory.forge_connection`)[0],
+      (
+        await database.client`SELECT state,payload->>'sourceId' AS source_id
+        FROM factory.operation WHERE kind='access.forge_connection'`
+      )[0],
     ).toMatchObject({ state: "ready", source_id: "7" });
     expect(
       (
-        await database.client`SELECT version>processed_version AS pending FROM factory.access_revocation WHERE user_id=${id}`
+        await database.client`SELECT (payload->>'version')::bigint > (payload->>'processedVersion')::bigint AS pending
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${id}`
       )[0]?.["pending"],
     ).toBe(true);
     expect((await route(request(8), id))?.status).toBe(409);
-    const [before] = await database.client<
-      { version: string }[]
-    >`SELECT version FROM factory.access_revocation WHERE user_id=${id}`;
+    const [before] = await database.client<{ version: string }[]>`
+      SELECT payload->>'version' AS version
+      FROM factory.operation WHERE kind='access.revocation' AND scope_id=${id}`;
     if (!before) throw new Error("Owned revocation version missing");
     expect((await route(request(7), id))?.status).toBe(204);
     expect(
       (
-        await database.client`SELECT version FROM factory.access_revocation WHERE user_id=${id}`
+        await database.client`SELECT payload->>'version' AS version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${id}`
       )[0]?.["version"],
     ).toBe(String(BigInt(before.version) + 1n));
   } finally {
@@ -110,7 +121,8 @@ test("failed native reconciliation stays pending without blocking other accounts
     await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=ANY(${ids}::uuid[])`;
     await observer.start();
     const rows = await database.client<{ userID: string; done: boolean }[]>`
-      SELECT user_id AS "userID",version=processed_version AS done FROM factory.access_revocation`;
+      SELECT scope_id AS "userID",(payload->>'version')::bigint=(payload->>'processedVersion')::bigint AS done
+      FROM factory.operation WHERE kind='access.revocation'`;
     expect(rows.find((row) => row.userID === failedID)?.done).toBe(false);
     expect(rows.find((row) => row.userID === healthyID)?.done).toBe(true);
     expect(rows.filter((row) => laterIDs.includes(row.userID) && row.done)).toHaveLength(65);
@@ -146,7 +158,8 @@ test("native directory disablement commits recoverable revocation; response loss
     await expect(observer.drain()).rejects.toThrow("lost revocation");
     expect(
       (
-        await database.client`SELECT processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+        await database.client`SELECT payload->>'processedVersion' AS processed_version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${userID}`
       )[0]?.["processed_version"],
     ).toBe("0");
     await observer.close();
@@ -158,7 +171,8 @@ test("native directory disablement commits recoverable revocation; response loss
     await observer.drain();
     expect(
       (
-        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+        await database.client`SELECT payload->>'version' AS version,payload->>'processedVersion' AS processed_version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${userID}`
       )[0],
     ).toMatchObject({ version: "2", processed_version: "0" });
     await observer.drain();
@@ -168,7 +182,8 @@ test("native directory disablement commits recoverable revocation; response loss
     await eventually(
       async () =>
         (
-          await database.client`SELECT version=processed_version AS done FROM factory.access_revocation WHERE user_id=${userID}`
+          await database.client`SELECT (payload->>'version')::bigint=(payload->>'processedVersion')::bigint AS done
+          FROM factory.operation WHERE kind='access.revocation' AND scope_id=${userID}`
         )[0]?.["done"],
       Boolean,
       "Committed access notification was not consumed",
@@ -188,23 +203,31 @@ test("revocation acknowledgement preserves bigint versions above the safe-intege
   let calls = 0;
   const observer = createAccessRevocation(database, async () => {
     if (++calls === 1)
-      await database.client`UPDATE factory.access_revocation SET version=version+1 WHERE user_id=${userID}`;
+      await database.client`UPDATE factory.operation
+        SET state='pending',
+          payload=jsonb_set(payload,'{version}',to_jsonb(((payload->>'version')::bigint + 1))),
+          completed_at=NULL,
+          updated_at=now()
+        WHERE kind='access.revocation' AND scope_id=${userID}`;
   });
   try {
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Owned exact revocation',${`${userID}@company.test`})`;
-    await database.client`INSERT INTO factory.access_revocation(user_id,version)
-      VALUES(${userID},9007199254740993)`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'access.revocation','user',${userID},${`access.revocation:${userID}`},'pending',
+        jsonb_build_object('userId',${userID}::text,'version',9007199254740993::bigint,'processedVersion',0))`;
     await observer.drain();
     expect(
       (
-        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+        await database.client`SELECT payload->>'version' AS version,payload->>'processedVersion' AS processed_version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${userID}`
       )[0],
     ).toEqual({ version: "9007199254740994", processed_version: "0" });
     await observer.drain();
     expect(
       (
-        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${userID}`
+        await database.client`SELECT payload->>'version' AS version,payload->>'processedVersion' AS processed_version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${userID}`
       )[0],
     ).toEqual({ version: "9007199254740994", processed_version: "9007199254740994" });
     expect(calls).toBe(2);
@@ -224,14 +247,15 @@ test("new Projects commit access reconciliation for existing System Managers and
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${managerID},'Owned manager',${`${managerID}@company.test`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${managerID})`;
     await database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${`owned-${projectID}`},'Owned new Project','https://forge.test/factory/product','main','.devcontainer/devcontainer.json',${managerID})`;
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`owned-${projectID}`},'Owned new Project','https://forge.test/factory/product','main','.factory/actor-template.json',${managerID})`;
       await sql`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${projectID},${managerID},'developer',true,${managerID})`;
     });
     expect(
       (
-        await database.client`SELECT version,processed_version FROM factory.access_revocation WHERE user_id=${managerID}`
+        await database.client`SELECT payload->>'version' AS version,payload->>'processedVersion' AS processed_version
+        FROM factory.operation WHERE kind='access.revocation' AND scope_id=${managerID}`
       )[0],
     ).toMatchObject({ version: "2", processed_version: "0" });
     const calls: string[] = [];

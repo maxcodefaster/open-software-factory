@@ -1,23 +1,19 @@
 import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, notInArray, sql as query } from "drizzle-orm";
 import { z } from "zod";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  authUser,
-  workspaceCommand,
-  workspaceTerminalOperation,
-} from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { authUser, operation } from "#db/schema";
 import {
   type WorkspaceCommandInput,
   type WorkspaceCommandRead,
   workspaceCommandInput,
   workspaceCommandRead,
-} from "../../../../packages/workspace-domain/src/commands";
+} from "#workspace-domain/commands";
 import { workspaceAuthorityIn, workspaceWriteAuthorityIn } from "../access/api";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
-import { type createRuntimeController } from "../runtime/api";
-import { type RuntimeHub } from "../runtime/transport-api";
+import type { createRuntimeController } from "../runtime/api";
+import type { RuntimeHub } from "../runtime/transport-api";
 import { createWorkspaceComputeAccess } from "./compute-api";
 
 const nativeView = z.object({
@@ -55,29 +51,29 @@ type CommandRow = {
   result: unknown;
   kind: "shell" | "terminal";
 };
-const terminalStates: Array<(typeof workspaceCommand.$inferSelect)["state"]> = [
-  "exited",
-  "cancelled",
-  "failed",
-  "interrupted",
-];
+const COMMAND_KIND = "workspace.command";
+const TERMINAL_OP_KIND = "workspace.terminal_op";
+const terminalStates = ["exited", "cancelled", "failed", "interrupted"] as const;
 const commandFields = {
-  id: workspaceCommand.id,
-  workspaceID: workspaceCommand.workspaceId,
-  attemptID: workspaceCommand.runtimeAttemptId,
-  actorID: workspaceCommand.actorId,
-  digest: workspaceCommand.inputDigest,
-  state: workspaceCommand.state,
-  attempted: query<boolean>`${workspaceCommand.dispatchAttemptedAt} IS NOT NULL`,
-  result: workspaceCommand.result,
-  kind: workspaceCommand.kind,
+  id: operation.id,
+  workspaceID: operation.scopeId,
+  attemptID: query<string>`${operation.payload}->>'runtimeAttemptId'`,
+  actorID: query<string>`${operation.createdBy}`,
+  digest: query<string>`${operation.payload}->>'inputDigest'`,
+  state: operation.state,
+  attempted: query<boolean>`${operation.payload}->>'dispatchAttemptedAt' IS NOT NULL`,
+  result: operation.result,
+  kind: query<"shell" | "terminal">`${operation.payload}->>'kind'`,
 };
 const terminal = (state: string) => terminalStates.some((value) => value === state);
 
 export function createWorkspaceCommands(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
-  runtime: Pick<ReturnType<typeof createRuntimeController>, "start" | "startPersisted" | "get">,
+  runtime: Pick<
+    ReturnType<typeof createRuntimeController>,
+    "start" | "startPersisted" | "resumeForSource" | "get"
+  >,
   signingKey: string,
 ) {
   const observations = new Set<Promise<unknown>>();
@@ -87,8 +83,8 @@ export function createWorkspaceCommands(
   async function row(id: string) {
     const [record] = await database.db
       .select(commandFields)
-      .from(workspaceCommand)
-      .where(eq(workspaceCommand.id, id));
+      .from(operation)
+      .where(and(eq(operation.id, id), eq(operation.kind, COMMAND_KIND)));
     if (!record) throw new CommandError("not-found", "Command not found");
     return record;
   }
@@ -103,8 +99,8 @@ export function createWorkspaceCommands(
       ...commandOutcome.parse(record.result),
     };
   }
-  async function observe(attemptID: string, value: NativeView) {
-    const result = {
+  function observationResult(value: NativeView) {
+    return {
       pid: value.pid ?? null,
       startedAt: value.startedAt ?? null,
       completedAt: value.completedAt ?? null,
@@ -116,16 +112,25 @@ export function createWorkspaceCommands(
             ? `Command exited with code ${value.exitCode}.`
             : null,
     };
+  }
+  async function observe(attemptID: string, value: NativeView) {
+    const result = observationResult(value);
     // A late start acknowledgement must not overwrite an already observed final outcome.
     await database.db
-      .update(workspaceCommand)
-      .set({ state: value.state, result, updatedAt: query`now()` })
+      .update(operation)
+      .set({
+        state: value.state,
+        result,
+        ...(terminal(value.state) ? { completedAt: query`now()` } : {}),
+        updatedAt: query`now()`,
+      })
       .where(
         and(
-          eq(workspaceCommand.id, value.id),
-          eq(workspaceCommand.runtimeAttemptId, attemptID),
-          eq(workspaceCommand.inputDigest, value.digest),
-          notInArray(workspaceCommand.state, terminalStates),
+          eq(operation.id, value.id),
+          eq(operation.kind, COMMAND_KIND),
+          query`${operation.payload}->>'runtimeAttemptId' = ${attemptID}`,
+          query`${operation.payload}->>'inputDigest' = ${value.digest}`,
+          notInArray(operation.state, [...terminalStates]),
         ),
       );
   }
@@ -193,12 +198,18 @@ export function createWorkspaceCommands(
         .select({
           ...commandFields,
           actorName: query<string>`left(${authUser.name},160)`,
-          createdAt: query<string>`${workspaceCommand.createdAt}::text`,
+          createdAt: query<string>`${operation.createdAt}::text`,
         })
-        .from(workspaceCommand)
-        .innerJoin(authUser, eq(authUser.id, workspaceCommand.actorId))
-        .where(eq(workspaceCommand.workspaceId, workspaceID))
-        .orderBy(desc(workspaceCommand.createdAt), desc(workspaceCommand.id))
+        .from(operation)
+        .innerJoin(authUser, eq(authUser.id, operation.createdBy))
+        .where(
+          and(
+            eq(operation.kind, COMMAND_KIND),
+            eq(operation.scopeType, "workspace"),
+            eq(operation.scopeId, workspaceID),
+          ),
+        )
+        .orderBy(desc(operation.createdAt), desc(operation.id))
         .offset(offset)
         .limit(limit + 1);
       return {
@@ -233,10 +244,11 @@ export function createWorkspaceCommands(
         await database.client.begin((sql) =>
           workspaceWriteAuthorityIn(sql, input.workspaceID, userID),
         );
+        const idempotencyKey = `${COMMAND_KIND}:${input.requestID}`;
         const [previous] = await database.db
-          .select({ id: workspaceCommand.id })
-          .from(workspaceCommand)
-          .where(eq(workspaceCommand.id, input.requestID));
+          .select({ id: operation.id })
+          .from(operation)
+          .where(eq(operation.idempotencyKey, idempotencyKey));
         const attemptID = previous
           ? (await row(input.requestID)).attemptID
           : await ready(input.workspaceID, userID);
@@ -244,20 +256,27 @@ export function createWorkspaceCommands(
           await workspaceWriteAuthorityIn(sql, input.workspaceID, userID);
           const db = drizzleTransaction(sql);
           await db
-            .insert(workspaceCommand)
+            .insert(operation)
             .values({
               id: input.requestID,
-              workspaceId: input.workspaceID,
-              runtimeAttemptId: attemptID,
-              actorId: userID,
-              inputDigest: digest,
-              kind,
+              kind: COMMAND_KIND,
+              scopeType: "workspace",
+              scopeId: input.workspaceID,
+              idempotencyKey,
+              state: "start-intended",
+              createdBy: userID,
+              payload: {
+                runtimeAttemptId: attemptID,
+                inputDigest: digest,
+                kind,
+              },
+              result: {},
             })
-            .onConflictDoNothing({ target: workspaceCommand.id });
+            .onConflictDoNothing();
           const [current] = await db
             .select(commandFields)
-            .from(workspaceCommand)
-            .where(eq(workspaceCommand.id, input.requestID))
+            .from(operation)
+            .where(and(eq(operation.id, input.requestID), eq(operation.kind, COMMAND_KIND)))
             .for("update");
           if (
             !current ||
@@ -271,13 +290,13 @@ export function createWorkspaceCommands(
             );
           if (current.attempted || terminal(current.state)) return false;
           await db
-            .update(workspaceCommand)
+            .update(operation)
             .set({
               state: "dispatching",
-              dispatchAttemptedAt: query`now()`,
+              payload: query`${operation.payload} || jsonb_build_object('dispatchAttemptedAt', now())`,
               updatedAt: query`now()`,
             })
-            .where(eq(workspaceCommand.id, input.requestID));
+            .where(and(eq(operation.id, input.requestID), eq(operation.kind, COMMAND_KIND)));
           return true;
         });
         const record = await row(input.requestID);
@@ -302,12 +321,13 @@ export function createWorkspaceCommands(
         } catch {
           // Persisted dispatch forbids automatic replay, including after a lost transport response.
           await database.db
-            .update(workspaceCommand)
+            .update(operation)
             .set({ state: "uncertain", updatedAt: query`now()` })
             .where(
               and(
-                eq(workspaceCommand.id, record.id),
-                inArray(workspaceCommand.state, ["start-intended", "dispatching", "starting"]),
+                eq(operation.id, record.id),
+                eq(operation.kind, COMMAND_KIND),
+                inArray(operation.state, ["start-intended", "dispatching", "starting"]),
               ),
             );
         }
@@ -343,12 +363,13 @@ export function createWorkspaceCommands(
         const attempt = await runtime.get(record.attemptID);
         if (attempt?.state === "stopped")
           await database.db
-            .update(workspaceCommand)
-            .set({ state: "interrupted", updatedAt: query`now()` })
+            .update(operation)
+            .set({ state: "interrupted", completedAt: query`now()`, updatedAt: query`now()` })
             .where(
               and(
-                eq(workspaceCommand.id, record.id),
-                notInArray(workspaceCommand.state, terminalStates),
+                eq(operation.id, record.id),
+                eq(operation.kind, COMMAND_KIND),
+                notInArray(operation.state, [...terminalStates]),
               ),
             );
       }
@@ -378,7 +399,10 @@ export function createWorkspaceCommands(
       );
       await authorized(userID, record, true);
       return {
-        ...view(await row(record.id)),
+        // A newer completion event may already be durable while this native
+        // output page still predates its last bytes. Keep state and bytes from
+        // one observation so callers cannot stop reading an unfinished page.
+        ...view({ ...record, state: result.state, result: observationResult(result) }),
         stdout: Buffer.from(result.stdout ?? "", "base64").toString("utf8"),
         stderr: Buffer.from(result.stderr ?? "", "base64").toString("utf8"),
         stdoutFrom: result.stdoutFrom,
@@ -438,31 +462,38 @@ export function createWorkspaceCommands(
       if (record.kind !== "terminal") throw new CommandError("not-found", "Terminal not found");
       await authorized(userID, record, true);
       const digest = createHmac("sha256", signingKey).update(JSON.stringify(input)).digest("hex");
+      const idempotencyKey = `${TERMINAL_OP_KIND}:${input.requestID}`;
       const previous = await database.client.begin(async (sql) => {
         await workspaceWriteAuthorityIn(sql, record.workspaceID, userID);
         const db = drizzleTransaction(sql);
         const [created] = await db
-          .insert(workspaceTerminalOperation)
+          .insert(operation)
           .values({
             id: input.requestID,
-            commandId: record.id,
-            actorId: userID,
-            action: input.action,
-            inputDigest: digest,
+            kind: TERMINAL_OP_KIND,
+            scopeType: "operation",
+            scopeId: record.id,
+            idempotencyKey,
+            state: "pending",
+            createdBy: userID,
+            payload: {
+              action: input.action,
+              inputDigest: digest,
+            },
           })
-          .onConflictDoNothing({ target: workspaceTerminalOperation.id })
-          .returning({ id: workspaceTerminalOperation.id });
+          .onConflictDoNothing()
+          .returning({ id: operation.id });
         if (created) return undefined;
         const [existing] = await db
           .select({
-            commandID: workspaceTerminalOperation.commandId,
-            actorID: workspaceTerminalOperation.actorId,
-            action: workspaceTerminalOperation.action,
-            digest: workspaceTerminalOperation.inputDigest,
-            result: workspaceTerminalOperation.result,
+            commandID: operation.scopeId,
+            actorID: operation.createdBy,
+            action: query<string>`${operation.payload}->>'action'`,
+            digest: query<string>`${operation.payload}->>'inputDigest'`,
+            result: operation.result,
           })
-          .from(workspaceTerminalOperation)
-          .where(eq(workspaceTerminalOperation.id, input.requestID));
+          .from(operation)
+          .where(eq(operation.idempotencyKey, idempotencyKey));
         if (
           !existing ||
           existing.commandID !== record.id ||
@@ -499,9 +530,14 @@ export function createWorkspaceCommands(
       }
       const result = view(await row(record.id));
       await database.db
-        .update(workspaceTerminalOperation)
-        .set({ result, completedAt: query`now()` })
-        .where(eq(workspaceTerminalOperation.id, input.requestID));
+        .update(operation)
+        .set({
+          state: "completed",
+          result,
+          completedAt: query`now()`,
+          updatedAt: query`now()`,
+        })
+        .where(and(eq(operation.id, input.requestID), eq(operation.kind, TERMINAL_OP_KIND)));
       await authorized(userID, record);
       return result;
     },

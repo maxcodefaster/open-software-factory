@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { is, SQL, StringChunk } from "drizzle-orm";
 import { getTableConfig, PgColumn, PgDialect, PgTable } from "drizzle-orm/pg-core";
-import { desktopBackgroundKeys } from "../../interface-domain/src/background";
+import { desktopBackgroundKeys } from "#interface-domain/background";
 import { generateBaseline } from "./generate";
 import { baselineDigest } from "./migrations";
 import * as schema from "./schema";
 
-test("personal and Project background guards accept exactly the supported artwork catalog", () => {
+test("Project background guard accepts exactly the supported artwork catalog", () => {
   const dialect = new PgDialect();
-  for (const table of [schema.userUIPreference, schema.project]) {
+  for (const table of [schema.project]) {
     const config = getTableConfig(table);
     const check = config.checks.find((check) =>
       check.name.endsWith("_desktop_background_key_check"),
@@ -33,6 +33,11 @@ test("Drizzle and native sources generate one reproducible sealed baseline", asy
   expect(first.indexOf("CREATE TABLE")).toBeLessThan(first.indexOf("CREATE TRIGGER"));
   expect(first).toContain("UNIQUE NULLS NOT DISTINCT");
   expect(first).toContain("ALTER CONSTRAINT knowledge_page_parent_project DEFERRABLE");
+});
+
+test("Operation payload defaults to an empty JSON object", async () => {
+  expect(schema.operation.payload.default).toEqual({});
+  expect(await generateBaseline()).toContain(`"payload" jsonb DEFAULT '{}'::jsonb NOT NULL`);
 });
 
 test("schema checks and partial indexes bind column objects rather than bare SQL names", () => {
@@ -72,7 +77,7 @@ test("the baseline retains usage update triggers on the shared immutable routine
   const baseline = await generateBaseline();
   expect(baseline).not.toContain("CREATE FUNCTION factory.guard_usage_entry()");
   expect(baseline).toContain(
-    "CREATE TRIGGER execution_policy_command_immutable BEFORE UPDATE ON factory.execution_policy_command FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();",
+    "CREATE TRIGGER audit_event_immutable BEFORE UPDATE OR DELETE ON factory.audit_event FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();",
   );
   expect(baseline).toContain(
     "CREATE TRIGGER guard_usage_entry BEFORE UPDATE ON factory.usage_entry FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();",

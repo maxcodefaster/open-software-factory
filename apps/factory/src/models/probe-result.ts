@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
 
 export function reportedModelLimits(
   headers: Headers | Record<string, string> | undefined,

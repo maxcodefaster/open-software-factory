@@ -1,6 +1,6 @@
+import type { NativeArchitecture } from "#runtime-kubernetes/substrate-profile";
 import pins from "../../deploy/substrate/pins.json";
 import { renderSubstrateProfile } from "../../scripts/runtime/substrate-profile";
-import type { NativeArchitecture } from "../../packages/runtime-kubernetes/src/substrate-profile";
 
 export function nativeCapacityFixture(architecture: NativeArchitecture = "amd64") {
   const selector = {

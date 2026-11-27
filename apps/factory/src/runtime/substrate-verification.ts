@@ -1,23 +1,20 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, exists, inArray, isNotNull, isNull, sql as query } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
-  executionPolicyCommand,
-  projectEnvironment,
+  auditEvent,
+  operation as operationTable,
   runtimeAttempt,
-  substrateBinding,
-  substrateVerification,
+  substrateProvision,
   verification,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import {
   runtimeConnectorTokens,
   runtimeIdentity,
-} from "../../../../packages/runtime-domain/src/identity";
-import {
-  createSubstrateControl,
-  type SubstrateCall,
-} from "../../../../packages/runtime-kubernetes/src/substrate-control";
-import { runtimeVerificationProcess } from "../../../../packages/runtime-kubernetes/src/verification-process";
+  runtimeProjectEntryToken,
+} from "#runtime-domain/identity";
+import { createSubstrateControl, type SubstrateCall } from "#runtime-kubernetes/substrate-control";
+import { runtimeVerificationProcess } from "#runtime-kubernetes/verification-process";
 import { createCodingRuntimeShutdown } from "../agent/runtime-api";
 import { substrateRepositoryCloneURL } from "./endpoints";
 import { runtimeSourceCapability } from "./git-http";
@@ -30,9 +27,18 @@ import {
 import {
   type BoundNativeProvisioningFacts,
   boundNativeProvisioningChecks,
+  dispatchProvisionResourceIn,
   provisionBoundNativeResources,
+  readProvisionResources,
+  rejectProvisionResourceIn,
+  rememberProvisionResourceIn,
 } from "./substrate-bound-provisioning";
 import type { createSubstrateCapacity } from "./substrate-capacity";
+import {
+  type FrozenProjectTemplate,
+  nativeProjectConfiguration,
+  type ProjectConfigurationReader,
+} from "./substrate-project-configuration";
 import { substrateResourceReservation } from "./substrate-resources";
 import { renderSubstrateTemplate, substrateBootstrapCA } from "./substrate-template";
 import { substrateVerificationAuthorityIn } from "./substrate-verification-grant";
@@ -43,22 +49,22 @@ import {
 } from "./substrate-workspaces";
 
 type Database = ReturnType<typeof createDatabase>;
-type Provision = Omit<
-  typeof substrateVerification.$inferSelect,
-  keyof BoundNativeProvisioningFacts | "intent"
-> &
-  BoundNativeProvisioningFacts & {
-    intent: {
-      configuration: SubstrateWorkspaceConfiguration;
-      revision: string;
-      repository: string;
-      devcontainerPath: string;
-      runnerUUID: string;
-      jobHandle: string;
-      templateSHA256: string;
-      environment: { version: number; secretKey: string | null };
-    };
+type Provision = BoundNativeProvisioningFacts & {
+  ownerId: string;
+  runtimeAttemptId: string;
+  generation: number;
+  intent: {
+    configuration: SubstrateWorkspaceConfiguration;
+    revision: string;
+    repository: string;
+    actorTemplatePath: string;
+    projectTemplate: FrozenProjectTemplate;
+    runnerUUID: string;
+    jobHandle: string;
+    templateSHA256: string;
+    environment: { version: number; secretKey: string | null };
   };
+};
 
 // External create facts only. Verification remains the existing product owner;
 // the same Substrate adapter owns Actor lifecycle, observation and exact cleanup.
@@ -71,6 +77,7 @@ export function createSubstrateVerification(
   provisionerCall?: SubstrateCall,
   capacity?: Pick<ReturnType<typeof createSubstrateCapacity>, "requireReady">,
   shutdownCoding = createCodingRuntimeShutdown(database, hub),
+  readConfiguration?: ProjectConfigurationReader,
 ) {
   const config = substrateWorkspaceConfiguration(input);
   const desiredConfiguration = config;
@@ -78,23 +85,42 @@ export function createSubstrateVerification(
     throw new Error("Owned native Verification requires its explicitly owned database");
   const editor = editorCall ?? createSubstrateControl(config.connection);
   const owner = provisionerCall ?? createSubstrateControl(config.provisioner);
-  async function saved(verificationID: string, attemptID: string, sql = database.client) {
+  async function saved(
+    verificationID: string,
+    attemptID: string,
+    sql = database.client,
+  ): Promise<Provision> {
     const [selected] = await drizzleTransaction(sql)
-      .select()
-      .from(substrateVerification)
+      .select({
+        ownerId: substrateProvision.ownerId,
+        runtimeAttemptId: substrateProvision.runtimeAttemptId,
+        generation: substrateProvision.generation,
+        intent: query<Provision["intent"]>`${substrateProvision.intent}`,
+        resources: substrateProvision.resources,
+      })
+      .from(substrateProvision)
       .where(
         and(
-          eq(substrateVerification.verificationId, verificationID),
-          eq(substrateVerification.runtimeAttemptId, attemptID),
+          eq(substrateProvision.ownerId, verificationID),
+          eq(substrateProvision.kind, "verification"),
+          eq(substrateProvision.runtimeAttemptId, attemptID),
         ),
       );
-    const row = selected as Provision | undefined;
-    if (!row || runtimeIdentity(verificationID, row.generation).attemptID !== row.runtimeAttemptId)
+    if (
+      !selected?.runtimeAttemptId ||
+      runtimeIdentity(verificationID, selected.generation).attemptID !== selected.runtimeAttemptId
+    )
       throw new Error(
         "Native Verification configuration or deterministic identity differs from immutable intent",
       );
-    retainedSubstrateConfiguration(config, row.intent.configuration);
-    return row;
+    retainedSubstrateConfiguration(config, selected.intent.configuration);
+    return {
+      ownerId: selected.ownerId,
+      runtimeAttemptId: selected.runtimeAttemptId,
+      generation: selected.generation,
+      intent: selected.intent,
+      ...readProvisionResources(selected.resources),
+    };
   }
   function execution(verificationID: string, row: Provision) {
     if (!row.atespace || !row.policy || !row.template)
@@ -125,14 +151,15 @@ export function createSubstrateVerification(
     matchesProject: (id: string) => id === config.projectID,
     async forAttempt(attemptID: string) {
       const [row] = await database.db
-        .select({ verificationID: substrateVerification.verificationId })
-        .from(substrateVerification)
-        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, substrateVerification.runtimeAttemptId))
+        .select({ verificationID: substrateProvision.ownerId })
+        .from(substrateProvision)
+        .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, substrateProvision.runtimeAttemptId))
         .where(
           and(
+            eq(substrateProvision.kind, "verification"),
             eq(runtimeAttempt.id, attemptID),
             eq(runtimeAttempt.projectId, config.projectID),
-            eq(runtimeAttempt.verificationId, substrateVerification.verificationId),
+            eq(runtimeAttempt.verificationId, substrateProvision.ownerId),
             eq(runtimeAttempt.isolatedKind, "verification"),
             isNull(runtimeAttempt.workspaceId),
           ),
@@ -146,8 +173,11 @@ export function createSubstrateVerification(
         .select({ id: runtimeAttempt.id })
         .from(runtimeAttempt)
         .innerJoin(
-          substrateVerification,
-          eq(substrateVerification.runtimeAttemptId, runtimeAttempt.id),
+          substrateProvision,
+          and(
+            eq(substrateProvision.kind, "verification"),
+            eq(substrateProvision.runtimeAttemptId, runtimeAttempt.id),
+          ),
         )
         .where(
           and(
@@ -169,13 +199,18 @@ export function createSubstrateVerification(
           throw new Error("Native Verification database differs from its configuration");
         const [previous] = await db
           .select({
-            attemptID: substrateVerification.runtimeAttemptId,
-            generation: substrateVerification.generation,
-            intent: query<Provision["intent"]>`${substrateVerification.intent}`,
+            attemptID: query<string>`${substrateProvision.runtimeAttemptId}`,
+            generation: substrateProvision.generation,
+            intent: query<Provision["intent"]>`${substrateProvision.intent}`,
           })
-          .from(substrateVerification)
-          .where(eq(substrateVerification.verificationId, verificationID))
-          .orderBy(desc(substrateVerification.generation))
+          .from(substrateProvision)
+          .where(
+            and(
+              eq(substrateProvision.ownerId, verificationID),
+              eq(substrateProvision.kind, "verification"),
+            ),
+          )
+          .orderBy(desc(substrateProvision.generation))
           .limit(1);
         // A saved explicit retry releases only its exact cleaned-up predecessor.
         // Provisioning without an Attempt, lost replies and retained executions
@@ -185,7 +220,6 @@ export function createSubstrateVerification(
               .select({ id: verification.id })
               .from(verification)
               .innerJoin(runtimeAttempt, eq(runtimeAttempt.id, previous.attemptID))
-              .innerJoin(substrateBinding, eq(substrateBinding.runtimeAttemptId, runtimeAttempt.id))
               .where(
                 and(
                   eq(verification.id, verificationID),
@@ -193,30 +227,32 @@ export function createSubstrateVerification(
                   eq(verification.state, "pending"),
                   eq(runtimeAttempt.verificationId, verification.id),
                   eq(runtimeAttempt.state, "stopped"),
-                  isNotNull(substrateBinding.deletedAt),
+                  isNotNull(runtimeAttempt.deletedAt),
                   exists(
                     db
-                      .select({ id: executionPolicyCommand.commandId })
-                      .from(executionPolicyCommand)
+                      .select({ id: auditEvent.id })
+                      .from(auditEvent)
                       .where(
                         and(
+                          eq(auditEvent.kind, "usage.policy_command"),
+                          eq(auditEvent.scopeType, "execution_policy"),
                           eq(
-                            executionPolicyCommand.scope,
+                            auditEvent.scopeId,
                             query`'checks-bootstrap-retry:' || ${verification.changeId}::text`,
                           ),
                           eq(
-                            query`${executionPolicyCommand.input}->>'verificationID'`,
+                            query`${auditEvent.payload}->'input'->>'verificationID'`,
                             query`${verification.id}::text`,
                           ),
                           eq(
-                            query`${executionPolicyCommand.input}->>'runtimeAttemptID'`,
+                            query`${auditEvent.payload}->'input'->>'runtimeAttemptID'`,
                             query`${runtimeAttempt.id}::text`,
                           ),
                           eq(
-                            query`${executionPolicyCommand.result}->>'runtimeAttemptID'`,
+                            query`${auditEvent.payload}->'result'->>'runtimeAttemptID'`,
                             query`${runtimeAttempt.id}::text`,
                           ),
-                          eq(query`${executionPolicyCommand.result}->>'state'`, "failed"),
+                          eq(query`${auditEvent.payload}->'result'->>'state'`, "failed"),
                         ),
                       ),
                   ),
@@ -234,18 +270,29 @@ export function createSubstrateVerification(
         );
         if (!prior)
           await capacity?.requireReady(substrateResourceReservation(selectedConfiguration));
-        const [currentEnvironment] = await db
-          .select({
-            version: projectEnvironment.version,
-            secretKey: projectEnvironment.secretKey,
-          })
-          .from(projectEnvironment)
+        const [currentEnvironmentRow] = await db
+          .select({ payload: operationTable.payload })
+          .from(operationTable)
           .where(
             and(
-              eq(projectEnvironment.projectId, config.projectID),
-              eq(projectEnvironment.environment, "development"),
+              eq(operationTable.kind, "environments.environment"),
+              eq(operationTable.scopeType, "project"),
+              eq(operationTable.scopeId, config.projectID),
+              eq(
+                operationTable.idempotencyKey,
+                `environments.environment:${config.projectID}:development`,
+              ),
             ),
           );
+        const currentEnvironment = currentEnvironmentRow
+          ? {
+              version: Number(currentEnvironmentRow.payload["version"] ?? 0),
+              secretKey:
+                typeof currentEnvironmentRow.payload["secretKey"] === "string"
+                  ? currentEnvironmentRow.payload["secretKey"]
+                  : null,
+            }
+          : undefined;
         const environment = prior?.intent.environment ??
           currentEnvironment ?? { version: 0, secretKey: null };
         const atespace = `fa-${attemptID.replaceAll("-", "")}`;
@@ -257,59 +304,81 @@ export function createSubstrateVerification(
         ).href;
         const forgeURL = new URL(substrateRepositoryCloneURL(scope.repository, config)).origin;
         const tokens = runtimeConnectorTokens(secret, attemptID, generation);
-        const template = renderSubstrateTemplate(atespace, selectedConfiguration, {
-          sourceHandoff: false,
-          assignment: {
-            version: 1,
-            runtimeAttemptId: attemptID,
-            generation,
-            workspaceFolder: "/home/rootless/persist/project",
-            remoteWorkspaceFolder: "/workspace/project",
-            repositoryUrl: repositoryURL,
-            repositoryIdentity: config.projectID,
-            preserveWorkspace: true,
-            revision: scope.revision,
-            devcontainerPath: scope.devcontainerPath,
-            composeProjectName: `verification-${verificationID}`,
-            controlUrl: config.connectorURL,
-            connectorStateDir: "/home/rootless/persist/connector",
-            environmentVersion: environment.version,
-            channels: [
-              {
-                name: "verification",
-                kind: "verification",
-                target: "http://127.0.0.1:4500",
-                healthPath: "/health",
-              },
-            ],
-            processes: [
-              runtimeVerificationProcess({
-                forgeURL,
-                runnerUUID: scope.runnerUUID,
-                runnerToken: scope.runnerToken,
-                runnerLabel: "factory-verification",
-                handle: scope.jobHandle,
-              }),
-            ],
+        const nativeProject = await nativeProjectConfiguration(
+          prior?.intent.projectTemplate,
+          readConfiguration,
+          scope.repository,
+          scope.revision,
+          scope.actorTemplatePath,
+        );
+        const template = renderSubstrateTemplate(
+          atespace,
+          selectedConfiguration,
+          {
+            entryTokens: Object.fromEntries(
+              nativeProject.template.containers.map(({ name }) => [
+                name,
+                runtimeProjectEntryToken(secret, attemptID, generation, name),
+              ]),
+            ),
+            projectTemplate: {
+              path: nativeProject.frozen.path,
+              sha256: nativeProject.frozen.sha256,
+            },
+            sourceHandoff: false,
+            assignment: {
+              version: 1,
+              runtimeAttemptId: attemptID,
+              generation,
+              workspaceFolder: "/home/rootless/persist/project",
+              remoteWorkspaceFolder: "/workspace/project",
+              repositoryUrl: repositoryURL,
+              repositoryIdentity: config.projectID,
+              preserveWorkspace: true,
+              revision: scope.revision,
+              actorTemplatePath: scope.actorTemplatePath,
+              controlUrl: config.connectorURL,
+              connectorStateDir: "/home/rootless/persist/connector",
+              environmentVersion: environment.version,
+              channels: [
+                {
+                  name: "verification",
+                  kind: "verification",
+                  target: "http://127.0.0.1:4500",
+                  healthPath: "/health",
+                },
+              ],
+              processes: [
+                runtimeVerificationProcess({
+                  forgeURL,
+                  runnerUUID: scope.runnerUUID,
+                  runnerToken: scope.runnerToken,
+                  runnerLabel: "factory-verification",
+                  handle: scope.jobHandle,
+                }),
+              ],
+            },
+            // The initializer's private checkout marker is this Attempt, not a
+            // product Workspace. No canonical Source or editor grant is allocated.
+            source: {
+              workspaceId: attemptID,
+              projectId: config.projectID,
+              revision: scope.revision,
+              repositoryUrl: repositoryURL,
+              originUrl: repositoryURL,
+            },
+            parentToken: tokens.parent,
+            childToken: tokens.child,
+            factoryCA: substrateBootstrapCA(config.factoryCAFile),
           },
-          // The initializer's private checkout marker is this Attempt, not a
-          // product Workspace. No canonical Source or editor grant is allocated.
-          source: {
-            workspaceId: attemptID,
-            projectId: config.projectID,
-            revision: scope.revision,
-            repositoryUrl: repositoryURL,
-            originUrl: repositoryURL,
-          },
-          parentToken: tokens.parent,
-          childToken: tokens.child,
-          factoryCA: substrateBootstrapCA(config.factoryCAFile),
-        });
+          nativeProject.template,
+        );
         const intent: Provision["intent"] = {
           configuration: selectedConfiguration,
           revision: scope.revision,
           repository: scope.repository,
-          devcontainerPath: scope.devcontainerPath,
+          actorTemplatePath: scope.actorTemplatePath,
+          projectTemplate: nativeProject.frozen,
           runnerUUID: scope.runnerUUID,
           jobHandle: scope.jobHandle,
           templateSHA256: substrateTemplateSHA256(template),
@@ -324,8 +393,9 @@ export function createSubstrateVerification(
               userID,
               attemptID,
             );
-            await drizzleTransaction(tx).insert(substrateVerification).values({
-              verificationId: verificationID,
+            await drizzleTransaction(tx).insert(substrateProvision).values({
+              ownerId: verificationID,
+              kind: "verification",
               runtimeAttemptId: attemptID,
               generation,
               intent,
@@ -342,8 +412,9 @@ export function createSubstrateVerification(
           intent.templateSHA256,
         );
         const identity = and(
-          eq(substrateVerification.verificationId, verificationID),
-          eq(substrateVerification.runtimeAttemptId, attemptID),
+          eq(substrateProvision.ownerId, verificationID),
+          eq(substrateProvision.kind, "verification"),
+          eq(substrateProvision.runtimeAttemptId, attemptID),
         );
         row = await provisionBoundNativeResources({
           label: "Verification",
@@ -361,21 +432,9 @@ export function createSubstrateVerification(
                 attemptID,
               ),
             ),
-          dispatch: (kind) =>
-            db
-              .update(substrateVerification)
-              .set({ [`${kind}AttemptedAt`]: query`now()` })
-              .where(identity),
-          reject: (kind) =>
-            db
-              .update(substrateVerification)
-              .set({ [`${kind}Rejected`]: true })
-              .where(identity),
-          remember: (kind, value) =>
-            db
-              .update(substrateVerification)
-              .set({ [kind]: value })
-              .where(identity),
+          dispatch: (kind) => dispatchProvisionResourceIn(sql, identity, kind),
+          reject: (kind) => rejectProvisionResourceIn(sql, identity, kind),
+          remember: (kind, value) => rememberProvisionResourceIn(sql, identity, kind, value),
         });
       } finally {
         try {

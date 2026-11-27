@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
 import { connectOpenCodeSources } from "../../apps/factory/src/agent/opencode-browser";
 import { mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { fixtureValue } from "../fixtures/value";
@@ -91,7 +91,6 @@ test("pinned OpenCode consumes Factory MCP source tools natively while independe
   let native: Awaited<ReturnType<typeof pinnedOpenCode>> | undefined;
   try {
     native = await pinnedOpenCode(
-      undefined,
       undefined,
       undefined,
       `http://host.orb.internal:${provider.port}/v1`,

@@ -544,8 +544,7 @@ test.each([
     if (boundary === "witness set") f.witness.set = "20261118T100209Z";
     if (boundary === "destination provenance")
       Object.assign(f.witness, { provenance: "restored-destination" });
-    if (boundary === "missing native witness")
-      delete f.witness.postgres["factory.substrate_binding"];
+    if (boundary === "missing native witness") delete f.witness.postgres["factory.runtime_attempt"];
     if (boundary === "missing writer witness") delete f.witness.postgres["factory.change_writer"];
     const ca = f.witness.state.files.at(-1);
     if (!ca) throw Error("Synthetic CA witness missing");

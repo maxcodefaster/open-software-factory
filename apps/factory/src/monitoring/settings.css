@@ -8,9 +8,9 @@
 .input-delivery-settings {
   display: grid;
   justify-items: start;
-  gap: var(--space-3);
-  margin-bottom: var(--space-6);
-  padding-bottom: var(--space-6);
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-4);
 }
 .input-delivery-settings h2 {
   margin: 0;
@@ -60,7 +60,7 @@
   flex-wrap: wrap;
 }
 .input-overview-heading {
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 .input-overview-heading > .workspace-heading-title {
   flex-basis: auto;
@@ -76,7 +76,7 @@
   font-weight: var(--weight-medium);
 }
 .input-settings .input-message {
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 .input-message > button {
   margin-top: var(--space-2);
@@ -89,7 +89,7 @@
   font-size: var(--text-sm);
 }
 .input-empty {
-  padding-block: var(--space-6);
+  padding-block: var(--space-5);
 }
 .input-empty h3 {
   margin-bottom: var(--space-2);
@@ -98,7 +98,7 @@
   border-top: 1px solid var(--line-subtle);
 }
 .input-row {
-  padding-block: var(--space-5);
+  padding-block: var(--space-3);
   border-bottom: 1px solid var(--line-subtle);
 }
 .input-row-main {
@@ -166,7 +166,7 @@
   background: var(--material-accent);
 }
 .input-row-details {
-  margin-top: var(--space-3);
+  margin-top: var(--space-2);
 }
 .input-settings summary {
   cursor: pointer;
@@ -195,8 +195,8 @@
 .input-detail-content {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-6);
-  padding-block: var(--space-4) var(--space-1);
+  gap: var(--space-4);
+  padding-block: var(--space-3) var(--space-1);
 }
 .input-detail-content > section {
   display: grid;
@@ -208,20 +208,20 @@
   white-space: pre-wrap;
 }
 .input-events {
-  margin-top: var(--space-8);
+  margin-top: var(--space-6);
 }
 .input-section-heading {
-  padding-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--line-subtle);
 }
 .input-event {
-  padding-block: var(--space-4);
+  padding-block: var(--space-3);
   border-bottom: 1px solid var(--line-subtle);
 }
 .input-event > summary {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto auto;
-  gap: var(--space-4);
+  gap: var(--space-3);
   align-items: baseline;
   list-style: none;
 }
@@ -249,7 +249,7 @@
   display: grid;
   justify-items: start;
   gap: var(--space-2);
-  margin: var(--space-3) 0 0 var(--space-8);
+  margin: var(--space-2) 0 0 var(--space-6);
 }
 .input-editor,
 .input-setup-result {
@@ -257,7 +257,7 @@
 }
 .input-settings .input-editor {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-4);
 }
 .input-editor > header > .workspace-action-bar {
   padding-bottom: 0;
@@ -270,7 +270,7 @@
 }
 .input-settings fieldset:not(.workspace-action-bar) {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-4);
   min-width: 0;
   border: 0;
   padding: 0;
@@ -285,7 +285,7 @@
 }
 .input-settings .input-sources {
   gap: var(--space-2);
-  padding-block: var(--space-4) 0;
+  padding-block: var(--space-3) 0;
   border-top: 1px solid var(--line-subtle);
 }
 .input-chips {
@@ -298,12 +298,12 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 36px;
+  min-height: var(--control-height);
   max-width: 100%;
   background: var(--material-accent);
   border: 0;
   border-radius: var(--radius-pill);
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-1) var(--space-2);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
   text-align: left;
@@ -317,19 +317,16 @@
   gap: 0;
   padding: var(--space-1) var(--space-3);
   background: var(--material-input);
-  border: 1px solid var(--line-subtle);
   border-radius: var(--radius-sm);
 }
 .input-source-picker > label {
   display: flex;
   align-items: start;
   gap: var(--space-3);
-  font-weight: var(--weight-regular);
-}
-.input-source-picker > label {
   min-height: 44px;
   padding-block: var(--space-2);
   border-bottom: 1px solid var(--line-subtle);
+  font-weight: var(--weight-regular);
 }
 .input-source-picker > .workspace-action {
   justify-self: start;
@@ -345,7 +342,7 @@
 }
 .input-advanced {
   border-top: 1px solid var(--line-subtle);
-  padding-top: var(--space-4);
+  padding-top: var(--space-3);
 }
 .input-advanced > summary {
   min-height: var(--control-height);
@@ -360,11 +357,11 @@
 .input-form-actions {
   justify-content: end;
   border-top: 1px solid var(--line-subtle);
-  padding-top: var(--space-4);
+  padding-top: var(--space-3);
 }
 .input-confirmation {
-  margin-block: var(--space-4);
-  padding-block: var(--space-4);
+  margin-block: var(--space-3);
+  padding-block: var(--space-3);
   border-block: 1px solid var(--line-subtle);
 }
 .input-confirmation > :not(:first-child) {
@@ -401,7 +398,7 @@
   max-width: 100%;
   margin: var(--space-1) 0;
   overflow: auto;
-  padding: var(--space-4);
+  padding: var(--space-3);
   border-radius: var(--radius-sm);
   background: var(--material-input);
   font: var(--text-xs) / var(--leading-body) var(--font-technical);

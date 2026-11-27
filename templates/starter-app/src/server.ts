@@ -1,7 +1,7 @@
 import { createStartHandler, defaultStreamHandler } from "@tanstack/solid-start/server";
 import { createServerEntry } from "@tanstack/solid-start/server-entry";
-import { applicationBase, scopedAsset } from "./base.ts";
 import { trustedAppOrigins } from "./auth.ts";
+import { applicationBase, scopedAsset } from "./base.ts";
 import { appProxyContext } from "./proxy.ts";
 
 const handler = createStartHandler({

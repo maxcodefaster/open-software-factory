@@ -1,168 +1,31 @@
 package connector
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"syscall"
 	"testing"
-	"time"
 
 	"github.com/open-software-factory/open-software-factory/services/runtime-connector/workspacefiles"
 	"golang.org/x/sys/unix"
 )
-
-// Component-only regression through the real startup caller and packaged CLI.
-// Only Docker's empty read-only inventory is substituted. This is not Docker or
-// native lifecycle acceptance; no socket, network, model or retained Project is used.
-func TestNativeLockfileFeaturelessCLIConfigurationLeavesNoReservation(t *testing.T) {
-	assignment, checkCLI := nativeLockfilePinnedCLIFixture(t)
-	config := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
-	recipe := []byte("{\"image\":\"owned-featureless-image\",\"remoteUser\":\"node\"}\n")
-	if err := os.WriteFile(config, recipe, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(config, 1000, 1000); err != nil {
-		t.Fatal(err)
-	}
-	_, cliErr := validateDevcontainerConfiguration(context.Background(), assignment, false)
-	checkCLI(cliErr)
-	lockfile := filepath.Join(filepath.Dir(config), "devcontainer-lock.json")
-	if info, err := os.Lstat(lockfile); !os.IsNotExist(err) {
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Fatalf("actual featureless CLI startup retained an unexpected %d-byte devcontainer-lock.json", info.Size())
-	}
-	if data, err := os.ReadFile(config); err != nil || string(data) != string(recipe) {
-		t.Fatal("startup changed the authored featureless recipe")
-	}
-}
-
-func TestNativeLockfilePinnedCLIResolvedFeaturesAndEffectiveConfiguration(t *testing.T) {
-	for _, scenario := range []string{"features", "dependency-override-features", "prebuild-override-without-features"} {
-		t.Run(scenario, func(t *testing.T) {
-			assignment, checkCLI := nativeLockfilePinnedCLIFixture(t)
-			config := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
-			featureRecipe := `{"image":"owned-image","features":{"./owned-local-feature":{}}}`
-			plainRecipe := `{"image":"owned-image"}`
-			recipe := featureRecipe
-			if scenario != "features" {
-				assignment.EffectiveConfiguration = filepath.Join(t.TempDir(), "devcontainer.json")
-				effective := featureRecipe
-				if scenario == "dependency-override-features" {
-					recipe = plainRecipe
-				} else {
-					effective = plainRecipe
-				}
-				if err := os.WriteFile(assignment.EffectiveConfiguration, []byte(effective), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// Plain read-configuration must return the actual upstream Feature
-			// DTO without resolving or installing this local Feature.
-			if err := os.WriteFile(config, []byte(recipe), 0644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chown(config, 1000, 1000); err != nil {
-				t.Fatal(err)
-			}
-			_, err := validateDevcontainerConfiguration(context.Background(), assignment, false)
-			checkCLI(err)
-			lockfile := filepath.Join(filepath.Dir(config), "devcontainer-lock.json")
-			if scenario == "prebuild-override-without-features" {
-				if _, err := os.Lstat(lockfile); !os.IsNotExist(err) {
-					t.Fatalf("prebuilt effective recipe without Features created metadata: %v", err)
-				}
-			} else {
-				var stat unix.Stat_t
-				if err := unix.Lstat(lockfile, &stat); err != nil || stat.Uid != 1000 || stat.Gid != 1000 || stat.Size != 0 {
-					t.Fatalf("actual CLI Feature DTO did not reserve a development-owned inode: %+v, %v", stat, err)
-				}
-			}
-			if data, err := os.ReadFile(config); err != nil || string(data) != recipe {
-				t.Fatal("reading the effective Feature DTO changed authored configuration")
-			}
-		})
-	}
-}
-
-func nativeLockfilePinnedCLIFixture(t *testing.T) (Assignment, func(error)) {
-	t.Helper()
-	cli, err := exec.LookPath("devcontainer")
-	if err != nil {
-		t.Skip("requires the actual pinned runtime image")
-	}
-	version, err := exec.Command(cli, "--version").Output()
-	if err != nil || strings.TrimSpace(string(version)) != prebuildCLIVersion {
-		t.Fatalf("requires pinned CLI %s, got %q: %v", prebuildCLIVersion, version, err)
-	}
-	assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
-	assignment.RegistryCAFile = "/etc/ssl/certs/ca-certificates.crt"
-	if _, err := os.Stat(assignment.RegistryCAFile); err != nil {
-		t.Fatalf("packaged public system CA is unavailable: %v", err)
-	}
-	config := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
-	// Preserve the production arguments and the unmodified pinned CLI. Capture
-	// both streams from that exact invocation so a CLI prerequisite failure
-	// cannot be mistaken for the regression's no-file assertion.
-	diagnostics := t.TempDir()
-	stdout := filepath.Join(diagnostics, "stdout")
-	stderr := filepath.Join(diagnostics, "stderr")
-	wrapper := fmt.Sprintf("#!/bin/sh\n%q \"$@\" >%q 2>%q\nstatus=$?\ncat %q\ncat %q >&2\nexit \"$status\"\n",
-		cli, stdout, stderr, stdout, stderr)
-	if err := os.WriteFile(filepath.Join(diagnostics, "devcontainer"), []byte(wrapper), 0700); err != nil {
-		t.Fatal(err)
-	}
-	inventory := filepath.Join(diagnostics, "docker-inventory.log")
-	unexpected := filepath.Join(diagnostics, "docker-unexpected.log")
-	// Match the exact observed ps argv and both owned paths. Never forward a
-	// command to Docker, and reject even an otherwise read-only unexpected call.
-	docker := fmt.Sprintf(`#!/bin/sh
-if { [ "$#" -eq 7 ] || [ "$#" -eq 5 ]; } &&
-   [ "$1" = ps ] && [ "$2" = -q ] && [ "$3" = -a ] &&
-   [ "$4" = --filter ] && [ "$5" = %q ] &&
-   { [ "$#" -eq 5 ] || { [ "$6" = --filter ] && [ "$7" = %q ]; }; }; then
-  printf 'ps-owned-empty\n' >>%q
-  exit 0
-fi
-printf '%%s\n' "$@" >>%q
-printf 'Unexpected Docker operation refused by component fixture\n' >&2
-exit 99
-`, "label=devcontainer.local_folder="+assignment.WorkspaceFolder,
-		"label=devcontainer.config_file="+config, inventory, unexpected)
-	if err := os.WriteFile(filepath.Join(diagnostics, "docker"), []byte(docker), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", diagnostics+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Log("Component-only lockfile regression with isolated empty Docker inventory, not native lifecycle acceptance")
-	return assignment, func(cliErr error) {
-		t.Helper()
-		if calls, err := os.ReadFile(unexpected); err == nil {
-			t.Fatalf("actual CLI attempted an unexpected Docker operation:\n%s", calls)
-		} else if !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-		if cliErr != nil {
-			out, _ := os.ReadFile(stdout)
-			diagnostic, _ := os.ReadFile(stderr)
-			t.Fatalf("actual read-configuration: %v\nactual CLI stdout:\n%s\nactual CLI stderr:\n%s", cliErr, out, diagnostic)
-		}
-		if calls, err := os.ReadFile(inventory); err != nil || string(calls) != "ps-owned-empty\nps-owned-empty\n" {
-			t.Fatalf("actual CLI did not observe its exact-config and folder-only empty inventories: %q, %v", calls, err)
-		}
-	}
-}
 
 func nativeLockfileFixture(t *testing.T, config string) Assignment {
 	t.Helper()
 	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
 		t.Skip("requires owned root or development-user fixture")
 	}
-	root := filepath.Join(t.TempDir(), "project")
+	// The development-user shell must be able to traverse the fixture's parent;
+	// testing.T's private temporary ancestors are intentionally root-only.
+	parent, err := os.MkdirTemp("", "factory-native-lockfile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	if err := os.Chmod(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "project")
 	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, config)), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +37,9 @@ func nativeLockfileFixture(t *testing.T, config string) Assignment {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return Assignment{WorkspaceFolder: root, DevcontainerPath: config, nativeActorUID: "owned-actor"}
+	assignment := Assignment{WorkspaceFolder: root, ActorTemplatePath: config}
+	assignment.SetNativeActorUID("owned-actor")
+	return assignment
 }
 
 func TestNativeLockfileCheckOnlyPreservesMissingAndAuthoredFiles(t *testing.T) {
@@ -217,191 +82,7 @@ func TestNativeLockfileCheckOnlyPreservesMissingAndAuthoredFiles(t *testing.T) {
 	}
 }
 
-// These controlled CLI responses qualify the production adapter's ordering.
-// Actual pinned CLI DTO and lock-write/frozen behavior are tested separately.
-func TestNativeConfigurationResolvedFeaturesLockfileBeforeMergedCLI(t *testing.T) {
-	for _, features := range []string{"", `,"features":null`, `,"features":{}`, `,"features":{"./owned-local-feature":{}}`} {
-		t.Run(features, func(t *testing.T) {
-			assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
-			bin := t.TempDir()
-			trace := filepath.Join(bin, "trace")
-			lockfile := filepath.Join(assignment.WorkspaceFolder, ".devcontainer/devcontainer-lock.json")
-			wantLock := strings.Contains(features, "./owned-local-feature")
-			check := fmt.Sprintf("[ ! -e %q ] || exit 91", lockfile)
-			if wantLock {
-				check = fmt.Sprintf("[ \"$(stat -c '%%u:%%g:%%s' %q)\" = '1000:1000:0' ] || exit 92", lockfile)
-			}
-			script := fmt.Sprintf(`#!/bin/sh
-[ "$1" = read-configuration ] || exit 90
-case " $* " in
- *" --include-merged-configuration "*)
-   %s
-   printf 'merged\n' >>%q ;;
- *)
-   [ ! -e %q ] || exit 93
-   printf 'plain\n' >>%q ;;
-esac
-printf '%%s\n' %q
-`, check, trace, lockfile, trace, `{"configuration":{"image":"owned-image"`+features+`},"mergedConfiguration":{}}`)
-			if err := os.WriteFile(filepath.Join(bin, "devcontainer"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if _, err := validateDevcontainerConfiguration(context.Background(), assignment, true); err != nil {
-				t.Fatal(err)
-			}
-			if data, err := os.ReadFile(trace); err != nil || string(data) != "plain\nmerged\n" {
-				t.Fatalf("merged resolution did not first observe actual plain configuration: %q, %v", data, err)
-			}
-		})
-	}
-}
-
-func TestNativeLockfileStartupResolvesEffectiveConfigurationBeforeUp(t *testing.T) {
-	for _, scenario := range []string{"featureless", "dependency-features", "prebuilt-featureless", "root-lockfile"} {
-		t.Run(scenario, func(t *testing.T) {
-			assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
-			assignment.RuntimeAttemptID, assignment.Generation, assignment.ComposeProjectName = "owned-lockfile", 3, "owned-lockfile"
-			bin := t.TempDir()
-			trace := filepath.Join(bin, "trace")
-			lockfile := filepath.Join(assignment.WorkspaceFolder, ".devcontainer/devcontainer-lock.json")
-			config := filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath)
-			authored := `{"image":"owned-image"}`
-			recipe := `{"image":"owned-image"}`
-			if scenario == "dependency-features" {
-				recipe = `{"image":"owned-dependency-image","features":{"./owned-local-feature":{}}}`
-			}
-			effectivePath := config
-			if scenario == "dependency-features" || scenario == "prebuilt-featureless" {
-				assignment.EffectiveConfiguration = filepath.Join(bin, "effective.json")
-				effectivePath = assignment.EffectiveConfiguration
-				if err := os.WriteFile(effectivePath, []byte(recipe), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if scenario == "prebuilt-featureless" {
-				authored = `{"image":"owned-image","features":{"./authored-feature":{}}}`
-			}
-			if err := os.WriteFile(config, []byte(authored), 0600); err != nil {
-				t.Fatal(err)
-			}
-			wantLock := scenario == "dependency-features"
-			check := fmt.Sprintf("[ ! -e %q ] || exit 91", lockfile)
-			if wantLock {
-				check = fmt.Sprintf("[ \"$(stat -c '%%u:%%g:%%s' %q)\" = '1000:1000:0' ] || exit 92\nprintf 'owned-populated-feature-lock\\n' >%q", lockfile, lockfile)
-			}
-			readArgs := "read-configuration --workspace-folder " + assignment.WorkspaceFolder + " --config " + config + " --log-format json"
-			if assignment.EffectiveConfiguration != "" {
-				readArgs += " --override-config " + assignment.EffectiveConfiguration
-			}
-			readArgs += " --id-label " + attemptLabel + "=owned-lockfile --id-label " + generationLabel + "=3"
-			upArgs := "up --workspace-folder " + assignment.WorkspaceFolder + " --config " + config +
-				" --log-format text --update-remote-user-uid-default never --id-label " + attemptLabel +
-				"=owned-lockfile --id-label " + generationLabel + "=3"
-			if assignment.EffectiveConfiguration != "" {
-				upArgs += " --override-config " + assignment.EffectiveConfiguration
-			}
-			upArgs += " --skip-post-create"
-			script := fmt.Sprintf(`#!/bin/sh
-if [ "$*" = %q ]; then
-  [ ! -e %q ] || exit 93
-  printf 'read-effective\n' >>%q
-  printf '{"configuration":%%s}\n' "$(cat %q)"
-elif [ "$*" = %q ]; then
-  %s
-  printf 'up-fenced\n' >>%q
-  printf 'owned-component-stop-before-lifecycle\n' >&2
-  exit 47
-else
-  printf 'unexpected-cli\n' >>%q
-  exit 99
-fi
-`, readArgs, lockfile, trace, effectivePath, upArgs, check, trace, trace)
-			psArgs := "ps -aq --no-trunc --filter label=com.docker.compose.project=owned-lockfile --filter label=" + attemptLabel
-			docker := fmt.Sprintf("#!/bin/sh\n[ \"$*\" = %q ] || exit 99\nprintf 'empty-inventory\\n' >>%q\n", psArgs, trace)
-			for name, content := range map[string]string{"devcontainer": script, "docker": docker} {
-				if err := os.WriteFile(filepath.Join(bin, name), []byte(content), 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if scenario == "root-lockfile" {
-				if os.Geteuid() != 0 {
-					t.Skip("requires owned root fixture")
-				}
-				if err := os.WriteFile(lockfile, []byte("retained-root-lockfile"), 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// Invoke the normal production wrapper, not its portable test seam.
-			// The controlled CLI stops before Docker creation or any user hook.
-			_, err := startDevcontainer(context.Background(), assignment)
-			if scenario == "root-lockfile" {
-				if !errors.Is(err, errDevcontainerNotStarted) || !strings.Contains(err.Error(), "existing metadata retained") {
-					t.Fatalf("up did not refuse retained root metadata: %v", err)
-				}
-				if data, err := os.ReadFile(trace); err != nil || string(data) != "empty-inventory\n" {
-					t.Fatalf("root lockfile reached a CLI call: %q, %v", data, err)
-				}
-				if data, err := os.ReadFile(lockfile); err != nil || string(data) != "retained-root-lockfile" {
-					t.Fatal("up changed retained root metadata")
-				}
-				return
-			}
-			var exitError *exec.ExitError
-			if !errors.As(err, &exitError) || exitError.ExitCode() != 47 {
-				t.Fatalf("up did not reach its ownership-fenced boundary: %v", err)
-			}
-			if data, err := os.ReadFile(trace); err != nil || string(data) != "empty-inventory\nread-effective\nup-fenced\n" {
-				t.Fatalf("effective configuration was not re-read directly before up: %q, %v", data, err)
-			}
-			if data, err := os.ReadFile(config); err != nil || string(data) != authored {
-				t.Fatal("startup changed authored configuration instead of using the effective DTO")
-			}
-			if wantLock {
-				var stat unix.Stat_t
-				if err := unix.Lstat(lockfile, &stat); err != nil || stat.Uid != 1000 || stat.Gid != 1000 {
-					t.Fatalf("up lost Feature lockfile ownership: %v", err)
-				}
-				if data, err := os.ReadFile(lockfile); err != nil || string(data) != "owned-populated-feature-lock\n" {
-					t.Fatal("up lost populated Feature metadata on command failure")
-				}
-			} else if _, err := os.Lstat(lockfile); !os.IsNotExist(err) {
-				t.Fatalf("featureless effective up created metadata: %v", err)
-			}
-		})
-	}
-}
-
-func TestNativeLockfileFeaturelessConfigurationFailureLeavesNoReservation(t *testing.T) {
-	for _, failure := range []string{"command", "invalid-json", "cancelled"} {
-		t.Run(failure, func(t *testing.T) {
-			assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
-			bin := t.TempDir()
-			script := "#!/bin/sh\nexit 48\n"
-			if failure == "invalid-json" {
-				script = "#!/bin/sh\nprintf 'not-configuration\\n'\n"
-			}
-			if err := os.WriteFile(filepath.Join(bin, "devcontainer"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if failure == "cancelled" {
-				cancel()
-			}
-			if _, err := validateDevcontainerConfiguration(ctx, assignment, false); err == nil {
-				t.Fatal("failed configuration was accepted")
-			}
-			if _, err := os.Lstat(filepath.Join(assignment.WorkspaceFolder, ".devcontainer/devcontainer-lock.json")); !os.IsNotExist(err) {
-				t.Fatalf("failed/cancelled featureless configuration left an inode: %v", err)
-			}
-		})
-	}
-}
-
-func TestNativeLockfileReservationPreservesCLIWriteOwnershipAndSourceMetadata(t *testing.T) {
+func TestNativeLockfileReservationPreservesWriteOwnershipAndSourceMetadata(t *testing.T) {
 	for _, config := range []string{".devcontainer/devcontainer.json", ".devcontainer.json", "custom/config.json"} {
 		t.Run(config, func(t *testing.T) {
 			assignment := nativeLockfileFixture(t, config)
@@ -424,50 +105,38 @@ func TestNativeLockfileReservationPreservesCLIWriteOwnershipAndSourceMetadata(t 
 				t.Fatal(err)
 			}
 			if err := unix.Lstat(file, &after); err != nil || after.Uid != 1000 || after.Gid != 1000 || before.Ino != after.Ino {
-				t.Fatal("CLI write or repeated preparation changed ownership/inode")
+				t.Fatal("write or repeated preparation changed ownership/inode")
 			}
 			if data, err := os.ReadFile(file); err != nil || string(data) != "{\"features\":{}}\n" {
-				t.Fatal("existing CLI metadata was truncated or changed")
+				t.Fatal("existing lockfile metadata was truncated or changed")
 			}
 		})
 	}
 }
 
-func TestNativeLockfilePinnedCLIWriteAndFrozenVerification(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("native image qualification supplies Node and the pinned CLI")
-	}
-	cli := "/usr/local/lib/node_modules/@devcontainers/cli/dist/spec-node/devContainersSpecCLI.js"
-	if _, err := os.Stat(cli); err != nil {
-		t.Skip("requires the actual pinned runtime image")
-	}
+func TestNativeSourceRoundTripPreservesPreparedDependenciesAndLockfiles(t *testing.T) {
 	assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
 	if err := reserveNativeDevcontainerLockfile(assignment); err != nil {
 		t.Fatal(err)
 	}
-	// Execute the unmodified upstream lockfile functions from the pinned bundle,
-	// with no Docker socket, Project checkout, network or credentials. This checks
-	// generation and frozen verification, not only an equivalent write primitive.
-	script := `const fs=require('fs'),vm=require('vm'),util=require('util');
-	const source=fs.readFileSync(process.argv[1],'utf8');
-	const start=source.indexOf('async function sQ('),end=source.indexOf('var CQ=',start);
-	if(start<0||end<0)throw Error('Pinned CLI lockfile implementation changed');
-	const context={ag:require('path'),ee:util.promisify(fs.readFile),ye:util.promisify(fs.writeFile),Buffer};
-	vm.createContext(context);vm.runInContext(source.slice(start,end),context);
-	(async()=>{const config=process.argv[2],data={features:{'owned/local':{version:'1.0.0'}}};
-	await context.sQ({},config,data);await context.sQ({frozenLockfile:true},config,data);
-	const file=context.gQ(config),before=fs.readFileSync(file);
-	let denied=false;try{await context.sQ({frozenLockfile:true},config,{features:{}})}catch(e){if(e.message!=='Lockfile does not match.')throw e;denied=true;}
-	if(!denied||!before.equals(fs.readFileSync(file)))throw Error('Frozen verification did not preserve the exact lockfile');
-	})().catch(e=>{console.error(e);process.exitCode=1});`
-	command := exec.Command("node", "-e", script, cli, filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath))
-	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("pinned CLI metadata: %v %s", err, output)
+	// Exercise a real development-user shell, not the retired image producer or
+	// an emulation of upstream lockfile code. Source must preserve both its
+	// authored lockfiles and installed dependency bytes through a cold handoff.
+	command := ownedCommand(t.Context(), "/bin/sh", "-ec", `
+printf '%s\n' '{"features":{"owned/local":{"version":"1.0.0"}}}' >.devcontainer/devcontainer-lock.json
+printf '%s\n' '{"lockfileVersion":3}' >package-lock.json
+mkdir -p node_modules/owned
+printf '%s\n' 'module.exports="retained offline dependency";' >node_modules/owned/index.js
+`)
+	command.Dir = assignment.WorkspaceFolder
+	if os.Geteuid() == 0 {
+		command.SysProcAttr.Credential = &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{}}
 	}
-	var stat unix.Stat_t
-	if err := unix.Lstat(filepath.Join(assignment.WorkspaceFolder, ".devcontainer/devcontainer-lock.json"), &stat); err != nil || stat.Uid != 1000 || stat.Gid != 1000 || stat.Size == 0 {
-		t.Fatal("pinned CLI generated unsupported Source ownership")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("native preparation shell: %v %s", err, output)
+	}
+	if err := checkNativeDevcontainerLockfile(assignment); err != nil {
+		t.Fatal(err)
 	}
 	source, err := workspacefiles.Open(assignment.WorkspaceFolder)
 	if err != nil {
@@ -480,14 +149,27 @@ func TestNativeLockfilePinnedCLIWriteAndFrozenVerification(t *testing.T) {
 	}
 	defer archive.Close()
 	if _, err := source.ExportBundle(archive); err != nil {
-		t.Fatalf("actual CLI metadata cannot be completely exported: %v", err)
+		t.Fatalf("prepared Source cannot be completely exported: %v", err)
 	}
 	restored := filepath.Join(t.TempDir(), "project")
 	if err := workspacefiles.MaterializeBundle(archive, restored); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Lstat(filepath.Join(restored, ".devcontainer/devcontainer-lock.json"), &stat); err != nil || stat.Uid != 1000 || stat.Gid != 1000 || stat.Size == 0 {
-		t.Fatal("Source did not preserve actual CLI metadata ownership")
+	for name, expected := range map[string]string{
+		".devcontainer/devcontainer-lock.json": "{\"features\":{\"owned/local\":{\"version\":\"1.0.0\"}}}\n",
+		"package-lock.json":                    "{\"lockfileVersion\":3}\n",
+		"node_modules/owned/index.js":          "module.exports=\"retained offline dependency\";\n",
+	} {
+		path := filepath.Join(restored, name)
+		var before, after unix.Stat_t
+		if unix.Lstat(filepath.Join(assignment.WorkspaceFolder, name), &before) != nil ||
+			unix.Lstat(path, &after) != nil || after.Uid != 1000 || after.Gid != 1000 ||
+			before.Mode != after.Mode {
+			t.Fatalf("Source changed prepared file ownership or mode: %s", name)
+		}
+		if content, err := os.ReadFile(path); err != nil || string(content) != expected {
+			t.Fatalf("Source changed prepared dependency/lockfile bytes: %s: %v", name, err)
+		}
 	}
 }
 
@@ -537,12 +219,12 @@ func TestNativeLockfileReservationRefusesExistingUnsupportedMetadataWithoutMutat
 					t.Fatal(err)
 				}
 			case "parent-symlink":
-				assignment.DevcontainerPath = "linked/devcontainer.json"
+				assignment.ActorTemplatePath = "linked/devcontainer.json"
 				if err := os.Symlink(filepath.Dir(outside), filepath.Join(assignment.WorkspaceFolder, "linked")); err != nil {
 					t.Fatal(err)
 				}
 			case "escape":
-				assignment.DevcontainerPath = "../devcontainer.json"
+				assignment.ActorTemplatePath = "../devcontainer.json"
 			}
 			var before unix.Stat_t
 			unix.Lstat(file, &before)
@@ -561,20 +243,5 @@ func TestNativeLockfileReservationRefusesExistingUnsupportedMetadataWithoutMutat
 				t.Fatal("outside data changed")
 			}
 		})
-	}
-}
-
-func TestNativeConfigurationRefusesRootLockfileBeforeInvokingCLI(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires owned root fixture")
-	}
-	assignment := nativeLockfileFixture(t, ".devcontainer/devcontainer.json")
-	if err := os.WriteFile(filepath.Join(assignment.WorkspaceFolder, ".devcontainer/devcontainer-lock.json"), []byte("retained"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	// No executable is available: the ownership fence must win before CLI work.
-	t.Setenv("PATH", t.TempDir())
-	if _, err := validateDevcontainerConfiguration(context.Background(), assignment, false); err == nil || err.Error() != "native Dev Container lockfile ownership is unavailable; existing metadata retained" {
-		t.Fatalf("CLI invocation was not fenced by retained metadata: %v", err)
 	}
 }

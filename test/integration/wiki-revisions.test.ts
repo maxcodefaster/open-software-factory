@@ -59,7 +59,7 @@ test("Wiki saves deduplicate retry, reject stale writes and restore immutably wi
   try {
     for (const id of [userId, outsider])
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Wiki author',${`wiki-revisions-${id}@factory.local`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectId},${`wiki-revisions-${projectId}`},'Revision fixture','https://example.invalid/owned/wiki.git','main','.devcontainer/devcontainer.json',${userId})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${projectId},${`wiki-revisions-${projectId}`},'Revision fixture','https://example.invalid/owned/wiki.git','main','.factory/actor-template.json',${userId})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectId},${userId},'product-contributor',${userId})`;
     await database.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by) VALUES(${pageId},${projectId},'guide','Guide','Original.','Original.',${"a".repeat(40)},${userId})`;
     const saved = knowledgeSaveSchema.parse(

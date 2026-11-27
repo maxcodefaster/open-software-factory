@@ -46,9 +46,9 @@ export async function releaseInspection(fixture: Fixture) {
             text: [
               "Complete the missing browser acceptance on the existing welcome dashboard. Do not reimplement it.",
               "Read .factory/system.json. Its primaryApp web is browser channel app, not web.",
-              "Before editing, use browser_open app, browser_snapshot, browser_console and browser_screenshot. Read the returned JPEG with the native read tool. Stop and report an actionable failure if inspection is not confirmed.",
+              "Before editing, use browser_open app, browser_snapshot, browser_console and browser_screenshot. Inspect the returned inline image. Stop and report an actionable failure if inspection is not confirmed.",
               "Inspect the existing repository test setup, then add one focused dependency-free regression for the approved accessible Continue control below the heading in normal flow and preserved /health and /source behavior. Correct only a defect actually found by inspection. Preserve runtime configuration and version.",
-              "Run the regression and node --check src/server.mjs. After editing, reopen app and repeat DOM, console, screenshot and native JPEG read. Report actual observations with their returned App/checkout context. Do not commit or push.",
+              "Run the regression and node --check src/server.mjs. After editing, reopen app and repeat DOM, console and screenshot inspection using the returned inline image. Report actual observations with their returned App/checkout context. Do not commit or push.",
             ].join("\n"),
           },
         ],
@@ -98,18 +98,19 @@ export async function releaseInspection(fixture: Fixture) {
     SELECT prompt_id AS prompt FROM factory.change_agent_turn_intent WHERE turn_id = ${accepted.turn?.id ?? ""}`;
   const boundary = agent.messages.find((message) => message.id === intent?.prompt);
   expect(boundary?.role).toBe("user");
-  const reads = agent.messages.filter(
+  const screenshots = agent.messages.filter(
     (message) =>
       !!boundary &&
       message.at >= boundary.at &&
+      message.role === "tool" &&
       message.activity?.status === "completed" &&
-      message.text.startsWith("Read /tmp/factory-build-browser-") &&
-      message.text.endsWith("/screenshot.jpg"),
+      message.activity.name === "browser" &&
+      message.text === "screenshot",
   );
-  expect(reads.length).toBeGreaterThanOrEqual(2);
+  expect(screenshots.length).toBeGreaterThanOrEqual(2);
   await fixture.record("inspection-result", {
     turnID: accepted.turn?.id,
-    imageReads: reads.map(({ id, text }) => ({ id, text })),
+    screenshots: screenshots.map(({ id, text }) => ({ id, text })),
   });
   await fixture.save("inspection", performance.now() - started);
 }

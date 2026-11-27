@@ -1,15 +1,22 @@
+import { type BridgeDom, createBridgeDom } from "./preview-bridge-dom";
+import { type BridgeSession, createBridgeSession } from "./preview-bridge-state";
+
 // Runs on the isolated App origin, without Factory credentials or decision authority.
 export function previewBridge(origin: string) {
-  return `(${installPreviewBridge.toString()})(${JSON.stringify(origin)})`;
+  return `(${installPreviewBridge.toString()})(${JSON.stringify(origin)}, ${createBridgeSession.toString()}, ${createBridgeDom.toString()})`;
 }
 
-function installPreviewBridge(factoryOrigin: string) {
-  let documentId = crypto.randomUUID();
-  let currentPage = location.pathname;
+function installPreviewBridge(
+  factoryOrigin: string,
+  createSession: (initialPage: string) => BridgeSession,
+  createDom: (scriptSource: string | undefined) => BridgeDom,
+) {
   const scriptSource = (document.currentScript as HTMLScriptElement | null)?.src;
-  let lastUse = -Infinity;
+  const session = createSession(location.pathname);
+  const dom = createDom(scriptSource);
+
   const reportUse = () => {
-    if (document.hidden || !scriptSource || Date.now() - lastUse < 15_000) return;
+    if (document.hidden || !scriptSource || !session.claimActivity(Date.now())) return;
     const target = new URL(scriptSource);
     if (
       target.origin !== location.origin ||
@@ -18,7 +25,6 @@ function installPreviewBridge(factoryOrigin: string) {
       return;
     target.pathname = target.pathname.replace(/review-bridge\.js$/, "activity");
     target.search = "";
-    lastUse = Date.now();
     void fetch(target, {
       method: "POST",
       credentials: "same-origin",
@@ -31,276 +37,66 @@ function installPreviewBridge(factoryOrigin: string) {
   document.addEventListener("pointerdown", activity, { passive: true });
   document.addEventListener("wheel", activity, { passive: true });
   document.addEventListener("keydown", activity);
-  let token = "";
-  let mode = "";
-  let selected: Element | null = null;
-  let selectionId = "";
-  let renderer: Promise<void> | undefined;
-  let pins: Array<{ id: string; selector: string; label: string; element: string }> = [];
-  let accent = "Highlight";
-  let foreground = "HighlightText";
-  let fontFamily = "system-ui";
-  let fontSize = "13px";
-  const decoration = document.createElement("div");
-  decoration.dataset["factoryReview"] = "";
-  decoration.tabIndex = -1;
-  const outline = document.createElement("div");
-  outline.setAttribute("aria-hidden", "true");
-  Object.assign(outline.style, {
-    position: "fixed",
-    pointerEvents: "none",
-    border: "2px solid Highlight",
-    background: "transparent",
-    zIndex: "2147483646",
-    display: "none",
-    boxSizing: "border-box",
-    borderRadius: "4px",
-  });
-  const announcement = document.createElement("div");
-  announcement.setAttribute("role", "status");
-  announcement.setAttribute("aria-live", "polite");
-  Object.assign(announcement.style, {
-    position: "fixed",
-    width: "1px",
-    height: "1px",
-    overflow: "hidden",
-    clipPath: "inset(50%)",
-  });
-  const pinLayer = document.createElement("div");
-  decoration.append(outline, announcement, pinLayer);
-  function send(data: Record<string, unknown>) {
-    parent.postMessage({ ...data, token, documentId }, factoryOrigin);
+
+  const send = (data: Record<string, unknown>) => {
+    parent.postMessage(
+      { ...data, token: session.token(), documentId: session.documentId() },
+      factoryOrigin,
+    );
+  };
+
+  function invalidate() {
+    dom.hideOutline();
+    dom.clearPins();
+    if (session.invalidate(location.pathname))
+      send({ type: "factory-review-ready", page: session.page() });
   }
-  function label(node: Element) {
-    const referenced = (node.getAttribute("aria-labelledby") ?? "")
-      .split(/\s+/)
-      .slice(0, 5)
-      .map((id) => document.getElementById(id)?.textContent ?? "")
-      .join(" ");
-    const field =
-      node instanceof HTMLInputElement ||
-      node instanceof HTMLSelectElement ||
-      node instanceof HTMLTextAreaElement;
-    const name = (
-      node.getAttribute("aria-label") ||
-      referenced.trim() ||
-      (field ? [...(node.labels ?? [])].map((item) => item.textContent).join(" ") : "") ||
-      node.getAttribute("alt") ||
-      node.textContent ||
-      ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-    const role = field
-      ? node instanceof HTMLInputElement && node.type === "checkbox"
-        ? "checkbox"
-        : "field"
-      : node.matches("button,[role=button]")
-        ? "button"
-        : node.matches("a[href]")
-          ? "link"
-          : "";
-    return (name ? `${name}${role ? ` ${role}` : ""}` : "Selected area").trim().slice(0, 1_000);
-  }
-  function selector(node: Element) {
-    const path: string[] = [];
-    for (
-      let current: Element | null = node;
-      current && path.length < 12;
-      current = current.parentElement
-    ) {
-      if (current === document.documentElement) {
-        path.unshift("html");
-        break;
-      }
-      if (current.id && document.querySelectorAll(`#${CSS.escape(current.id)}`).length === 1) {
-        path.unshift(`#${CSS.escape(current.id)}`);
-        break;
-      }
-      const siblings = current.parentElement
-        ? [...current.parentElement.children].filter((item) => item.tagName === current.tagName)
-        : [];
-      path.unshift(
-        `${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`,
-      );
-    }
-    const value = path.join(" > ");
-    return value.length <= 1_000 ? value : undefined;
-  }
-  function targets() {
-    return [
-      ...document.querySelectorAll(
-        "h1,h2,h3,p,label,button,a,input,select,textarea,[role=button],[tabindex]",
-      ),
-    ]
-      .filter(
-        (node) =>
-          !decoration.contains(node) &&
-          node.getBoundingClientRect().width > 0 &&
-          node.getBoundingClientRect().height > 0,
-      )
-      .slice(0, 2_000)
-      .concat([...pinLayer.querySelectorAll("button")]);
-  }
-  function show(node: Element) {
-    const rect = node.getBoundingClientRect();
-    Object.assign(outline.style, {
-      display: "block",
-      left: `${rect.x}px`,
-      top: `${rect.y}px`,
-      width: `${rect.width}px`,
-      height: `${rect.height}px`,
-    });
-  }
+
   function drawPins() {
-    pinLayer.replaceChildren();
-    if (!mode) return;
-    if (location.pathname !== currentPage) {
+    if (!session.isActive()) {
+      dom.clearPins();
+      return;
+    }
+    if (location.pathname !== session.page()) {
       invalidate();
       return;
     }
-    for (const pin of pins) {
-      let node: Element | null = null;
-      try {
-        node = document.querySelector(pin.selector);
-      } catch {
-        /* No arbitrary script evaluation. */
-      }
-      if (!node || decoration.contains(node) || label(node) !== pin.element) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.bottom < 0 || rect.top > innerHeight || !rect.width || !rect.height) continue;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = pin.label;
-      button.dataset["feedbackId"] = pin.id;
-      button.setAttribute("aria-label", `Open feedback ${pin.label}`);
-      Object.assign(button.style, {
-        position: "fixed",
-        left: `${Math.min(innerWidth - 32, Math.max(0, rect.right - 14))}px`,
-        top: `${Math.max(0, rect.top - 14)}px`,
-        width: "32px",
-        height: "32px",
-        border: `2px solid ${foreground}`,
-        borderRadius: "50% 50% 50% 3px",
-        background: accent,
-        color: foreground,
-        fontFamily,
-        fontSize,
-        zIndex: "2147483647",
-        cursor: "pointer",
-      });
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        send({ type: "factory-review-open-feedback", feedbackId: pin.id });
-      });
-      pinLayer.append(button);
-    }
+    dom.drawPins(session.pins(), session.theme(), (feedbackId) =>
+      send({ type: "factory-review-open-feedback", feedbackId }),
+    );
   }
-  function loadRenderer() {
-    renderer ??= new Promise<void>((resolve, reject) => {
-      if (!scriptSource) return reject(new Error("Context renderer is unavailable"));
-      const script = document.createElement("script");
-      script.dataset["factoryReview"] = "";
-      script.src = new URL("./review-renderer.js", scriptSource).href;
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error("App policy did not allow a context image"));
-      document.head.append(script);
-    });
-    return renderer;
-  }
-  async function contextImage(node: Element, id: string, page: string) {
-    const requestToken = token;
+
+  async function captureContextImage(node: Element, id: string, page: string) {
+    const requestToken = session.token();
     try {
-      // Supplementary element context, never exact-candidate screenshot proof.
-      const target = node.closest("label") ?? node;
-      const rect = target.getBoundingClientRect();
-      if (
-        rect.width > 2560 ||
-        rect.height > 1600 ||
-        target.querySelectorAll("*").length > 2000 ||
-        target.matches('input[type="password"],iframe,canvas,video')
-      )
-        throw new Error("Element exceeds the context image bound");
-      await Promise.race([
-        loadRenderer(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Context image timed out")), 3_000),
-        ),
-      ]);
-      if (selectionId !== id || token !== requestToken || location.pathname !== page) return;
-      const library = (
-        globalThis as unknown as {
-          modernScreenshot?: {
-            createContext(
-              node: Element,
-              options: Record<string, unknown>,
-            ): Promise<{ sandbox?: HTMLIFrameElement }>;
-            domToJpeg(context: { sandbox?: HTMLIFrameElement }): Promise<string>;
-            destroyContext(context: { sandbox?: HTMLIFrameElement }): void;
-          };
-        }
-      ).modernScreenshot;
-      if (!library) throw new Error("Context renderer unavailable");
-      const context = await library.createContext(target, {
-        type: "image/jpeg",
-        quality: 0.86,
-        scale: 1,
-        timeout: 2_000,
-        maximumCanvasSize: 2560,
-        backgroundColor: getComputedStyle(document.body).backgroundColor,
-        filter: (child: Node) =>
-          !(child instanceof Element) ||
-          (!decoration.contains(child) &&
-            !child.matches('input[type="password"],script,iframe,video,canvas')),
-        onCloneEachNode: (child: Node) => {
-          if (child instanceof HTMLInputElement && child.type === "password") child.value = "";
-        },
-      });
-      // The renderer uses a hidden document to compare default styles. Own that
-      // node so its insertion/removal cannot masquerade as an App state change.
-      const styles = document.createElement("iframe");
-      styles.setAttribute("aria-hidden", "true");
-      styles.tabIndex = -1;
-      Object.assign(styles.style, {
-        position: "fixed",
-        width: "0",
-        height: "0",
-        visibility: "hidden",
-      });
-      decoration.append(styles);
-      context.sandbox = styles;
-      let image: string;
-      try {
-        image = await library.domToJpeg(context);
-      } finally {
-        library.destroyContext(context);
-        styles.remove();
-      }
-      if (selectionId !== id || token !== requestToken || location.pathname !== page) return;
-      if (!image.startsWith("data:image/jpeg;base64,") || image.length > 2_800_000)
-        throw new Error("Context image exceeds its bound");
-      send({ type: "factory-review-context-image", selectionId: id, image });
+      const image = await dom.renderContextImage(
+        node,
+        () => session.loadRenderer(dom.loadRendererScript),
+        () => session.isSelectionCurrent(id, requestToken, page),
+      );
+      if (image !== undefined)
+        send({ type: "factory-review-context-image", selectionId: id, image });
     } catch {
-      if (selectionId === id && token === requestToken)
+      if (session.isSelectionCurrent(id, requestToken))
         send({ type: "factory-review-context-image", selectionId: id, image: null });
     }
   }
+
   function choose(node: Element) {
     const rect = node.getBoundingClientRect();
     const x = Math.max(0, Math.min(innerWidth - 1, rect.x));
     const y = Math.max(0, Math.min(innerHeight - 1, rect.y));
-    selectionId = crypto.randomUUID();
-    mode = "selected";
-    show(node);
-    announcement.textContent = "";
+    const selectionId = crypto.randomUUID();
+    session.choose(node, selectionId);
+    dom.showOutline(node);
+    dom.announce("");
     const page = location.pathname;
     send({
       type: "factory-review-selection",
       selectionId,
       page,
-      element: label(node),
-      selector: selector(node),
+      element: dom.label(node),
+      selector: dom.selector(node),
       region: {
         x: x / innerWidth,
         y: y / innerHeight,
@@ -308,8 +104,9 @@ function installPreviewBridge(factoryOrigin: string) {
         height: Math.max(1, Math.min(rect.height, innerHeight - y)) / innerHeight,
       },
     });
-    void contextImage(node, selectionId, page);
+    void captureContextImage(node, selectionId, page);
   }
+
   window.addEventListener("message", (event) => {
     if (
       event.isTrusted &&
@@ -327,170 +124,122 @@ function installPreviewBridge(factoryOrigin: string) {
     )
       return;
     if (event.data.type === "factory-review-focus-feedback") {
-      if (event.data.token !== token || event.data.documentId !== documentId) return;
-      const button = [...pinLayer.querySelectorAll("button")].find(
-        (node) => node.dataset["feedbackId"] === event.data.feedbackId,
-      );
+      if (!session.matchesParent(event.data.token, event.data.documentId)) return;
+      const button = dom.findPinButton(event.data.feedbackId);
       if (button) {
-        selected = button;
+        session.focusElement(button);
         button.focus({ preventScroll: true });
       }
       return;
     }
     if (event.data.type === "factory-review-pins") {
       if (
-        event.data.token !== token ||
-        event.data.documentId !== documentId ||
+        !session.matchesParent(event.data.token, event.data.documentId) ||
         !Array.isArray(event.data.pins)
       )
         return;
-      pins = event.data.pins
-        .slice(0, 100)
-        .filter((pin: unknown): pin is (typeof pins)[number] =>
-          Boolean(
-            pin &&
-              typeof pin === "object" &&
-              "id" in pin &&
-              typeof pin.id === "string" &&
-              "selector" in pin &&
-              typeof pin.selector === "string" &&
-              pin.selector.length <= 1_000 &&
-              "label" in pin &&
-              typeof pin.label === "string" &&
-              pin.label.length <= 12 &&
-              "element" in pin &&
-              typeof pin.element === "string" &&
-              pin.element.length <= 1000,
-          ),
-        );
+      session.setPins(event.data.pins);
       drawPins();
       return;
     }
     if (event.data.type !== "factory-review-select") return;
-    token = event.data.token;
-    mode = event.data.mode === "element" ? "element" : "";
-    const theme = event.data.theme;
-    if (theme && typeof theme === "object") {
-      const color = (value: unknown) =>
-        typeof value === "string" && value.length <= 80 && CSS.supports("color", value);
-      if (color(theme.accent)) accent = theme.accent;
-      if (color(theme.foreground)) foreground = theme.foreground;
-      if (
-        typeof theme.fontFamily === "string" &&
-        theme.fontFamily.length <= 256 &&
-        CSS.supports("font-family", theme.fontFamily)
-      )
-        fontFamily = theme.fontFamily;
-      if (typeof theme.fontSize === "string" && /^(?:1[0-9]|20)px$/.test(theme.fontSize))
-        fontSize = theme.fontSize;
-      outline.style.borderColor = accent;
-      outline.style.backgroundColor = `color-mix(in srgb, ${accent} 8%, transparent)`;
+    if (session.applyTheme(event.data.theme)) dom.applyTheme(session.theme());
+    dom.hideOutline();
+    dom.ensureAttached();
+    const initial = event.data.mode === "element" ? (dom.targets()[0] ?? document.body) : null;
+    const phase = session.enterSelect(event.data.token, event.data.mode, initial);
+    if (phase.kind === "waiting" && phase.selected) {
+      dom.showOutline(phase.selected);
+      dom.focusDecoration();
+      dom.announce("Comment mode. Tab changes element, Enter selects, Escape exits.");
+    } else {
+      dom.announce("");
     }
-    selectionId = "";
-    outline.style.display = "none";
-    if (!decoration.isConnected) document.documentElement.append(decoration);
-    if (mode) {
-      selected = targets()[0] ?? document.body;
-      show(selected);
-      decoration.focus({ preventScroll: true });
-      announcement.textContent = "Comment mode. Tab changes element, Enter selects, Escape exits.";
-    } else announcement.textContent = "";
     drawPins();
     send({ type: "factory-review-ready", page: location.pathname });
   });
+
   window.addEventListener(
     "pointermove",
     (event) => {
-      if (
-        mode === "element" &&
-        event.target instanceof Element &&
-        !decoration.contains(event.target)
-      ) {
-        selected = event.target;
-        show(selected);
+      if (session.isWaiting() && event.target instanceof Element && !dom.contains(event.target)) {
+        session.hover(event.target);
+        dom.showOutline(event.target);
       }
     },
     true,
   );
+
   for (const name of ["pointerdown", "pointerup", "click"] as const) {
     window.addEventListener(
       name,
       (event) => {
-        if (!mode || decoration.contains(event.target as Node)) return;
+        if (!session.isActive() || dom.contains(event.target as Node)) return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (name === "click" && mode === "element" && event.target instanceof Element) {
-          selected = event.target;
-          choose(selected);
+        if (name === "click" && session.isWaiting() && event.target instanceof Element) {
+          session.hover(event.target);
+          choose(event.target);
         }
       },
       true,
     );
   }
+
   window.addEventListener(
     "keydown",
     (event) => {
-      if (!mode) return;
+      if (!session.isActive()) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.key === "Escape") {
-        mode = "";
-        selectionId = "";
-        outline.style.display = "none";
+        session.cancel();
+        dom.hideOutline();
         drawPins();
         send({ type: "factory-review-cancel" });
-      } else if (mode === "element" && event.key === "Tab") {
-        const nodes = targets();
-        const index = selected ? nodes.indexOf(selected) : -1;
-        selected = nodes[(index + (event.shiftKey ? -1 : 1) + nodes.length) % nodes.length] ?? null;
-        if (selected) {
-          selected.scrollIntoView({ block: "nearest", inline: "nearest" });
-          show(selected);
-          announcement.textContent = label(selected);
+      } else if (session.isWaiting() && event.key === "Tab") {
+        const nodes = dom.targets();
+        const current = session.selectedElement();
+        const index = current ? nodes.indexOf(current) : -1;
+        const next =
+          nodes[(index + (event.shiftKey ? -1 : 1) + nodes.length) % nodes.length] ?? null;
+        session.hover(next);
+        if (next) {
+          next.scrollIntoView({ block: "nearest", inline: "nearest" });
+          dom.showOutline(next);
+          dom.announce(dom.label(next));
         }
-      } else if (mode === "element" && selected && (event.key === "Enter" || event.key === " ")) {
-        if (selected instanceof HTMLButtonElement && pinLayer.contains(selected)) selected.click();
-        else choose(selected);
+      } else if (session.isWaiting() && (event.key === "Enter" || event.key === " ")) {
+        const current = session.selectedElement();
+        if (!current) return;
+        if (dom.isPinButton(current)) current.click();
+        else choose(current);
       }
     },
     true,
   );
-  let scheduled = false;
-  const position = () => {
-    if (scheduled || !mode) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      if (selected && mode) show(selected);
+
+  const reposition = () =>
+    session.scheduleFrame(() => {
+      const current = session.selectedElement();
+      if (current && session.isActive()) dom.showOutline(current);
       drawPins();
     });
-  };
-  window.addEventListener("scroll", position, true);
-  window.addEventListener("resize", position);
-  function invalidate() {
-    documentId = crypto.randomUUID();
-    currentPage = location.pathname;
-    pins = [];
-    selectionId = "";
-    outline.style.display = "none";
-    pinLayer.replaceChildren();
-    if (token) send({ type: "factory-review-ready", page: currentPage });
-  }
+  window.addEventListener("scroll", reposition, true);
+  window.addEventListener("resize", reposition);
   window.addEventListener("input", invalidate, true);
   window.addEventListener("change", invalidate, true);
   window.addEventListener("popstate", invalidate);
   const navigation = (window as unknown as { navigation?: EventTarget }).navigation;
   navigation?.addEventListener("currententrychange", invalidate);
-  const owned = (node: Node) =>
-    decoration.contains(node) ||
-    (node instanceof Element && Boolean(node.closest("[data-factory-review]")));
+
   new MutationObserver((records) => {
     if (
       records.some(
         (record) =>
-          !owned(record.target) &&
+          !dom.isOwned(record.target) &&
           (record.type !== "childList" ||
-            [...record.addedNodes, ...record.removedNodes].some((node) => !owned(node))),
+            [...record.addedNodes, ...record.removedNodes].some((node) => !dom.isOwned(node))),
       )
     )
       invalidate();
@@ -500,6 +249,7 @@ function installPreviewBridge(factoryOrigin: string) {
     attributes: true,
     subtree: true,
   });
+
   // Factory appends this script after the complete HTML document. Show that
   // delivered content without waiting for deferred App modules to finish.
   // This acknowledges document delivery, not App health or hydration.

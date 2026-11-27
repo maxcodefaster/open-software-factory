@@ -30,8 +30,8 @@ test.skipIf(!live)(
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${manager},'Owned public MCP proof',${`${manager}@public-mcp.test`},true)`;
       await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`public-mcp-${project}`},'Owned public MCP proof','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${manager})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`public-mcp-${project}`},'Owned public MCP proof','https://example.invalid/owned.git','main','.factory/actor-template.json',${manager})`;
       await connections.library.save(
         {
           libraryId: id,

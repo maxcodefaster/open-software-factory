@@ -1,29 +1,27 @@
 import { createHmac } from "node:crypto";
-import { and, count, desc, eq, inArray, isNotNull, ne, or, sql as typedSQL } from "drizzle-orm";
+import { and, count, desc, eq, inArray, ne, or, sql as typedSQL } from "drizzle-orm";
 import { z } from "zod";
-import type { IdentityPolicy } from "../../../../packages/auth/src/policy";
-import { createFactoryAuth } from "../../../../packages/auth/src/server";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  administrator,
-  authSession,
-  identityConfiguration as configurationTable,
-  identitySetup,
-} from "../../../../packages/db/src/schema";
+import type { IdentityPolicy } from "#auth/policy";
+import { createFactoryAuth } from "#auth/server";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { administrator, authSession, operation } from "#db/schema";
 import {
   type IdentityConfiguration,
   identityConfiguration,
   identityConfigurationView,
   identityConfigurationWrite,
   identityMetadata,
-} from "../../../../packages/identity-domain/src/configuration";
+} from "#identity-domain/configuration";
 import { CommandError } from "../command-error";
 import { createOpenBaoKV } from "../secrets/openbao";
 import { requireActiveAccountIn } from "./authority";
+
+const IDENTITY_SETUP_KIND = "access.identity_setup";
+const IDENTITY_CONFIGURATION_KIND = "access.identity_configuration";
+const IDENTITY_CONFIGURATION_KEY = "access.identity_configuration:singleton";
+const INSTALLATION_SCOPE_ID = "00000000-0000-0000-0000-000000000000";
+const identitySetupKey = (id: string) => `${IDENTITY_SETUP_KIND}:${id}`;
+const identitySetupSecretKey = (secretKey: string) => `${IDENTITY_SETUP_KIND}.secret:${secretKey}`;
 
 const storedIdentity = z
   .object({ commandID: z.uuid(), fingerprint: z.string(), configuration: identityConfiguration })
@@ -88,14 +86,14 @@ export function createIdentityConfiguration(
   let recoveringActive = false;
   const candidates = new Map<string, ReturnType<typeof createFactoryAuth>>();
   const setupFields = {
-    id: identitySetup.id,
-    baseVersion: identitySetup.baseVersion,
-    metadata: typedSQL<Setup["metadata"]>`${identitySetup.metadata}`,
-    fingerprint: identitySetup.fingerprint,
-    secretKey: identitySetup.secretKey,
-    createdBy: identitySetup.createdBy,
-    state: typedSQL<Setup["state"]>`${identitySetup.state}`,
-    tested: typedSQL<boolean>`${isNotNull(identitySetup.testedAt)}`,
+    id: operation.id,
+    baseVersion: typedSQL<number>`(${operation.payload}->>'baseVersion')::bigint::float8`,
+    metadata: typedSQL<Setup["metadata"]>`${operation.payload}->'metadata'`,
+    fingerprint: typedSQL<string>`${operation.payload}->>'fingerprint'`,
+    secretKey: typedSQL<string>`${operation.payload}->>'secretKey'`,
+    createdBy: typedSQL<string>`${operation.createdBy}`,
+    state: typedSQL<Setup["state"]>`${operation.state}`,
+    tested: typedSQL<boolean>`(${operation.payload}->>'testedAt') IS NOT NULL`,
   };
   async function manager(sql: DatabaseTransaction, userID: string) {
     await requireActiveAccountIn(sql, userID);
@@ -109,8 +107,8 @@ export function createIdentityConfiguration(
   async function setup(id: string) {
     const [row] = await database.db
       .select(setupFields)
-      .from(identitySetup)
-      .where(eq(identitySetup.id, id));
+      .from(operation)
+      .where(and(eq(operation.id, id), eq(operation.kind, IDENTITY_SETUP_KIND)));
     if (!row) throw new CommandError("not-found", "Sign-in setup not found");
     return row;
   }
@@ -125,9 +123,17 @@ export function createIdentityConfiguration(
   }
   async function refresh() {
     const [current] = await database.db
-      .select({ version: configurationTable.version, setupID: configurationTable.setupId })
-      .from(configurationTable)
-      .where(eq(configurationTable.singleton, true));
+      .select({
+        version: typedSQL<number>`(${operation.payload}->>'version')::bigint::float8`,
+        setupID: typedSQL<string>`${operation.payload}->>'setupId'`,
+      })
+      .from(operation)
+      .where(
+        and(
+          eq(operation.kind, IDENTITY_CONFIGURATION_KIND),
+          eq(operation.idempotencyKey, IDENTITY_CONFIGURATION_KEY),
+        ),
+      );
     if (!current || (current.version === activeVersion && !recoveringActive)) return;
     const row = await setup(current.setupID);
     try {
@@ -154,9 +160,15 @@ export function createIdentityConfiguration(
     const configuration = await stored(row);
     if (row.state === "write-intended")
       await database.db
-        .update(identitySetup)
-        .set({ state: "saved" })
-        .where(and(eq(identitySetup.id, row.id), eq(identitySetup.state, "write-intended")));
+        .update(operation)
+        .set({ state: "saved", updatedAt: typedSQL`now()` })
+        .where(
+          and(
+            eq(operation.id, row.id),
+            eq(operation.kind, IDENTITY_SETUP_KIND),
+            eq(operation.state, "write-intended"),
+          ),
+        );
     if (row.state === "write-intended" || row.state === "saved")
       candidates.set(
         row.id,
@@ -175,10 +187,15 @@ export function createIdentityConfiguration(
     },
     async recover() {
       const rows = await database.db
-        .select({ id: identitySetup.id })
-        .from(identitySetup)
-        .where(inArray(identitySetup.state, ["saved", "write-intended"]))
-        .orderBy(identitySetup.createdAt)
+        .select({ id: operation.id })
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, IDENTITY_SETUP_KIND),
+            inArray(operation.state, ["saved", "write-intended"]),
+          ),
+        )
+        .orderBy(operation.createdAt)
         .limit(16);
       for (const row of rows) {
         const input = await setup(row.id);
@@ -287,9 +304,14 @@ export function createIdentityConfiguration(
       await database.client.begin((sql) => manager(sql, userID));
       await refresh();
       const [current] = await database.db
-        .select({ setupID: configurationTable.setupId })
-        .from(configurationTable)
-        .where(eq(configurationTable.singleton, true));
+        .select({ setupID: typedSQL<string>`${operation.payload}->>'setupId'` })
+        .from(operation)
+        .where(
+          and(
+            eq(operation.kind, IDENTITY_CONFIGURATION_KIND),
+            eq(operation.idempotencyKey, IDENTITY_CONFIGURATION_KEY),
+          ),
+        );
       const metadata: ReturnType<typeof identityMetadata> = current
         ? (await setup(current.setupID)).metadata
         : { mode: "local", sessionDays: 7, directoryEnabled: false, directorySubjectClaim: "oid" };
@@ -300,14 +322,15 @@ export function createIdentityConfiguration(
           state: setupFields.state,
           tested: setupFields.tested,
         })
-        .from(identitySetup)
+        .from(operation)
         .where(
           and(
-            eq(identitySetup.createdBy, userID),
-            inArray(identitySetup.state, ["write-intended", "saved"]),
+            eq(operation.kind, IDENTITY_SETUP_KIND),
+            eq(operation.createdBy, userID),
+            inArray(operation.state, ["write-intended", "saved"]),
           ),
         )
-        .orderBy(desc(identitySetup.createdAt))
+        .orderBy(desc(operation.createdAt))
         .limit(16);
       return identityConfigurationView.parse({
         version: activeVersion,
@@ -353,23 +376,35 @@ export function createIdentityConfiguration(
         await manager(sql, userID);
         const [old] = await db
           .select(setupFields)
-          .from(identitySetup)
-          .where(eq(identitySetup.id, input.commandID));
+          .from(operation)
+          .where(and(eq(operation.id, input.commandID), eq(operation.kind, IDENTITY_SETUP_KIND)));
         if (old) {
           if (old.fingerprint !== fingerprint || old.createdBy !== userID)
             throw new CommandError("conflict", "Sign-in save identity was reused");
           return old;
         }
         const [current] = await db
-          .select({ version: configurationTable.version })
-          .from(configurationTable)
-          .where(eq(configurationTable.singleton, true));
+          .select({
+            version: typedSQL<number>`(${operation.payload}->>'version')::bigint::float8`,
+          })
+          .from(operation)
+          .where(
+            and(
+              eq(operation.kind, IDENTITY_CONFIGURATION_KIND),
+              eq(operation.idempotencyKey, IDENTITY_CONFIGURATION_KEY),
+            ),
+          );
         if ((current?.version ?? 0) !== input.version)
           throw new CommandError("conflict", "Sign-in settings changed. Reload before saving");
         const [unfinished] = await db
           .select({ count: count() })
-          .from(identitySetup)
-          .where(inArray(identitySetup.state, ["saved", "write-intended"]));
+          .from(operation)
+          .where(
+            and(
+              eq(operation.kind, IDENTITY_SETUP_KIND),
+              inArray(operation.state, ["saved", "write-intended"]),
+            ),
+          );
         if ((unfinished?.count ?? 0) >= 16)
           throw new CommandError(
             "conflict",
@@ -377,14 +412,23 @@ export function createIdentityConfiguration(
           );
         const metadata = identityMetadata(input.configuration);
         const secretKey = `identity/${input.commandID}`;
-        await db.insert(identitySetup).values({
+        await db.insert(operation).values({
           id: input.commandID,
-          baseVersion: input.version,
-          metadata,
-          fingerprint,
-          secretKey,
-          createdBy: userID,
+          kind: IDENTITY_SETUP_KIND,
+          scopeType: "installation",
+          scopeId: INSTALLATION_SCOPE_ID,
+          idempotencyKey: identitySetupKey(input.commandID),
+          activeKey: identitySetupSecretKey(secretKey),
           state: "write-intended",
+          createdBy: userID,
+          payload: {
+            baseVersion: input.version,
+            metadata,
+            fingerprint,
+            secretKey,
+            testedAt: null,
+            testedUserId: null,
+          },
         });
         return {
           id: input.commandID,
@@ -420,13 +464,27 @@ export function createIdentityConfiguration(
         await manager(sql, userID);
         const [target] = await db
           .select({ state: setupFields.state, tested: setupFields.tested })
-          .from(identitySetup)
-          .where(and(eq(identitySetup.id, commandID), eq(identitySetup.createdBy, userID)))
+          .from(operation)
+          .where(
+            and(
+              eq(operation.id, commandID),
+              eq(operation.kind, IDENTITY_SETUP_KIND),
+              eq(operation.createdBy, userID),
+            ),
+          )
           .for("update");
         const [current] = await db
-          .select({ version: configurationTable.version, setupID: configurationTable.setupId })
-          .from(configurationTable)
-          .where(eq(configurationTable.singleton, true))
+          .select({
+            version: typedSQL<number>`(${operation.payload}->>'version')::bigint::float8`,
+            setupID: typedSQL<string>`${operation.payload}->>'setupId'`,
+          })
+          .from(operation)
+          .where(
+            and(
+              eq(operation.kind, IDENTITY_CONFIGURATION_KIND),
+              eq(operation.idempotencyKey, IDENTITY_CONFIGURATION_KEY),
+            ),
+          )
           .for("update");
         if (current?.setupID === commandID) return;
         if (
@@ -439,20 +497,40 @@ export function createIdentityConfiguration(
             "Complete the sign-in check before activating this configuration",
           );
         await db
-          .update(identitySetup)
-          .set({ state: "superseded" })
-          .where(eq(identitySetup.state, "active"));
+          .update(operation)
+          .set({ state: "superseded", updatedAt: typedSQL`now()` })
+          .where(and(eq(operation.kind, IDENTITY_SETUP_KIND), eq(operation.state, "active")));
         await db
-          .update(identitySetup)
-          .set({ state: "active" })
-          .where(eq(identitySetup.id, commandID));
-        const activated = { version: row.baseVersion + 1, setupId: commandID, activatedBy: userID };
+          .update(operation)
+          .set({ state: "active", completedAt: typedSQL`now()`, updatedAt: typedSQL`now()` })
+          .where(and(eq(operation.id, commandID), eq(operation.kind, IDENTITY_SETUP_KIND)));
+        const activatedPayload = {
+          version: row.baseVersion + 1,
+          setupId: commandID,
+          activatedBy: userID,
+          activatedAt: new Date().toISOString(),
+        };
         await db
-          .insert(configurationTable)
-          .values({ singleton: true, ...activated })
+          .insert(operation)
+          .values({
+            id: crypto.randomUUID(),
+            kind: IDENTITY_CONFIGURATION_KIND,
+            scopeType: "installation",
+            scopeId: INSTALLATION_SCOPE_ID,
+            idempotencyKey: IDENTITY_CONFIGURATION_KEY,
+            activeKey: null,
+            state: "active",
+            createdBy: userID,
+            payload: activatedPayload,
+          })
           .onConflictDoUpdate({
-            target: configurationTable.singleton,
-            set: { ...activated, activatedAt: typedSQL`now()` },
+            target: operation.idempotencyKey,
+            set: {
+              state: "active",
+              createdBy: userID,
+              payload: activatedPayload,
+              updatedAt: typedSQL`now()`,
+            },
           });
         // Existing password sessions cannot become a bypass for newly enabled company SSO.
         await db

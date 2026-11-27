@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -9,10 +10,6 @@ import {
   observeActorRPCIn,
 } from "../../apps/factory/src/runtime/substrate-rpc-facts";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { substrateFixture } from "../fixtures/substrate";
@@ -158,18 +155,17 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
     actor = original;
     await f.database.client.begin(async (sql) => {
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,
-        revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        revision,state,parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent,actor_uid,create_attempted_at,observation)
         VALUES(${f.attemptID},${f.projectID},${f.workspaceID},${f.changeID},1,${"a".repeat(40)},
-          'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
-        actor_uid,create_attempted_at,observation)
-        VALUES(${f.attemptID},${f.atespace},${original.metadata.name},${JSON.stringify({
-          ...f.config,
-          actorSelector: f.config.workerSelector,
-          environment: { version: 0, secretKey: null },
-          declaredApps: ["app"],
-          egressHosts: f.config.egressHosts ?? [],
-        })}::text::jsonb,${original.metadata.uid},${original.metadata.createTime},${JSON.stringify(original)}::text::jsonb)`;
+          'create-intended',${"b".repeat(64)},now(),${f.userID},
+          ${f.atespace},${original.metadata.name},${JSON.stringify({
+            ...f.config,
+            actorSelector: f.config.workerSelector,
+            environment: { version: 0, secretKey: null },
+            declaredApps: ["app"],
+            egressHosts: f.config.egressHosts ?? [],
+          })}::text::jsonb,${original.metadata.uid},${original.metadata.createTime},${JSON.stringify(original)}::text::jsonb)`;
       const resume = await intendActorRPCIn(sql, f.attemptID, "resume", null, original);
       await dispatchActorRPCIn(sql, f.attemptID, resume);
       original.metadata.version = "2";
@@ -178,8 +174,8 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
         lastAssignedGeneration: 0,
         workerAssignment: { sandboxRuntime: f.config.runtime },
       };
-      await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(original)}::text::jsonb
-        WHERE runtime_attempt_id=${f.attemptID}`;
+      await sql`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(original)}::text::jsonb
+        WHERE id=${f.attemptID}`;
       await observeActorRPCIn(sql, f.attemptID, resume, original);
       await sql`UPDATE factory.runtime_attempt SET state='ready',ready_at=now() WHERE id=${f.attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
@@ -349,9 +345,8 @@ test("writer retry settles the confirmed original OpenCode input tree before nat
       SELECT runtime_attempt_id FROM factory.change_agent_turn_intent WHERE turn_id=${retry.turn.id}`;
     expect(intent).toEqual({ runtime_attempt_id: null });
     const [stopped] = await f.database.client`
-      SELECT attempt.state,binding.actor_uid,binding.deleted_at IS NOT NULL AS deleted
-      FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding
-        ON binding.runtime_attempt_id=attempt.id WHERE attempt.id=${f.attemptID}`;
+      SELECT state,actor_uid,deleted_at IS NOT NULL AS deleted
+      FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(stopped).toEqual({ state: "stopped", actor_uid: original.metadata.uid, deleted: true });
   } finally {
     try {

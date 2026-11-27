@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { candidateReviewPermissions } from "#conversation-domain/candidate-review";
+import { createDatabase, type DatabaseTransaction } from "#db/client";
+import { nativeLifecycleWindowMS } from "#runtime-domain/timing";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import type { RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import type { SubstrateInstallationConfiguration } from "../../apps/factory/src/runtime/substrate-workspaces";
-import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
-import { type DatabaseTransaction, createDatabase } from "../../packages/db/src/client";
-import { nativeLifecycleWindowMS } from "../../packages/runtime-domain/src/timing";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { eventually } from "../fixtures/factory-process";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
@@ -122,13 +122,18 @@ async function appReview(apps: boolean | "missing" | "partial" | "multiple" = tr
                     const text = Array.isArray(args[0]) ? args[0].join(" ") : "";
                     if (text.includes("INSERT INTO factory.runtime_attempt")) {
                       return (async () => {
-                        await sql`INSERT INTO factory.branch_create_operation(
-                  id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-                  SELECT gen_random_uuid(),id,'owned','review',branch_name,base_sha,id::text,'succeeded',base_sha,now()
+                        await sql`INSERT INTO factory.operation(
+                  id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+                  SELECT gen_random_uuid(),'delivery.branch_create','change',id::text,
+                    'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+                    jsonb_build_object(
+                      'changeId',id::text,'repositoryOwner','owned','repositoryName','review',
+                      'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+                    jsonb_build_object('observedHeadSha',base_sha),now()
                   FROM factory.change`;
                         if (apps !== false)
-                          await sql`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent)
-                  SELECT id,1,${JSON.stringify({ systemContract: contract })}::jsonb
+                          await sql`INSERT INTO factory.substrate_provision(owner_id,kind,generation,intent)
+                  SELECT id,'workspace',1,${JSON.stringify({ systemContract: contract })}::jsonb
                   FROM factory.development_workspace`;
                         const result = await Reflect.apply(target, receiver, args);
                         await sql`UPDATE factory.runtime_attempt SET declared_apps=${JSON.stringify(declared)}::jsonb`;
@@ -431,7 +436,8 @@ test("source-only zero-App review needs no process control", async () => {
     expect(f.events).not.toContain("health");
     expect(f.requests()).toBe(0);
     expect(
-      await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+      await f.database
+        .client`SELECT owner_id FROM factory.substrate_provision WHERE kind='workspace'`,
     ).toHaveLength(0);
   } finally {
     await f.close();

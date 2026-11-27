@@ -2,6 +2,16 @@ import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
+import { drizzleTransaction } from "#db/client";
+import {
+  accountAccess,
+  administrator as administratorTable,
+  authUser,
+  project,
+  projectMembership,
+} from "#db/schema";
+import { zeroQueries, zeroSchema } from "#zero-schema";
+import { zeroServerMutators } from "#zero-schema/server";
 import { projectDevelopmentAuthorityIn } from "../../apps/factory/src/access/authority";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import {
@@ -9,16 +19,6 @@ import {
   searchProjectTickets,
 } from "../../apps/factory/src/project-agent/controller";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { drizzleTransaction } from "../../packages/db/src/client";
-import {
-  accountAccess,
-  administrator as administratorTable,
-  authUser,
-  project,
-  projectMembership,
-} from "../../packages/db/src/schema";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
@@ -46,7 +46,7 @@ test("project authority retains share locks through concurrent account, director
       desktopBackgroundKey: "river-landscape",
       repositoryUrl: "https://example.invalid/repo.git",
       defaultBranch: "main",
-      devcontainerPath: ".devcontainer/devcontainer.json",
+      actorTemplatePath: ".factory/actor-template.json",
       createdBy: userID,
       createdAt: now,
       updatedAt: now,
@@ -148,9 +148,9 @@ test("managed developers sign in, see only member Projects and cannot manage glo
     const otherProjectID = crypto.randomUUID();
     for (const id of [projectID, otherProjectID]) {
       await database.client`INSERT INTO factory.project
-        (id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+        (id, slug, name, repository_url, default_branch, actor_template_path, created_by)
         VALUES (${id}, ${`access-${id}`}, 'Access Project', 'https://example.invalid/repo.git',
-          'main', '.devcontainer/devcontainer.json', ${administrator})`;
+          'main', '.factory/actor-template.json', ${administrator})`;
     }
     const email = `developer-${crypto.randomUUID()}@factory.local`;
     const password = "owned-developer-password-not-a-secret";
@@ -213,7 +213,7 @@ test("managed developers sign in, see only member Projects and cannot manage glo
             slug: "denied-project",
             repositoryUrl: "https://example.invalid/denied.git",
             defaultBranch: "main",
-            devcontainerPath: ".devcontainer/devcontainer.json",
+            actorTemplatePath: ".factory/actor-template.json",
           },
         ],
         memberHeaders,

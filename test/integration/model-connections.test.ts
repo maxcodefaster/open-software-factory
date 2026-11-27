@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
 import { createModelConnections } from "../../apps/factory/src/models/connections";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import type { ModelSecrets, StoredModelConnection } from "../../apps/factory/src/models/secrets";
-import type { ModelProbeResult } from "../../packages/conversation-domain/src/model-connection";
 import { factoryProcess } from "../fixtures/factory-process";
 
 test("role probes are admitted once, replay without inference and fence delayed settings writes", async () => {
@@ -97,14 +97,10 @@ test("role probes are admitted once, replay without inference and fence delayed 
       ),
     ).rejects.toThrow("changed");
     expect(calls).toBe(2);
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.model_role_probe SET model_id='other' WHERE command_id=${first.commandID}`;
-      })(),
-    ).rejects.toThrow("immutable");
     expect(
       JSON.stringify(
-        await database.client`SELECT row_to_json(probe) FROM factory.model_role_probe probe`,
+        await database.client`SELECT row_to_json(probe) FROM factory.operation probe
+          WHERE kind='models.role_probe'`,
       ),
     ).not.toContain("protected-test-key");
   } finally {
@@ -127,8 +123,8 @@ test("provider saves persist intent before OpenBao, recover response loss, mask 
     configured: true,
     read: async (key) => stored.get(key),
     async create(key, value) {
-      const [intent] =
-        await database.client`SELECT command_id FROM factory.model_connection_write WHERE secret_key=${key}`;
+      const [intent] = await database.client`SELECT id FROM factory.operation
+          WHERE kind='models.connection_write' AND idempotency_key=${`models.connection_write:${key}`}`;
       expect(intent).toBeDefined();
       expect(stored.has(key)).toBe(false);
       writes++;
@@ -190,8 +186,8 @@ test("provider saves persist intent before OpenBao, recover response loss, mask 
         )
       ).version,
     ).toBe(2);
-    const rows =
-      await database.client`SELECT row_to_json(row) AS data FROM factory.model_connection_write row WHERE connection_id=${connectionID}`;
+    const rows = await database.client`SELECT row_to_json(row) AS data FROM factory.operation row
+        WHERE kind='models.connection_write' AND scope_type='connection' AND scope_id=${connectionID}`;
     expect(JSON.stringify(rows)).not.toContain("owned-secret");
     const versions =
       await database.client`SELECT row_to_json(row) AS data FROM factory.model_connection_version row WHERE connection_id=${connectionID}`;
@@ -301,20 +297,28 @@ test("probe recovery retains exact model attribution, settles only expired usage
     const fresh = crypto.randomUUID();
     const withoutUsage = crypto.randomUUID();
     for (const commandID of [expired, fresh, withoutUsage])
-      await database.client`INSERT INTO factory.model_role_probe
-        (command_id,role,connection_id,connection_version,model_id,settings_version,created_by,state,created_at)
-        VALUES(${commandID},'planning',${connectionID},1,${`owned-${commandID}`},0,${manager},'probing',
+      await database.client`INSERT INTO factory.operation
+        (id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,created_at)
+        VALUES(${commandID},'models.role_probe','connection',${connectionID},${`models.role_probe:${commandID}`},'probing',
+          ${JSON.stringify({
+            role: "planning",
+            connectionID,
+            connectionVersion: 1,
+            modelId: `owned-${commandID}`,
+            settingsVersion: 0,
+            reasoningEffort: null,
+          })}::jsonb,${manager},
           CASE WHEN ${commandID === fresh} THEN now() ELSE now()-interval '31 seconds' END)`;
     for (const commandID of [expired, fresh])
       await database.client`INSERT INTO factory.usage_operation
         (id,project_id,user_id,purpose,engine,provider,model,created_at)
-        SELECT ${`probe:${commandID}`},NULL,${manager},'probe','mastra','anthropic',model_id,created_at
-        FROM factory.model_role_probe WHERE command_id=${commandID}`;
+        SELECT ${`probe:${commandID}`},NULL,${manager},'probe','mastra','anthropic',payload->>'modelId',created_at
+        FROM factory.operation WHERE id=${commandID} AND kind='models.role_probe'`;
     const [before] = await database.client`SELECT created_at FROM factory.usage_operation
       WHERE id=${`probe:${expired}`}`;
     await controller.recover();
-    const [recovered] = await database.client`SELECT state,result FROM factory.model_role_probe
-      WHERE command_id=${expired}`;
+    const [recovered] = await database.client`SELECT state,result FROM factory.operation
+      WHERE id=${expired} AND kind='models.role_probe'`;
     expect(recovered?.["state"]).toBe("uncertain");
     expect(recovered?.["result"]).toMatchObject({
       status: "unavailable",
@@ -339,7 +343,8 @@ test("probe recovery retains exact model attribution, settles only expired usage
     );
     expect(
       (
-        await database.client`SELECT state FROM factory.model_role_probe WHERE command_id=${fresh}`
+        await database.client`SELECT state FROM factory.operation
+          WHERE id=${fresh} AND kind='models.role_probe'`
       )[0]?.["state"],
     ).toBe("probing");
     expect(
@@ -456,11 +461,6 @@ test("Coding model and reasoning adopt atomically after the exact probe and fenc
       new AbortController().signal,
     );
     expect(await settings.get()).toEqual(adopted);
-    await expect(
-      (async () => {
-        await database.client`UPDATE factory.model_role_probe SET reasoning_effort='max' WHERE command_id=${input.commandID}`;
-      })(),
-    ).rejects.toThrow("immutable");
     const permitted = await settings.set(
       {
         version: adopted.version,

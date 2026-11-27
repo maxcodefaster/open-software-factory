@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql as expression } from "drizzle-orm";
+import { createDatabase, type DatabaseTransaction } from "#db/client";
+import { agentTurn, operation, skillRevision } from "#db/schema";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import {
   claimAgentWriterIn,
   lockChangeWriterIn,
@@ -9,13 +12,10 @@ import { createChangeWriterController } from "../../apps/factory/src/access/writ
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { readTurnObservation } from "../../apps/factory/src/agent/turn-observation";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createModelConnections } from "../../apps/factory/src/models/connections";
 import type { StoredModelConnection } from "../../apps/factory/src/models/secrets";
-import { createDatabase, type DatabaseTransaction } from "../../packages/db/src/client";
-import { agentTurn, agentTurnSkill, skillRevision } from "../../packages/db/src/schema";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedPostgresServer } from "../fixtures/postgres-server";
@@ -138,9 +138,20 @@ test("retained turn projections keep exact context, pinned provider and Skill or
         };
       }),
     );
-    await owned.database.db
-      .insert(agentTurnSkill)
-      .values({ turnId: originalID, revisionId: skills[0] });
+    await owned.database.db.insert(operation).values({
+      id: crypto.randomUUID(),
+      kind: "coding.turn_skill",
+      scopeType: "agent_turn",
+      scopeId: originalID,
+      idempotencyKey: `coding.turn_skill:${originalID}:${skills[0]}`,
+      activeKey: null,
+      state: "loaded",
+      payload: {
+        turnId: originalID,
+        revisionId: skills[0],
+        loadedAt: new Date().toISOString(),
+      },
+    });
     // Seed recorded history through the existing live-load and settlement guards.
     // This checks its read projection, not actual native Skill execution.
     expect(
@@ -206,15 +217,15 @@ test("Build admission rolls back its typed dispatch intent and writer claim on t
           },
         );
         const [intent] =
-          await sql`SELECT turn_id,change_id,session_id,prompt_id,bootstrap,skill_loading
+          await sql`SELECT turn_id,change_id,session_id,prompt_id,bootstrap,skill_manifest
         FROM factory.change_agent_turn_intent WHERE turn_id=${accepted.turn.id}`;
         expect(intent).toMatchObject({
           turn_id: accepted.turn.id,
           change_id: owned.changeID,
           prompt_id: `msg_factory_${accepted.turn.id.replaceAll("-", "")}`,
           bootstrap: true,
-          skill_loading: "native",
         });
+        expect(intent?.["skill_manifest"]).not.toBeNull();
         const [writer] =
           await sql`SELECT state,turn_id FROM factory.change_writer WHERE change_id=${owned.changeID}`;
         expect(writer).toEqual({ state: "agent-preparing", turn_id: accepted.turn.id });
@@ -326,8 +337,13 @@ test("explicit Build retry recovers a failed pre-Session runtime without rewriti
     await owned.database
       .client`DELETE FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
     await owned.database
-      .client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','fixture',branch_name,base_sha,${crypto.randomUUID()},'succeeded',base_sha,now() FROM factory.change WHERE id=${owned.changeID}`;
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+        'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','fixture',
+          'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+        jsonb_build_object('observedHeadSha',base_sha),now() FROM factory.change WHERE id=${owned.changeID}`;
     const first = await admission.admit(owned.changeID, owned.userID, {
       kind: "change-start",
       commandId: crypto.randomUUID(),
@@ -402,8 +418,13 @@ test("a reserved native Session is not presented as resumable before acknowledge
     await owned.database
       .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${owned.attemptID}`;
     await owned.database
-      .client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
-      SELECT ${crypto.randomUUID()},id,'owned','fixture',branch_name,base_sha,${crypto.randomUUID()},'succeeded',base_sha,now()
+      .client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+      SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+        'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+        jsonb_build_object(
+          'changeId',id::text,'repositoryOwner','owned','repositoryName','fixture',
+          'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+        jsonb_build_object('observedHeadSha',base_sha),now()
       FROM factory.change WHERE id=${owned.changeID}`;
     await controller.start(owned.changeID, owned.userID, firstCommand);
     await until(async () =>

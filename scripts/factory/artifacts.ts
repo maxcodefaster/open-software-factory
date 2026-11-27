@@ -7,6 +7,8 @@ export const runtimeArtifactNames = [
   "browser-tools",
   "developer-ide",
   "substrate-runtime",
+  "starter-work",
+  "starter-postgres",
 ] as const;
 
 export const runtimeImageReference = z
@@ -24,11 +26,19 @@ export const runtimeImageReference = z
 export const runtimeArtifactsSchema = z.record(z.enum(runtimeArtifactNames), runtimeImageReference);
 export type RuntimeArtifacts = z.infer<typeof runtimeArtifactsSchema>;
 
-export function runtimeArtifactEnvironment(artifacts: RuntimeArtifacts) {
+export function runtimeArtifactEnvironment(
+  artifacts: RuntimeArtifacts,
+  architecture: "amd64" | "arm64",
+) {
   return {
     FACTORY_RUNTIME_HOST_IMAGE: artifacts["runtime-host"],
     FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
     FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
+    FACTORY_STARTER_IMAGES: JSON.stringify({
+      platform: `linux/${architecture}`,
+      development: artifacts["starter-work"],
+      postgres: artifacts["starter-postgres"],
+    }),
   };
 }
 

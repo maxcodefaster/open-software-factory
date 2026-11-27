@@ -1,10 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import type { createDatabase } from "../../packages/db/src/client";
-import {
-  nativeActor,
-  nativeRuntime,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import type { createDatabase } from "#db/client";
+import { nativeActor, nativeRuntime } from "#runtime-kubernetes/substrate-control";
 
 const clock = z.string().refine((value) => Number.isFinite(Date.parse(value)));
 const rowSchema = z.object({
@@ -84,19 +81,19 @@ export async function readNativeWorkspaceObservation(
     SELECT attempt.id AS "attemptID",attempt.project_id AS "projectID",
       attempt.workspace_id AS "workspaceID",attempt.generation::text AS generation,
       attempt.state,
-      attempt.create_intended_at::text AS "intendedAt",binding.create_attempted_at::text AS "attemptedAt",
-      binding.actor_uid AS "actorUID",binding.atespace,binding.actor_name AS "actorName",
-      binding.intent->>'projectID' AS "intentProjectID",
-      binding.intent->>'workspaceID' AS "intentWorkspaceID",
-      binding.intent->>'generation' AS "intentGeneration",
-      binding.intent->'actorSelector' AS selector,binding.intent->'runtime' AS runtime,
-      binding.observation,
-      (attempt.stop_intended_at IS NOT NULL OR binding.delete_intended_at IS NOT NULL OR binding.deleted_at IS NOT NULL) AS stopping,
-      binding.create_rejected AS rejected
-    FROM factory.runtime_attempt attempt JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
+      attempt.create_intended_at::text AS "intendedAt",attempt.create_attempted_at::text AS "attemptedAt",
+      attempt.actor_uid AS "actorUID",attempt.atespace,attempt.actor_name AS "actorName",
+      attempt.binding_intent->>'projectID' AS "intentProjectID",
+      attempt.binding_intent->>'workspaceID' AS "intentWorkspaceID",
+      attempt.binding_intent->>'generation' AS "intentGeneration",
+      attempt.binding_intent->'actorSelector' AS selector,attempt.binding_intent->'runtime' AS runtime,
+      attempt.observation,
+      (attempt.stop_intended_at IS NOT NULL OR attempt.delete_intended_at IS NOT NULL OR attempt.deleted_at IS NOT NULL) AS stopping,
+      attempt.create_rejected AS rejected
+    FROM factory.runtime_attempt attempt
     JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
       AND workspace.project_id=attempt.project_id
-    WHERE attempt.id=${z.uuid().parse(selected.attemptID)}`;
+    WHERE attempt.id=${z.uuid().parse(selected.attemptID)} AND attempt.atespace IS NOT NULL`;
   if (!row) throw Error("Native Workspace has no saved original binding");
   return nativeWorkspaceObservation(row, selected);
 }

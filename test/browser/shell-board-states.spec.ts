@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap } from "../fixtures/server-functions";
@@ -15,8 +15,8 @@ const projects: string[] = [];
 async function addProject(name: string, slug: string) {
   const id = crypto.randomUUID();
   projects.push(id);
-  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
-    VALUES(${id},${`${slug}-${id.slice(0, 8)}`},${name},'https://example.invalid/shell.git','main','.devcontainer/devcontainer.json',${userID},'the-harvesters')`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
+    VALUES(${id},${`${slug}-${id.slice(0, 8)}`},${name},'https://example.invalid/shell.git','main','.factory/actor-template.json',${userID},'the-harvesters')`;
   return id;
 }
 

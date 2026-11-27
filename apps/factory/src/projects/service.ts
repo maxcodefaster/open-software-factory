@@ -1,16 +1,8 @@
-import { and, DrizzleQueryError, desc, eq, exists, notExists, or } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  administrator,
-  project,
-  projectMembership,
-  projectRepositoryIntent,
-  projectSetupReadiness,
-} from "../../../../packages/db/src/schema";
-import {
-  createRegisterProjectInput,
-  type RegisterProjectInput,
-} from "../../../../packages/project-domain/src/project";
+import { and, DrizzleQueryError, desc, eq, exists, notExists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { administrator, operation, project, projectMembership } from "#db/schema";
+import { createRegisterProjectInput, type RegisterProjectInput } from "#project-domain/project";
 import { requireActiveAccountIn, requireSystemManagerIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { reportFailure } from "../failure-log";
@@ -26,6 +18,7 @@ export type ProjectServiceDependencies = {
   publicRepositoryOrigin?: string;
   onRegistered(projectID: string, userID: string, recovering: boolean): Promise<void>;
   forgeOwner: string;
+  readDefaultBranch(repository: { owner: string; name: string }): Promise<string>;
 };
 
 type ProjectRow = Pick<typeof project.$inferSelect, keyof typeof projectFields>;
@@ -45,24 +38,39 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
   return {
     async recover() {
       const { db } = dependencies.database;
+      const readiness = alias(operation, "setup_readiness");
+      const repoIntent = alias(operation, "repo_intent");
       const projects = await db
         .select({ id: project.id, userID: project.createdBy })
         .from(project)
         .innerJoin(
-          projectSetupReadiness,
+          readiness,
           and(
-            eq(projectSetupReadiness.projectId, project.id),
-            eq(projectSetupReadiness.task, "configuration"),
+            eq(readiness.kind, "projects.setup_readiness"),
+            eq(readiness.scopeType, "project"),
+            eq(
+              readiness.idempotencyKey,
+              sql<string>`'projects.setup_readiness:' || ${project.id}::text || ':configuration'`,
+            ),
           ),
         )
         .where(
           and(
-            eq(projectSetupReadiness.state, "pending"),
+            eq(readiness.state, "pending"),
             notExists(
               db
-                .select({ projectId: projectRepositoryIntent.projectId })
-                .from(projectRepositoryIntent)
-                .where(eq(projectRepositoryIntent.projectId, project.id)),
+                .select({ id: repoIntent.id })
+                .from(repoIntent)
+                .where(
+                  and(
+                    eq(repoIntent.kind, "projects.repository_intent"),
+                    eq(repoIntent.scopeType, "project"),
+                    eq(
+                      repoIntent.idempotencyKey,
+                      sql<string>`'projects.repository_intent:' || ${project.id}::text`,
+                    ),
+                  ),
+                ),
             ),
           ),
         );
@@ -102,12 +110,13 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
     async register(userID: string, value: RegisterProjectInput) {
       try {
         const id = crypto.randomUUID();
-        const rows = await dependencies.database.client.begin(async (client) => {
+        const admission = await dependencies.database.client.begin(async (client) => {
           await client`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
           await requireSystemManagerIn(client, userID);
           const input = registerProjectInput.parse(value);
+          let repository: ReturnType<typeof factoryForgeSource>;
           try {
-            factoryForgeSource(
+            repository = factoryForgeSource(
               input.repositoryUrl,
               dependencies.localRepositoryOrigin,
               dependencies.forgeOwner,
@@ -119,6 +128,32 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
               "Project source must belong to the configured Factory Forgejo.",
             );
           }
+          if (repository.name !== input.slug)
+            throw new CommandError("invalid", "Project repository name must match its slug.");
+          return { input, repository };
+        });
+        // Forge reads must not hold the installation-wide policy lock or account rows.
+        // Recheck authority under that lock before interpreting the result or writing.
+        let defaultBranch: string | undefined;
+        try {
+          defaultBranch = await dependencies.readDefaultBranch(admission.repository);
+        } catch {
+          // An unconfirmed remote read never admits Project or background work.
+        }
+        const rows = await dependencies.database.client.begin(async (client) => {
+          await client`SELECT pg_advisory_xact_lock(hashtextextended('factory-account-policy',0))`;
+          await requireSystemManagerIn(client, userID);
+          if (!defaultBranch)
+            throw new CommandError(
+              "unavailable",
+              "Factory could not confirm the repository default branch. Check Forgejo access and try again.",
+            );
+          const { input } = admission;
+          if (defaultBranch !== input.defaultBranch)
+            throw new CommandError(
+              "invalid",
+              "Project branch must match the repository default branch.",
+            );
           const db = drizzleTransaction(client);
           const created = await createProjectIn(client, {
             id,
@@ -132,10 +167,15 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
             manageProject: true,
             updatedBy: userID,
           });
-          await db.insert(projectSetupReadiness).values({
-            projectId: id,
-            task: "configuration",
-            commandId: crypto.randomUUID(),
+          await db.insert(operation).values({
+            id: crypto.randomUUID(),
+            kind: "projects.setup_readiness",
+            scopeType: "project",
+            scopeId: id,
+            idempotencyKey: `projects.setup_readiness:${id}:configuration`,
+            state: "pending",
+            payload: { task: "configuration", commandId: crypto.randomUUID() },
+            createdBy: userID,
           });
           return created;
         });

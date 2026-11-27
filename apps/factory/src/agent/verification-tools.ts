@@ -1,13 +1,13 @@
 import { and, eq, isNotNull, sql as query } from "drizzle-orm";
-import type { BuildBrowserResult } from "../../../../packages/conversation-domain/src/browser-tools";
+import type { BuildBrowserResult } from "#conversation-domain/browser-tools";
 import {
   verificationDiagnosisInput,
   verificationToolCallInput,
   verificationToolCatalogue,
-} from "../../../../packages/conversation-domain/src/verification";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import { agentTurn, change, project, verification } from "../../../../packages/db/src/schema";
-import { createForgejoClient } from "../../../../packages/forge/src/forge";
+} from "#conversation-domain/verification";
+import type { createDatabase } from "#db/client";
+import { agentTurn, change, project, verification } from "#db/schema";
+import { createForgejoClient } from "#forge/forge";
 import { CommandError } from "../command-error";
 import { createAgentTurnStore } from "./turn-store";
 

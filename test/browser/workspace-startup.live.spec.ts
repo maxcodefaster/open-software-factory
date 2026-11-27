@@ -1,15 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, type FrameLocator, type Page } from "@playwright/test";
 import { z } from "zod";
+import { changeIdentity } from "#change-domain/change";
+import { createDatabase } from "#db/client";
+import { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
 import { runtimeAttemptSchema } from "../../apps/factory/src/runtime/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { createDatabase } from "../../packages/db/src/client";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../packages/requirement-domain/src/requirement";
 import { test } from "../fixtures/browser-test";
 import { startEditorCompute } from "../fixtures/editor-compute";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
@@ -136,13 +133,24 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
       nonGoals: [],
     });
     await database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES (${projectID},${slug},'Workspace startup proof',${`${publicURL}/${repository.owner}/${repository.name}.git`},'main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES (${projectID},${slug},'Workspace startup proof',${`${publicURL}/${repository.owner}/${repository.name}.git`},'main','.factory/actor-template.json',${session.user.id})`;
       await sql`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by) VALUES (${ticketID},${projectID},'Startup measurement','Interactive startup proof','in-progress',${session.user.id})`;
       await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES (${revisionID},${ticketID},1,${requirement},${requirementDigest(requirement)},${session.user.id})`;
       await sql`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES (${approvalID},${ticketID},${revisionID},${session.user.id})`;
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES (${identity.changeID},${projectID},${ticketID},${approvalID},${identity.branchName},${base.headSha},'active',${session.user.id})`;
-      await sql`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES (${identity.branchOperationID},${identity.changeID},${repository.owner},${repository.name},${identity.branchName},${base.headSha},${`startup:${identity.changeID}`},'succeeded',${base.headSha},now())`;
+      await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,result,created_by,completed_at) VALUES (${identity.branchOperationID},'delivery.branch_create','change',${identity.changeID},${`delivery.branch_create:change:${identity.changeID}:create-branch`},NULL,'succeeded',${JSON.stringify(
+        {
+          changeId: identity.changeID,
+          repositoryOwner: repository.owner,
+          repositoryName: repository.name,
+          branchName: identity.branchName,
+          startSha: base.headSha,
+          attemptCount: 1,
+          leaseGeneration: 1,
+          reconcileAfter: null,
+        },
+      )}::jsonb,${JSON.stringify({ observedHeadSha: base.headSha })}::jsonb,${session.user.id},now())`;
     });
     fixtureCreated = true;
     await page.reload();

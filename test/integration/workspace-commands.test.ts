@@ -138,7 +138,7 @@ test("command intent is exact, credential-free and never dispatches twice", asyn
     ).rejects.toThrow("different input");
     const [stored] = await f.database.client<
       { record: string }[]
-    >`SELECT row_to_json(command)::text AS record FROM factory.workspace_command command WHERE id=${requestID}`;
+    >`SELECT row_to_json(command)::text AS record FROM factory.operation command WHERE id=${requestID} AND kind='workspace.command'`;
     expect(stored?.record).not.toContain(input.env.API_KEY);
     expect(stored?.record).not.toContain(input.command);
     const observed = f.native.get(requestID);
@@ -156,6 +156,87 @@ test("command intent is exact, credential-free and never dispatches twice", asyn
     await f.dispose();
   }
 }, 30000);
+
+test.each(["shell", "terminal"] as const)(
+  "%s output never combines an earlier output page with a later completed state",
+  async (kind) => {
+    const f = await commandFixture();
+    const requestID = crypto.randomUUID();
+    try {
+      await f.commands.start(
+        f.owner,
+        { requestID, workspaceID: f.workspaceID, command: "printf completed-output", env: {} },
+        kind,
+      );
+      const request = f.hub.childRequest.bind(f.hub);
+      let advanced = false;
+      f.hub.childRequest = async (...args) => {
+        const snapshot = await request(...args);
+        if (
+          !advanced &&
+          args[1]["action"] === (kind === "terminal" ? "pty-read" : "command-read")
+        ) {
+          advanced = true;
+          const previous = f.native.get(requestID);
+          if (!previous) throw new Error("Original fixture command missing");
+          const final = {
+            ...previous,
+            state: "exited",
+            exitCode: 0,
+            stdout: Buffer.from("completed-output").toString("base64"),
+            stdoutNext: Buffer.byteLength("completed-output"),
+          };
+          f.native.set(requestID, final);
+          f.hub.message(
+            f.child,
+            JSON.stringify({ type: "command-state", commandCount: 0, data: JSON.stringify(final) }),
+          );
+          await eventually(
+            async () => {
+              const [row] = await f.database
+                .client`SELECT state FROM factory.operation WHERE id=${requestID} AND kind='workspace.command'`;
+              return row?.["state"];
+            },
+            (state) => state === "exited",
+            "The newer completion event was not retained",
+          );
+        }
+        return snapshot;
+      };
+      const earlier = await f.commands.read(
+        f.owner,
+        { commandID: requestID, stdout: 0, stderr: 0 },
+        kind,
+      );
+      expect(earlier).toMatchObject({
+        state: "running",
+        exitCode: null,
+        completedAt: null,
+        stdout: "",
+        stdoutNext: 0,
+      });
+      expect((await f.commands.status(f.owner, requestID)).state).toBe("exited");
+      if (!("stdoutNext" in earlier) || !("stderrNext" in earlier))
+        throw new Error("The original output page is unavailable");
+      const completed = await f.commands.read(
+        f.owner,
+        { commandID: requestID, stdout: earlier.stdoutNext, stderr: earlier.stderrNext },
+        kind,
+      );
+      expect(completed).toMatchObject({
+        state: "exited",
+        exitCode: 0,
+        stdout: "completed-output",
+        stdoutNext: Buffer.byteLength("completed-output"),
+        outputLost: false,
+      });
+      expect(f.starts()).toBe(1);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30000,
+);
 
 test.each(["paused", "starting"] as const)(
   "command output demand resumes exact %s compute without replaying the command",
@@ -194,8 +275,10 @@ test.each(["paused", "starting"] as const)(
       await f.database
         .client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${f.attemptID}`;
       if (state === "starting")
-        await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-        VALUES(${f.attemptID},'compute-capacity')`;
+        await f.database.client`INSERT INTO factory.operation(
+          id,kind,scope_type,scope_id,idempotency_key,state,payload)
+          VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${f.attemptID},
+            ${`runtime.compute_wait:${f.attemptID}`},'waiting',jsonb_build_object('reason','compute-capacity'))`;
       f.hub.connected = () => false;
       await commands.status(f.owner, id);
       expect(resumes).toBe(0);
@@ -244,8 +327,10 @@ test("command demand continues a capacity-waiting startup before admitting its c
     f.hub.ready = () => resumes > 0;
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
-    await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-      VALUES(${f.attemptID},'compute-capacity')`;
+    await f.database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${f.attemptID},
+        ${`runtime.compute_wait:${f.attemptID}`},'waiting',jsonb_build_object('reason','compute-capacity'))`;
     f.hub.connected = () => false;
     await commands.start(f.owner, {
       requestID: crypto.randomUUID(),
@@ -300,7 +385,8 @@ test("unknown suspended startup refuses demand promptly without admitting a comm
     ).rejects.toThrow("Compute startup is unconfirmed. No operation was dispatched");
     expect(f.starts()).toBe(0);
     expect([
-      ...(await f.database.client`SELECT id FROM factory.workspace_command WHERE id=${requestID}`),
+      ...(await f.database
+        .client`SELECT id FROM factory.operation WHERE id=${requestID} AND kind='workspace.command'`),
     ]).toEqual([]);
   } finally {
     await commands.close();
@@ -313,7 +399,7 @@ test("compute demand refuses stopped, failed and foreign handles without dispatc
   let preparations = 0;
   const demand = createWorkspaceComputeAccess(
     f.database,
-    { ready: () => true },
+    { ready: () => true, sourceConnected: () => true },
     {
       ...f.runtime,
       start: async () => {
@@ -324,6 +410,10 @@ test("compute demand refuses stopped, failed and foreign handles without dispatc
         preparations++;
         throw Error("Refused compute must not start");
       },
+      resumeForSource: async () => {
+        preparations++;
+        throw Error("Refused compute must not resume");
+      },
     },
     () => false,
   );
@@ -331,16 +421,158 @@ test("compute demand refuses stopped, failed and foreign handles without dispatc
     await expect(demand(f.workspaceID, f.owner, true, crypto.randomUUID())).rejects.toThrow(
       "different Runtime Attempt",
     );
-    for (const state of ["stopped", "failed"]) {
+    await expect(
+      demand(f.workspaceID, f.owner, false, crypto.randomUUID(), undefined, true),
+    ).rejects.toThrow("different Runtime Attempt");
+    for (const state of ["stop-intended", "stopping", "stopped", "failed", "cleanup-failed"]) {
       await f.database
         .client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${f.attemptID}`;
       await expect(demand(f.workspaceID, f.owner)).rejects.toThrow(
         "Start this Workspace explicitly",
       );
+      await expect(
+        demand(f.workspaceID, f.owner, false, f.attemptID, undefined, true),
+      ).rejects.toThrow("Start this Workspace explicitly");
     }
     expect(preparations).toBe(0);
     expect(f.starts()).toBe(0);
-    expect(await f.database.client`SELECT id FROM factory.workspace_command`).toHaveLength(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.command'`,
+    ).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
+
+test("current-file wake never grants personal observation shares compute authority", async () => {
+  const f = await commandFixture();
+  let resumes = 0;
+  const demand = createWorkspaceComputeAccess(
+    f.database,
+    { ready: () => true, sourceConnected: () => true },
+    {
+      ...f.runtime,
+      resumeForSource: async () => {
+        resumes++;
+        throw Error("Personal observer must not wake compute");
+      },
+    },
+    () => false,
+  );
+  try {
+    await f.sharing.decide(f.owner, {
+      commandID: crypto.randomUUID(),
+      workspaceID: f.workspaceID,
+      userID: f.guest,
+      permission: "observe",
+      expectedVersion: 0,
+    });
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
+    await expect(
+      demand(f.workspaceID, f.guest, false, f.attemptID, undefined, true),
+    ).rejects.toThrow("shared for observation only");
+    expect(resumes).toBe(0);
+    expect(f.starts()).toBe(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.command'`,
+    ).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
+
+test("resumed Source demand waits for saved readiness even when its native transport is already ready", async () => {
+  const f = await commandFixture();
+  await eventually(
+    async () =>
+      (
+        await f.database.client`SELECT state FROM factory.runtime_attempt WHERE id=${f.attemptID}`
+      )[0]?.["state"],
+    (state) => state === "ready",
+    "Initial controlled readiness did not settle",
+  );
+  let observed = 0;
+  let resolved = false;
+  let pending: Promise<string> | undefined;
+  const demand = createWorkspaceComputeAccess(
+    f.database,
+    { ready: () => true, sourceConnected: () => true },
+    {
+      ...f.runtime,
+      start: async () => {
+        await f.database
+          .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${f.attemptID}`;
+        return f.runtime.get(f.attemptID);
+      },
+      get: async (attemptID) => {
+        observed++;
+        return f.runtime.get(attemptID);
+      },
+    },
+    () => false,
+  );
+  try {
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
+    pending = demand(f.workspaceID, f.owner).then((value) => {
+      resolved = true;
+      return value;
+    });
+    await eventually(
+      async () => observed > 0 || resolved,
+      (progress) => progress,
+      "Source demand did not reach its readiness observation",
+    );
+    expect(resolved).toBe(false);
+    expect(observed).toBeGreaterThan(0);
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
+    expect(await pending).toBe(f.attemptID);
+    expect(f.starts()).toBe(0);
+  } finally {
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${f.attemptID}`;
+    await pending;
+    await f.dispose();
+  }
+}, 30000);
+
+test("cancelled Source demand neither starts compute nor authorizes a later file mutation", async () => {
+  const f = await commandFixture();
+  let resumes = 0;
+  const cancelled = new AbortController();
+  const demand = createWorkspaceComputeAccess(
+    f.database,
+    { ready: () => true, sourceConnected: () => true },
+    {
+      ...f.runtime,
+      start: async () => {
+        resumes++;
+        cancelled.abort(new Error("owned file wake cancelled"));
+        return f.runtime.get(f.attemptID);
+      },
+    },
+    () => false,
+  );
+  try {
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
+    const already = AbortSignal.abort(new Error("owned file wake cancelled"));
+    await expect(demand(f.workspaceID, f.owner, true, undefined, already)).rejects.toThrow(
+      "owned file wake cancelled",
+    );
+    expect(resumes).toBe(0);
+    await expect(
+      demand(f.workspaceID, f.owner, true, f.attemptID, cancelled.signal),
+    ).rejects.toThrow("owned file wake cancelled");
+    // Once native resume was deliberately admitted its outcome stays observable;
+    // cancelling the file request must not replay it or publish the file write.
+    expect(resumes).toBe(1);
+    expect(f.starts()).toBe(0);
+    expect(
+      await f.database.client`SELECT id FROM factory.operation WHERE kind='workspace.command'`,
+    ).toHaveLength(0);
   } finally {
     await f.dispose();
   }
@@ -370,7 +602,7 @@ test("PTY input has its own immutable request identity and never replays keystro
     ).rejects.toThrow("different input");
     const [retained] = await f.database.client<
       { value: string }[]
-    >`SELECT row_to_json(operation)::text AS value FROM factory.workspace_terminal_operation operation WHERE id=${input.requestID}`;
+    >`SELECT row_to_json(operation)::text AS value FROM factory.operation operation WHERE id=${input.requestID} AND kind='workspace.terminal_op'`;
     expect(retained?.value).not.toContain("private-terminal-input");
     expect(
       (await f.commands.read(f.owner, { commandID: id, stdout: 0, stderr: 0 }, "terminal")).kind,
@@ -396,7 +628,7 @@ test("unconfirmed dispatch stays uncertain after a same-input retry", async () =
     expect(f.starts()).toBe(1);
     const [row] = await f.database.client<
       { count: number }[]
-    >`SELECT count(*)::int AS count FROM factory.workspace_command`;
+    >`SELECT count(*)::int AS count FROM factory.operation WHERE kind='workspace.command'`;
     expect(row?.count).toBe(1);
   } finally {
     await f.dispose();

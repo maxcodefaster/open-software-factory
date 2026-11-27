@@ -115,15 +115,20 @@
 }
 
 .copy-feedback-label > span,
+.copy-feedback-label::before,
 .copy-feedback-label::after {
   grid-area: 1 / 1;
+}
+
+.copy-feedback-label::before {
+  content: attr(data-reserve);
 }
 
 .copy-feedback-label::after {
   content: "Copy failed";
 }
 
-.copy-feedback-reserve,
+.copy-feedback-label::before,
 .copy-feedback-label::after {
   visibility: hidden;
 }

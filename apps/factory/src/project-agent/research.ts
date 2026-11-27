@@ -1,8 +1,8 @@
 import { and, asc, desc, eq, exists, gt, isNull, ne, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
+import { attachmentIDs } from "#conversation-domain/attachments";
+import { type createDatabase, drizzleTransaction } from "#db/client";
 import {
   administrator,
   epic,
@@ -12,7 +12,7 @@ import {
   ticket,
   ticketDependency,
   ticketDocumentRevision,
-} from "../../../../packages/db/src/schema";
+} from "#db/schema";
 import { createAccessController } from "../access/api";
 import { CommandError } from "../command-error";
 

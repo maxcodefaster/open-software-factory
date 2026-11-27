@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { observe } from "../fixtures/pinned-opencode";
 import { memoryPrivateObjects } from "../fixtures/private-objects";

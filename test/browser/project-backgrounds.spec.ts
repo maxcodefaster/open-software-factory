@@ -1,10 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import { z } from "zod";
+import { createDatabase } from "#db/client";
 import { desktopBackgrounds } from "../../apps/factory/src/artworks";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-host-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -105,9 +105,9 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
       [otherProjectId, "harvest-studio", "Harvest Studio", "the-harvesters"],
     ]) {
       await database.client`INSERT INTO factory.project(
-        id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
+        id,slug,name,repository_url,default_branch,actor_template_path,created_by,desktop_background_key)
         VALUES(${fixtureValue(id, "id")},${fixtureValue(slug, "slug")},${fixtureValue(name, "name")},'https://example.invalid/wallpapers.git','main',
-          '.devcontainer/devcontainer.json',${administrator.id},${fixtureValue(background, "background")})`;
+          '.factory/actor-template.json',${administrator.id},${fixtureValue(background, "background")})`;
       await database.client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
         VALUES(${crypto.randomUUID()},${fixtureValue(id, "id")},'Give each Project a familiar workspace',
           'Keep the shared background stable between visits.',${administrator.id})`;
@@ -126,7 +126,8 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
     for (const id of [projectId, otherProjectId])
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${id},${member.id},'product-contributor',false,${administrator.id})`;
-    const preferences = await database.client`SELECT * FROM factory.user_ui_preference`;
+    const preferences =
+      await database.client`SELECT * FROM factory.operation WHERE kind='user.ui_preference'`;
     await page.reload();
     await selectProject(page, "coastal-studio");
     await signIn(observer, contributorEmail);
@@ -267,7 +268,9 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
     await selectProject(page, "coastal-studio");
     await expect(desktop(page)).toHaveAttribute("data-background", "scene-on-the-ice");
     await expect(desktop(observer)).toHaveAttribute("data-background", "scene-on-the-ice");
-    expect(await database.client`SELECT * FROM factory.user_ui_preference`).toEqual(preferences);
+    expect(
+      await database.client`SELECT * FROM factory.operation WHERE kind='user.ui_preference'`,
+    ).toEqual(preferences);
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "Settings", exact: true }).click();

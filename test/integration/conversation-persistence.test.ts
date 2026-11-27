@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { createDatabase } from "#db/client";
+import { canonicalRequirementContent } from "#requirement-domain/requirement";
 import {
   activateCodingContextIn,
   archiveContextIn,
@@ -17,8 +19,6 @@ import {
   readConversation,
   readConversationEntries,
 } from "../../apps/factory/src/conversations/store";
-import { createDatabase } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 
 let server: Awaited<ReturnType<typeof ownedPostgresServer>> | undefined;
@@ -61,9 +61,9 @@ async function withDatabase(
         await transaction`INSERT INTO auth."user"(id,name,email,email_verified)
           VALUES(${id},'Conversation fixture',${`${id}@conversation.test`},true)`;
       }
-      await transaction`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await transaction`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectID},${`conversation-${projectID}`},'Conversation fixture','https://example.invalid/fixture.git',
-          'main','.devcontainer/devcontainer.json',${userID})`;
+          'main','.factory/actor-template.json',${userID})`;
       for (const id of [userID, otherID]) {
         await transaction`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
           VALUES(${projectID},${id},'developer',${userID})`;

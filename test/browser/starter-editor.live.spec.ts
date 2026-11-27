@@ -27,7 +27,7 @@ test("the clean Starter IDE reads canonical files without starting compute", asy
   );
   await expect(editor.locator(".monaco-editor:visible")).toContainText("factory-starter");
   await expect(editor.locator(".factory-runtime-output:visible")).toContainText(
-    "Workspace compute is stopped. Start it when you need a terminal or App.",
+    "Environment stopped. Start it when you need a terminal or preview.",
   );
   await mkdir(".factory/test-results/clean-e2e", { recursive: true });
   await page.screenshot({ path: ".factory/test-results/clean-e2e/05-independent-theia.png" });

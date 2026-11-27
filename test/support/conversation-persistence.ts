@@ -1,5 +1,5 @@
 import type postgres from "postgres";
-import type { createDatabase } from "../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 
 export type ConversationStatement = {
   text: string;

@@ -3,8 +3,8 @@ import {
   resolveLibraryChoice,
   type SkillLibraryEntry,
   type SkillScope,
-} from "../../../../packages/conversation-domain/src/skill-library";
-import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+} from "#conversation-domain/skill-library";
+import type { SkillRole } from "#conversation-domain/skills";
 
 export const skillRoleLabel = (role: SkillRole) =>
   role === "planning" ? "Investigate & Plan" : "Build";

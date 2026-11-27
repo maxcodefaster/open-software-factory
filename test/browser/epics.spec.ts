@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -42,8 +42,8 @@ test("Epic folders replace filtering, retain live updates and expose hierarchy a
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectId},${slug},'Epic folders','https://example.invalid/owned-epics.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectId},${slug},'Epic folders','https://example.invalid/owned-epics.git','main','.factory/actor-template.json',${session.user.id})`;
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     const root = await createPlanningEpic({
@@ -202,8 +202,8 @@ test("Epic grid centers sparse and incomplete rows and remains usable on small s
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await browserBootstrap(page);
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectId},${slug},'Epic grid','https://example.invalid/owned-grid.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectId},${slug},'Epic grid','https://example.invalid/owned-grid.git','main','.factory/actor-template.json',${session.user.id})`;
     const epic = await createPlanningEpic({
       database,
       userID: session.user.id,

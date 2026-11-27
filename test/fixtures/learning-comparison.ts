@@ -1,8 +1,4 @@
-import type {
-  LearningCase,
-  LearningEdit,
-  LearningResult,
-} from "../../packages/conversation-domain/src/learning";
+import type { LearningCase, LearningEdit, LearningResult } from "#conversation-domain/learning";
 
 export const comparisonBefore =
   "When the retained source conflicts with a cached value, report the cached value without qualification.";

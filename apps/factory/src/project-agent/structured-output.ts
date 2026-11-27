@@ -6,7 +6,7 @@ import {
   projectAgentAnswerOutput,
   projectAgentOutput,
   sourceCitationInput,
-} from "../../../../packages/conversation-domain/src/conversation";
+} from "#conversation-domain/conversation";
 
 const fields = sourceCitationInput.shape;
 const projectCitation = z

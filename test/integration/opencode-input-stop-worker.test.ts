@@ -34,7 +34,6 @@ test.each([
       undefined,
       undefined,
       undefined,
-      undefined,
       directory,
     );
     const connectorProof = Bun.env["FACTORY_INPUT_STOP_CONNECTOR_TEST_BINARY"];

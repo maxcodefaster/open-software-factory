@@ -1,4 +1,4 @@
-import type { EpicProposal } from "../../../packages/conversation-domain/src/epic-proposal";
+import type { EpicProposal } from "#conversation-domain/epic-proposal";
 
 // The schema's own messages name no field; say which part of the proposal needs attention.
 export function epicProposalProblem(proposal: EpicProposal, fallback: string | undefined) {

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import { createForgejoClient } from "#forge/forge";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { substrateVerificationAuthorityIn } from "../../apps/factory/src/runtime/substrate-verification-grant";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
@@ -63,11 +63,17 @@ test.each([
         SELECT ${crypto.randomUUID()}, id, runtime_attempt_id, 1, branch_name, base_sha,
           ${commitSHA}, ${commitSHA}, 'Owned cancellation regression', ${crypto.randomUUID()},
           'succeeded', created_by, now() FROM factory.change WHERE id = ${owned.changeID}`;
-      await database.client`INSERT INTO factory.pull_request_operation(
-        id, change_id, repository_owner, repository_name, base_branch, head_branch,
-        first_head_sha, title, body, idempotency_key, state, pull_request_number, pull_request_url, completed_at)
-        SELECT ${crypto.randomUUID()}, id, 'owned', 'build', 'main', branch_name, ${commitSHA},
-          'Owned', '', ${crypto.randomUUID()}, 'succeeded', 1, 'http://forge.invalid/pr/1', now()
+      await database.client`INSERT INTO factory.operation(
+        id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload, result, created_by, completed_at)
+        SELECT ${crypto.randomUUID()}, 'delivery.pull_request', 'change', id::text,
+          'delivery.pull_request:' || ${crypto.randomUUID()}, NULL, 'succeeded',
+          jsonb_build_object(
+            'changeId', id::text, 'repositoryOwner', 'owned', 'repositoryName', 'build',
+            'baseBranch', 'main', 'headBranch', branch_name, 'commitSha', ${commitSHA}::text,
+            'firstHeadSha', ${commitSHA}::text, 'title', 'Owned', 'body', ''
+          ),
+          jsonb_build_object('number', 1, 'url', 'http://forge.invalid/pr/1'),
+          created_by, now()
         FROM factory.change WHERE id = ${owned.changeID}`;
       await database.client`UPDATE factory.project SET repository_url = 'http://forge.invalid/owned/build.git'
         WHERE id = ${owned.projectID}`;
@@ -120,6 +126,9 @@ test.each([
             return null;
           },
           startStagingReplacement: async () => null,
+          pause: async () => {
+            throw new Error("Verification cancellation must stop only isolated compute");
+          },
           stop: async (attemptID) => {
             stopped.push(attemptID);
             await database.client`UPDATE factory.runtime_attempt SET state = 'stopped' WHERE id = ${attemptID}`;
@@ -202,7 +211,7 @@ test.each([
       }
       const [preview] = await database.client<
         { id: string }[]
-      >`SELECT runtime_attempt_id AS id FROM factory.staging_preview WHERE project_id = ${owned.projectID}`;
+      >`SELECT payload->>'runtimeAttemptId' AS id FROM factory.operation WHERE kind='delivery.staging_preview' AND scope_type='project' AND scope_id = ${owned.projectID}`;
       expect(preview?.id).toBe(stagingAttemptID);
       if (boundary === "workflow") expect(verifications).toHaveLength(0);
     } finally {
@@ -241,8 +250,8 @@ test.each(["verification", "change", "trashed", "restored-stop"] as const)(
       owned.calls.splice(0);
       const verificationID = crypto.randomUUID();
       await database.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number,
-        runner_name, runner_uuid, runner_token, action_run_id, runner_job_handle, created_by)
-        VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1, 'owned-cancelled',
+        runner_uuid, runner_token, action_run_id, runner_job_handle, created_by)
+        VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1,
           ${crypto.randomUUID()}, 'owned-token', 1, 'owned-exact-job', ${owned.userID})`;
       const authorized = await database.client.begin((sql) =>
         substrateVerificationAuthorityIn(sql, owned.projectID, verificationID, owned.userID),

@@ -2,13 +2,10 @@ import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
 import { z } from "zod";
+import { inheritedModelSettingsView } from "#conversation-domain/model-inheritance";
+import { librarySkillAssignments, skillLibraryView } from "#conversation-domain/skill-library";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
-import {
-  librarySkillAssignments,
-  skillLibraryView,
-} from "../../packages/conversation-domain/src/skill-library";
 import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { releaseBuild, releaseInspection } from "../fixtures/release-build";
@@ -411,7 +408,7 @@ test.skipIf(!installationName)(
         async () => {
           const [generation] = await database.client<
             Array<{ state: string; count: number }>
-          >`SELECT state, page_count AS count FROM factory.knowledge_generation WHERE project_id = ${project.id} ORDER BY created_at DESC LIMIT 1`;
+          >`SELECT state, (payload->>'pageCount')::int AS count FROM factory.operation WHERE kind = 'knowledge.generation' AND scope_type = 'project' AND scope_id = ${project.id} ORDER BY created_at DESC LIMIT 1`;
           return generation;
         },
         (value) => value?.state === "succeeded" || value?.state === "failed",

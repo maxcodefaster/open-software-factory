@@ -1,5 +1,5 @@
 import { createEffect, createSignal, Show } from "solid-js";
-import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
+import type { DesktopBackgroundKey } from "#interface-domain/background";
 import { factoryIdentityClient } from "./auth-client";
 import { plainErrorMessage } from "./command-error";
 

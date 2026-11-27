@@ -1,15 +1,12 @@
 import type { Accessor, Setter, SourceAccessor } from "solid-js";
 import { z } from "zod";
-import type { EpicProposal } from "../../../../packages/conversation-domain/src/epic-proposal";
-import {
-  type CodingReasoning,
-  codingReasoningInput,
-} from "../../../../packages/conversation-domain/src/model-settings";
-import type { TechnicalDesignContent } from "../../../../packages/requirement-domain/src/technical-design";
+import type { EpicProposal } from "#conversation-domain/epic-proposal";
+import { type CodingReasoning, codingReasoningInput } from "#conversation-domain/model-settings";
+import type { TechnicalDesignContent } from "#requirement-domain/technical-design";
 import type { createAgentCommandIds } from "../agent-command-ids";
-import { type Change, type Ticket, type TicketDraft } from "../change/contracts";
+import type { Change, Ticket, TicketDraft } from "../change/contracts";
 import { plainErrorMessage } from "../command-error";
-import { type DeliveryView } from "../delivery/contracts";
+import type { DeliveryView } from "../delivery/contracts";
 import type { createProjectPlanning } from "../projects/planning";
 import { confirmEpicProposal } from "../server-functions/conversations";
 import {

@@ -1,5 +1,5 @@
 import { createEffect, Show } from "solid-js";
-import { editorPopoverPosition } from "../editor-popover-position";
+import { editorPopoverPosition } from "../editor/client";
 import type { LearningFlowRecord } from "./flow";
 
 export function LearningFlowPreview(props: {

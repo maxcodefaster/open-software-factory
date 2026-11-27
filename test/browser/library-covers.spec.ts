@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { test } from "../fixtures/browser-test";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
@@ -178,17 +178,17 @@ test("owned Factory saves thirty-choice covers across reloads without changing c
         await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
       await expect(artwork).toHaveAttribute("src", `/art/library/${target}-${kind}.webp`);
       if (kind === "skill") {
-        const [row] = await database.client`SELECT cover.version::float8 AS version,
+        const [row] = await database.client`SELECT l.cover_version::float8 AS version,
           (SELECT count(*)::int FROM factory.skill_revision r WHERE r.skill_key=l.storage_key) AS revisions
-          FROM factory.skill_library l JOIN factory.skill_library_cover cover ON cover.library_id=l.id
-          WHERE EXISTS(SELECT 1 FROM factory.skill_revision r WHERE r.skill_key=l.storage_key AND r.content->>'name'=${name})`;
+          FROM factory.skill_library l
+          WHERE l.cover_key IS NOT NULL AND EXISTS(SELECT 1 FROM factory.skill_revision r WHERE r.skill_key=l.storage_key AND r.content->>'name'=${name})`;
         expect(row).toMatchObject({ version: 2, revisions: 1 });
       } else {
-        const [row] = await database.client`SELECT cover.version::float8 AS version,
+        const [row] = await database.client`SELECT l.cover_version::float8 AS version,
           (SELECT count(*)::int FROM factory.mcp_revision r WHERE r.library_id=l.id) AS revisions,
           (SELECT count(*)::int FROM factory.mcp_connection c WHERE c.id=l.id) AS connections
-          FROM factory.mcp_library l JOIN factory.mcp_library_cover cover ON cover.library_id=l.id
-          WHERE EXISTS(SELECT 1 FROM factory.mcp_revision r WHERE r.library_id=l.id AND r.content->>'name'=${name})`;
+          FROM factory.mcp_library l
+          WHERE l.cover_key IS NOT NULL AND EXISTS(SELECT 1 FROM factory.mcp_revision r WHERE r.library_id=l.id AND r.content->>'name'=${name})`;
         expect(row).toMatchObject({ version: 2, revisions: 1, connections: 0 });
       }
     }

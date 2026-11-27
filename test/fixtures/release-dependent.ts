@@ -1,10 +1,10 @@
 import { expect } from "bun:test";
+import { skillLibraryView } from "#conversation-domain/skill-library";
+import { skillRevisionInput } from "#conversation-domain/skills";
 import { agentViewSchema } from "../../apps/factory/src/agent/contracts";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
-import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
-import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
 import { eventually } from "./factory-process";
 import type { releaseInstallation } from "./release-installation";
 import { callFactoryFunction } from "./server-functions";
@@ -355,7 +355,8 @@ export async function releaseDependent(fixture: Fixture) {
     600_000,
   );
   const loaded = await database.client<Array<{ revision: string }>>`
-    SELECT revision_id AS revision FROM factory.agent_turn_skill WHERE turn_id = ${result.agent.turn?.id ?? ""}`;
+    SELECT payload->>'revisionId' AS revision FROM factory.operation
+    WHERE kind='coding.turn_skill' AND scope_type='agent_turn' AND scope_id = ${result.agent.turn?.id ?? ""}`;
   expect([...loaded]).toEqual([{ revision: state.buildSkillID }]);
   expect(result.agent.turn?.skills.map((skill) => skill.id)).toEqual([state.buildSkillID]);
   expect(result.agent.commitSHA).not.toBe(deliveredSHA);

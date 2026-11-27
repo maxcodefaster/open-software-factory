@@ -4,13 +4,13 @@ import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { feedbackAcknowledgementMs } from "../../apps/factory/src/ui/feedback-state";
 import {
   type AttachmentSummary,
   attachmentInput,
   attachmentSummary,
-} from "../../packages/conversation-domain/src/attachments";
+} from "#conversation-domain/attachments";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { feedbackAcknowledgementMs } from "../../apps/factory/src/ui/feedback-state";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";

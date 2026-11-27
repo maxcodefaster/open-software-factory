@@ -1,6 +1,6 @@
 import { and, sql as drizzleSQL, eq } from "drizzle-orm";
 import type { z } from "zod";
-import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
+import { modelProvider } from "#conversation-domain/model-connection";
 import {
   type InheritedModelSettingsView,
   type ModelRole,
@@ -10,39 +10,41 @@ import {
   personalModelInput,
   projectModelInput,
   resolveRoleModel,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
+} from "#conversation-domain/model-inheritance";
 import {
   approvedModelCatalogue,
   codingReasoningInput,
   type ModelSettingsView,
   type modelDefaultsInput,
   modelRulesInput,
-} from "../../../../packages/conversation-domain/src/model-settings";
-import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
-  administrator,
-  modelConnectionVersion,
-  modelDefaults,
-  modelRoleConnection,
-  personalModelSettings,
-  projectModelSettings,
-} from "../../../../packages/db/src/schema";
+} from "#conversation-domain/model-settings";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { administrator, modelConnectionVersion, modelSettings } from "#db/schema";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
+
+const DEFAULT_SCOPE_KEY = "default";
+const personalScopeKey = (projectID: string, userID: string) => `${projectID}:${userID}`;
+
+type DefaultModelSettingsPayload = {
+  planningModelId: string;
+  buildModelId: string;
+  roleRules?: unknown;
+};
 
 export async function codingReasoningIn(sql: DatabaseTransaction) {
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
   const [stored] = await drizzleTransaction(sql)
     .select({
-      reasoning: drizzleSQL<string | null>`${modelDefaults.roleRules}->'build'->>'reasoningEffort'`,
+      reasoning: drizzleSQL<
+        string | null
+      >`${modelSettings.settings}->'roleRules'->'build'->>'reasoningEffort'`,
     })
-    .from(modelDefaults)
-    .where(eq(modelDefaults.singleton, true));
+    .from(modelSettings)
+    .where(
+      and(eq(modelSettings.scopeType, "default"), eq(modelSettings.scopeKey, DEFAULT_SCOPE_KEY)),
+    );
   return codingReasoningInput.parse(stored?.reasoning ?? "medium");
 }
 
@@ -83,19 +85,20 @@ export function createModelSettingsController(
     const db = client === database.client ? database.db : drizzleTransaction(client);
     const connections = await db
       .select({
-        role: modelRoleConnection.role,
+        role: modelSettings.scopeKey,
         provider: modelConnectionVersion.provider,
-        modelId: modelRoleConnection.modelId,
+        modelId: drizzleSQL<string>`${modelSettings.settings}->>'modelId'`,
         endpoint: modelConnectionVersion.endpoint,
       })
-      .from(modelRoleConnection)
+      .from(modelSettings)
       .innerJoin(
         modelConnectionVersion,
         and(
-          eq(modelConnectionVersion.connectionId, modelRoleConnection.connectionId),
-          eq(modelConnectionVersion.version, modelRoleConnection.connectionVersion),
+          eq(modelConnectionVersion.connectionId, modelSettings.connectionId),
+          eq(modelConnectionVersion.version, modelSettings.connectionVersion),
         ),
-      );
+      )
+      .where(eq(modelSettings.scopeType, "role_connection"));
     const catalogue = await providerCatalogue();
     const models = [
       ...new Set([
@@ -117,25 +120,35 @@ export function createModelSettingsController(
           ]
         : environment.models;
     }
-    const [stored] = await db
+    const [storedRow] = await db
       .select({
-        version: modelDefaults.version,
-        planningModelId: modelDefaults.planningModelId,
-        buildModelId: modelDefaults.buildModelId,
-        rules: modelDefaults.roleRules,
+        version: modelSettings.version,
+        settings: modelSettings.settings,
       })
-      .from(modelDefaults)
-      .where(eq(modelDefaults.singleton, true));
+      .from(modelSettings)
+      .where(
+        and(eq(modelSettings.scopeType, "default"), eq(modelSettings.scopeKey, DEFAULT_SCOPE_KEY)),
+      );
+    const storedSettings = storedRow?.settings as DefaultModelSettingsPayload | undefined;
+    const stored =
+      storedRow && storedSettings
+        ? {
+            version: storedRow.version,
+            planningModelId: storedSettings.planningModelId,
+            buildModelId: storedSettings.buildModelId,
+            rules: storedSettings.roleRules ?? null,
+          }
+        : undefined;
     const rules = modelRulesInput.parse(
       stored?.rules ?? {
         planning: { models: permitted("planning"), allowOverride: true },
         build: { models: permitted("build"), allowOverride: true },
       },
     );
-    for (const binding of connections)
-      rules[binding.role].models = rules[binding.role].models.filter((id) =>
-        permitted(binding.role).includes(id),
-      );
+    for (const binding of connections) {
+      const role = binding.role as ModelRole;
+      rules[role].models = rules[role].models.filter((id) => permitted(role).includes(id));
+    }
     return {
       ...(stored ?? {
         version: 0,
@@ -175,30 +188,38 @@ export function createModelSettingsController(
     const db = drizzleTransaction(sql);
     const [projectRow] = await db
       .select({
-        version: projectModelSettings.version,
-        planning: projectModelSettings.planning,
-        build: projectModelSettings.build,
+        version: modelSettings.version,
+        settings: modelSettings.settings,
       })
-      .from(projectModelSettings)
-      .where(eq(projectModelSettings.projectId, projectID));
-    const project = projectRow ? projectModelInput.parse(projectRow) : emptyProject;
+      .from(modelSettings)
+      .where(and(eq(modelSettings.scopeType, "project"), eq(modelSettings.scopeKey, projectID)));
+    const project = projectRow
+      ? projectModelInput.parse({
+          version: projectRow.version,
+          planning: projectRow.settings["planning"],
+          build: projectRow.settings["build"],
+        })
+      : emptyProject;
     const [personalRow] = personalSelection
       ? await db
           .select({
-            version: personalModelSettings.version,
-            planningModelId: personalModelSettings.planningModelId,
-            buildModelId: personalModelSettings.buildModelId,
+            version: modelSettings.version,
+            settings: modelSettings.settings,
           })
-          .from(personalModelSettings)
+          .from(modelSettings)
           .where(
             and(
-              eq(personalModelSettings.projectId, projectID),
-              eq(personalModelSettings.userId, userID),
+              eq(modelSettings.scopeType, "personal"),
+              eq(modelSettings.scopeKey, personalScopeKey(projectID, userID)),
             ),
           )
       : [];
     const personal = personalRow
-      ? personalModelInput.parse(personalRow)
+      ? personalModelInput.parse({
+          version: personalRow.version,
+          planningModelId: personalRow.settings["planningModelId"] ?? null,
+          buildModelId: personalRow.settings["buildModelId"] ?? null,
+        })
       : { version: 0, planningModelId: null, buildModelId: null };
     const resolve = (role: ModelRole, personalSelection = true) =>
       resolveRoleModel({
@@ -285,32 +306,33 @@ export function createModelSettingsController(
         const [changed] =
           input.version === 0
             ? await db
-                .insert(projectModelSettings)
+                .insert(modelSettings)
                 .values({
+                  scopeType: "project",
+                  scopeKey: projectID,
                   projectId: projectID,
                   version: 1,
-                  planning: input.planning,
-                  build: input.build,
+                  settings: { planning: input.planning, build: input.build },
                   updatedBy: userID,
                 })
                 .onConflictDoNothing()
-                .returning({ version: projectModelSettings.version })
+                .returning({ version: modelSettings.version })
             : await db
-                .update(projectModelSettings)
+                .update(modelSettings)
                 .set({
-                  version: drizzleSQL`${projectModelSettings.version} + 1`,
-                  planning: input.planning,
-                  build: input.build,
+                  version: drizzleSQL`${modelSettings.version} + 1`,
+                  settings: { planning: input.planning, build: input.build },
                   updatedBy: userID,
                   updatedAt: drizzleSQL`now()`,
                 })
                 .where(
                   and(
-                    eq(projectModelSettings.projectId, projectID),
-                    eq(projectModelSettings.version, input.version),
+                    eq(modelSettings.scopeType, "project"),
+                    eq(modelSettings.scopeKey, projectID),
+                    eq(modelSettings.version, input.version),
                   ),
                 )
-                .returning({ version: projectModelSettings.version });
+                .returning({ version: modelSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
@@ -335,32 +357,38 @@ export function createModelSettingsController(
         const [changed] =
           input.version === 0
             ? await db
-                .insert(personalModelSettings)
+                .insert(modelSettings)
                 .values({
+                  scopeType: "personal",
+                  scopeKey: personalScopeKey(projectID, userID),
                   projectId: projectID,
                   userId: userID,
                   version: 1,
-                  planningModelId: input.planningModelId,
-                  buildModelId: input.buildModelId,
+                  settings: {
+                    planningModelId: input.planningModelId,
+                    buildModelId: input.buildModelId,
+                  },
                 })
                 .onConflictDoNothing()
-                .returning({ version: personalModelSettings.version })
+                .returning({ version: modelSettings.version })
             : await db
-                .update(personalModelSettings)
+                .update(modelSettings)
                 .set({
-                  version: drizzleSQL`${personalModelSettings.version} + 1`,
-                  planningModelId: input.planningModelId,
-                  buildModelId: input.buildModelId,
+                  version: drizzleSQL`${modelSettings.version} + 1`,
+                  settings: {
+                    planningModelId: input.planningModelId,
+                    buildModelId: input.buildModelId,
+                  },
                   updatedAt: drizzleSQL`now()`,
                 })
                 .where(
                   and(
-                    eq(personalModelSettings.projectId, projectID),
-                    eq(personalModelSettings.userId, userID),
-                    eq(personalModelSettings.version, input.version),
+                    eq(modelSettings.scopeType, "personal"),
+                    eq(modelSettings.scopeKey, personalScopeKey(projectID, userID)),
+                    eq(modelSettings.version, input.version),
                   ),
                 )
-                .returning({ version: personalModelSettings.version });
+                .returning({ version: modelSettings.version });
         if (!changed) throw changedElsewhere();
         return inherited(sql, projectID, userID);
       });
@@ -394,31 +422,40 @@ export function createModelSettingsController(
         const [changed] =
           input.version === 0
             ? await db
-                .insert(modelDefaults)
+                .insert(modelSettings)
                 .values({
-                  singleton: true,
+                  scopeType: "default",
+                  scopeKey: DEFAULT_SCOPE_KEY,
                   version: 1,
-                  planningModelId: input.planningModelId,
-                  buildModelId: input.buildModelId,
-                  roleRules: rules,
+                  settings: {
+                    planningModelId: input.planningModelId,
+                    buildModelId: input.buildModelId,
+                    roleRules: rules,
+                  },
                   updatedBy: userID,
                 })
                 .onConflictDoNothing()
-                .returning({ version: modelDefaults.version })
+                .returning({ version: modelSettings.version })
             : await db
-                .update(modelDefaults)
+                .update(modelSettings)
                 .set({
-                  version: drizzleSQL`${modelDefaults.version} + 1`,
-                  planningModelId: input.planningModelId,
-                  buildModelId: input.buildModelId,
-                  roleRules: rules,
+                  version: drizzleSQL`${modelSettings.version} + 1`,
+                  settings: {
+                    planningModelId: input.planningModelId,
+                    buildModelId: input.buildModelId,
+                    roleRules: rules,
+                  },
                   updatedBy: userID,
                   updatedAt: drizzleSQL`now()`,
                 })
                 .where(
-                  and(eq(modelDefaults.singleton, true), eq(modelDefaults.version, input.version)),
+                  and(
+                    eq(modelSettings.scopeType, "default"),
+                    eq(modelSettings.scopeKey, DEFAULT_SCOPE_KEY),
+                    eq(modelSettings.version, input.version),
+                  ),
                 )
-                .returning({ version: modelDefaults.version });
+                .returning({ version: modelSettings.version });
         if (!changed)
           throw new CommandError(
             "conflict",

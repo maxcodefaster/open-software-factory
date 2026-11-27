@@ -1,13 +1,10 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { ProjectSetupView, SetupInspectionView } from "#project-domain/setup";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import type {
-  ProjectSetupView,
-  SetupInspectionView,
-} from "../../packages/project-domain/src/setup";
 import {
   decodeFactoryResponse as decodeResponse,
   factoryFunctionRequest,

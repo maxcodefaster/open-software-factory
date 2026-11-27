@@ -1,11 +1,11 @@
-import { type Session } from "../access/contracts";
-import { type Bootstrap } from "../bootstrap/contracts";
-import {
-  type RequirementProposal,
-  type RequirementRevision,
-  type TechnicalDesignRevision,
-  type Ticket,
-  type TicketDocumentRevision,
+import type { Session } from "../access/contracts";
+import type { Bootstrap } from "../bootstrap/contracts";
+import type {
+  RequirementProposal,
+  RequirementRevision,
+  TechnicalDesignRevision,
+  Ticket,
+  TicketDocumentRevision,
 } from "../change/contracts";
 import type { ProjectSummary } from "../projects/contracts";
 

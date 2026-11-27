@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Agent } from "@mastra/core/agent";
 import ts from "typescript";
-import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
+import { modelProvider } from "#conversation-domain/model-connection";
 import { modelProviderOptions, nativeModel } from "./native";
 import { installationPlanningConnection } from "./resolver";
 
@@ -35,7 +35,7 @@ async function withEnvironment<T>(
 
 test.each([
   { path: "../learning/worker.ts", resolutions: 2 },
-  { path: "../monitoring/worker.ts", resolutions: 1 },
+  { path: "../monitoring/worker-diagnose.ts", resolutions: 1 },
 ])(
   "$path background model resolution explicitly excludes personal configuration",
   async (input) => {
@@ -50,9 +50,11 @@ test.each([
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        ts.isIdentifier(node.expression.expression) &&
-        node.expression.expression.text === "models" &&
-        node.expression.name.text === "resolve"
+        node.expression.name.text === "resolve" &&
+        ((ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "models") ||
+          (ts.isPropertyAccessExpression(node.expression.expression) &&
+            node.expression.expression.name.text === "models"))
       )
         calls.push(node);
       ts.forEachChild(node, visit);

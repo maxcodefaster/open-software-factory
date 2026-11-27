@@ -1,23 +1,23 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
-import { reviewWork } from "../../apps/factory/src/learning/judge";
-import { calibrationCases, calibrationPassed } from "../../apps/factory/src/learning/calibration";
-import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
-import { modelEnvironment } from "../../apps/factory/src/models/controller";
-import type { UsageEntry } from "../../apps/factory/src/usage/journal";
-import type { LearningCase } from "../../packages/conversation-domain/src/learning";
-import { replayPlanning } from "../../apps/factory/src/learning/replay";
-import {
-  comparisonExample,
-  comparisonBefore,
-  comparisonAfter,
-} from "../fixtures/learning-comparison";
+import type { LearningCase } from "#conversation-domain/learning";
 import {
   comparisonCases,
   comparisonPassed,
   learningComparisonPlan,
   validateReplayAnswers,
-} from "../../packages/conversation-domain/src/learning-comparison";
+} from "#conversation-domain/learning-comparison";
+import { calibrationCases, calibrationPassed } from "../../apps/factory/src/learning/calibration";
+import { reviewWork } from "../../apps/factory/src/learning/judge";
+import { replayPlanning } from "../../apps/factory/src/learning/replay";
+import { modelEnvironment } from "../../apps/factory/src/models/controller";
+import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
+import type { UsageEntry } from "../../apps/factory/src/usage/journal";
+import {
+  comparisonAfter,
+  comparisonBefore,
+  comparisonExample,
+} from "../fixtures/learning-comparison";
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(

@@ -4,7 +4,7 @@ import {
   knowledgePageIconInput,
   moveKnowledgePageInput,
   movePageOrder,
-} from "../../knowledge-domain/src/page-tree";
+} from "#knowledge-domain/page-tree";
 import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
 import { validator } from "./validation";
 

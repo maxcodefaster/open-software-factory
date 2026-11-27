@@ -1,5 +1,8 @@
 {
   "name": "open-factory-runtime-fixture",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/server.mjs && node --check src/worker.mjs && node --check support.mjs && test -s src/version.txt"
+  }
 }

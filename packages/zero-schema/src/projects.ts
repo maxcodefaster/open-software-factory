@@ -1,8 +1,5 @@
 import { defineMutatorWithType, type ReadonlyJSONObject } from "@rocicorp/zero";
-import {
-  type DesktopBackgroundKey,
-  isDesktopBackgroundKey,
-} from "../../interface-domain/src/background";
+import { type DesktopBackgroundKey, isDesktopBackgroundKey } from "#interface-domain/background";
 import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
 import { record, uuid, validator } from "./validation";
 

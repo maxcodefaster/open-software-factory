@@ -125,7 +125,7 @@ test("sharing retries observe the original decision, not newer permissions", asy
     await expect(f.grant(f.editor, "collaborate", 1)).rejects.toThrow("sharing changed");
     const [count] = await f.database.client<
       { count: number }[]
-    >`SELECT count(*)::int AS count FROM factory.workspace_share_decision`;
+    >`SELECT count(*)::int AS count FROM factory.operation WHERE kind='workspace.share_decision'`;
     expect(count?.count).toBe(2);
   } finally {
     await f.dispose();
@@ -191,7 +191,7 @@ test("pending access revocation is recovered without undoing a later sharing dec
     expect((await f.read(f.editor)).permission).toBe("collaborate");
     const [pending] = await f.database.client<
       { count: number }[]
-    >`SELECT count(*)::int AS count FROM factory.workspace_share_decision WHERE access_reconciled_at IS NULL`;
+    >`SELECT count(*)::int AS count FROM factory.operation WHERE kind='workspace.share_decision' AND completed_at IS NULL`;
     expect(pending?.count).toBe(0);
   } finally {
     await f.dispose();
@@ -208,7 +208,7 @@ test("an invited collaborator connects to the owner's native compute, not a seco
     await f.database.client`UPDATE factory.runtime_attempt SET state='ready',ready_at=now()
       WHERE id=${attemptID}`;
     const [original] = await f.database.client`
-      SELECT parent_connector_token_hash,child_connector_token_hash
+      SELECT parent_connector_token_hash
       FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect((await controller.start(f.project, f.editor, f.workspace))?.id).toBe(attemptID);
     expect((await controller.start(f.project, f.owner, f.workspace))?.id).toBe(attemptID);
@@ -223,12 +223,11 @@ test("an invited collaborator connects to the owner's native compute, not a seco
       await f.database.client`SELECT id FROM factory.runtime_attempt WHERE project_id=${f.project}`,
     ).toHaveLength(1);
     const [retained] = await f.database
-      .client`SELECT generation,created_by,parent_connector_token_hash,child_connector_token_hash,state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      .client`SELECT generation,created_by,parent_connector_token_hash,state FROM factory.runtime_attempt WHERE id=${attemptID}`;
     expect(retained).toMatchObject({
       generation: "1",
       created_by: f.owner,
       parent_connector_token_hash: original?.["parent_connector_token_hash"],
-      child_connector_token_hash: original?.["child_connector_token_hash"],
       state: "ready",
     });
   } finally {

@@ -80,8 +80,8 @@ test("native Ticket document writes preserve CAS, exact retries, retained histor
   try {
     for (const id of [actor, outsider])
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${id},'Owned document author',${`${id}@ticket-sql.test`},true)`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${project},${`ticket-sql-${project}`},'Owned ticket','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${actor})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${project},${`ticket-sql-${project}`},'Owned ticket','https://example.invalid/owned.git','main','.factory/actor-template.json',${actor})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${actor},'product-contributor',${actor})`;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by) VALUES(${ticket},${project},'Owned intent','ready',${actor})`;

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import type { SkillContent } from "#conversation-domain/skills";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import type { SkillContent } from "../../packages/conversation-domain/src/skills";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixtureValue } from "../fixtures/value";
 
@@ -22,7 +22,7 @@ test("product authors keep a private cross-Project library; managers share exact
     ] as const)
       await database.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES (${id},${name},${`${id}@factory.local`},true)`;
     for (const id of [project, secondProject]) {
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES (${id},${`skills-${id}`},'Skill library proof','https://example.invalid/owned.git','main','.devcontainer/devcontainer.json',${admin})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES (${id},${`skills-${id}`},'Skill library proof','https://example.invalid/owned.git','main','.factory/actor-template.json',${admin})`;
       for (const idUser of [author, collaborator])
         await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES (${id},${idUser},'product-contributor',${idUser === collaborator},${admin})`;
     }

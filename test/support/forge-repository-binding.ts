@@ -1,4 +1,4 @@
-import type { createDatabase } from "../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 
 export const forgeBinding = {
   apiURL: "http://forge-control.native.test:3000/api/v1/",

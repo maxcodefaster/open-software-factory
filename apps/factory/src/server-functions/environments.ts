@@ -4,7 +4,7 @@ import {
   environmentWrite,
   type ProjectEnvironment,
   projectEnvironment,
-} from "../../../../packages/project-domain/src/environment";
+} from "#project-domain/environment";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";
 

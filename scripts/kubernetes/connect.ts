@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { runCommand } from "#runtime-kubernetes/command";
 import upstream from "../../upstream.json";
 
 const help = `Connect to a local Helm-installed Factory:

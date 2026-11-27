@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { mcpLibraryView } from "#conversation-domain/mcp-library";
+import { monitoringView } from "#conversation-domain/monitoring";
+import { createForgejoClient } from "#forge/forge";
 import { deliveryViewSchema } from "../../apps/factory/src/delivery/contracts";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
-import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
-import { createForgejoClient } from "../../packages/forge/src/forge";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { localOpenBao } from "../../scripts/factory/openbao";
@@ -14,6 +14,7 @@ import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-re
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { monitoringNativeSource, ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
+import { configuredRuntimeProjectFiles } from "../fixtures/runtime-project";
 import { callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
@@ -48,6 +49,10 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       !process.env["FACTORY_PLANNING_MODEL_BASE_URL"]
     )
       throw new Error("The configured Coding and Planning connections are required");
+    const nativeConfiguration = process.env["FACTORY_SUBSTRATE_WORKSPACES_CONFIGURATION"];
+    if (!nativeConfiguration)
+      throw new Error("Monitoring proof requires its explicit native installation");
+    const runtimeFiles = await configuredRuntimeProjectFiles(nativeConfiguration);
     const root = resolve(".factory/test-results/monitoring/native");
     const continuation = process.env["FACTORY_MONITORING_AUTOFIX_RESUME"];
     const directory = continuation
@@ -167,14 +172,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
           default_branch: "release",
           description: `Owned monitoring native proof ${state.id}`,
         });
-        const files = await Promise.all(
-          [".devcontainer/devcontainer.json", ".devcontainer/compose.yaml", "support.mjs"].map(
-            async (path) => ({
-              path,
-              content: await readFile(`test/fixtures/runtime-project/${path}`, "utf8"),
-            }),
-          ),
-        );
+        const files = runtimeFiles.filter((file) => file.path === ".factory/actor-template.json");
         files.push(
           {
             path: "package.json",
@@ -253,7 +251,8 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       await factory.start("test/fixtures/monitoring-native-server.ts", [sourceFile]);
       adminCookie = await factory.signIn();
       const [connection] = await database.client<{ sourceId: number | null }[]>`
-        SELECT source_id::int AS "sourceId" FROM factory.forge_connection`;
+        SELECT (payload->>'sourceId')::int AS "sourceId" FROM factory.operation
+        WHERE kind='access.forge_connection' AND idempotency_key='access.forge_connection:singleton'`;
       await ensureLocalForgeIdentity({
         factoryURL: factory.base,
         forgeURL: forgeHost.origin,
@@ -280,7 +279,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
                 name: "Owned monitoring Autofix",
                 repositoryUrl: `${forgeHost.origin}/${repository.owner}/${repository.name}.git`,
                 defaultBranch: "release",
-                devcontainerPath: ".devcontainer/devcontainer.json",
+                actorTemplatePath: ".factory/actor-template.json",
               },
             ],
             { cookie: adminCookie },
@@ -423,13 +422,16 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
           ),
         );
       const secretWrites = await database.client<{ key: string }[]>`
-        SELECT secret_key AS key FROM factory.mcp_secret_write WHERE connection_id=${state.sourceId} AND state='committed'`;
+        SELECT payload->>'secretKey' AS key FROM factory.operation
+        WHERE kind='mcp.secret_write' AND scope_type='connection' AND scope_id=${state.sourceId} AND state='committed'`;
       expect(secretWrites.length).toBeGreaterThan(0);
       await eventually(
         async () =>
           (
             await database.client<{ confirmed: boolean }[]>`
-          SELECT confirmed FROM factory.forge_branch_intent WHERE project_id=${fixtureValue(state.projectId, "state.projectId")} AND branch='release'`
+          SELECT COALESCE((result->>'confirmed')::boolean, false) AS confirmed
+          FROM factory.operation
+          WHERE idempotency_key=${`forge.branch:${fixtureValue(state.projectId, "state.projectId")}:release`}`
           )[0]?.confirmed,
         (confirmed) => confirmed === true,
         "Owned Project protection did not become ready",
@@ -580,15 +582,18 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       ])
         expect(after.find((file) => file.path === path)?.sha).toBe(before.get(path));
       const [preview] = await database.client<{ id: string; sha: string; state: string }[]>`
-        SELECT attempt.id,preview.revision AS sha,attempt.state FROM factory.staging_preview preview
-          JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id WHERE preview.project_id=${state.projectId}`;
+        SELECT attempt.id,preview.payload->>'revision' AS sha,attempt.state FROM factory.operation preview
+          JOIN factory.runtime_attempt attempt ON attempt.id::text=preview.payload->>'runtimeAttemptId'
+          WHERE preview.kind='delivery.staging_preview' AND preview.scope_type='project' AND preview.scope_id=${state.projectId}`;
       expect(preview).toMatchObject({ sha: branch.headSha, state: "ready" });
       const missing = await app(fixtureValue(preview, "preview").id, "/invoices/missing");
       const known = await app(fixtureValue(preview, "preview").id, "/invoices/known");
       expect(missing).toEqual({ status: 404, body: { total: null } });
       expect(known).toEqual({ status: 200, body: { total: 12 } });
       const reviews = await database.client<{ id: string; sourceCount: number }[]>`
-        SELECT review.id,(SELECT count(*)::int FROM factory.agent_turn_mcp source WHERE source.turn_id=review.turn_id) AS "sourceCount"
+        SELECT review.id,(SELECT count(*)::int FROM factory.operation source
+          WHERE source.kind='coding.turn_mcp' AND source.scope_type='agent_turn'
+            AND source.scope_id=review.turn_id::text) AS "sourceCount"
         FROM factory.candidate_review review WHERE review.change_id=${change.id}`;
       expect(reviews.length).toBeGreaterThan(0);
       expect(reviews.every((review) => review.sourceCount === 0)).toBe(true);

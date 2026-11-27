@@ -45,6 +45,25 @@ test("a failed image build never pushes a stale local publication tag", async ()
   expect(calls).toHaveLength(1);
 });
 
+test("prepared Starter publication selects the admitted worker platform explicitly", async () => {
+  const calls: string[][] = [];
+  await publishRuntimeImage(
+    {
+      ...artifact,
+      target: undefined,
+      platform: "linux/arm64",
+      dockerfile: "templates/starter-app/.factory/images/work/Dockerfile",
+    },
+    async (args) => {
+      calls.push(args);
+    },
+  );
+  expect(calls[0]).toContain("--platform");
+  expect(calls[0]?.[(calls[0]?.indexOf("--platform") ?? -1) + 1]).toBe("linux/arm64");
+  expect(calls[0]).not.toContain("--target");
+  expect(calls[1]).toEqual(["docker", "push", `${artifact.repository}:local`]);
+});
+
 test("publication does not accept a successful build as confirmation of a failed push", async () => {
   await expect(
     publishRuntimeImage(

@@ -1,6 +1,6 @@
 import { type Accessor, createEffect, createSignal } from "solid-js";
-import { zeroQueries } from "../../../../packages/zero-schema/src";
-import { useZeroPreload, useZeroQuery } from "../../../../packages/zero-solid/src";
+import { zeroQueries } from "#zero-schema";
+import { useZeroPreload, useZeroQuery } from "#zero-solid";
 
 export function createProjectPlanning(projectID: Accessor<string | undefined>) {
   const projects = useZeroQuery(() => zeroQueries.projects.list());

@@ -1,13 +1,8 @@
 import { and, asc, eq, exists, isNull, or, sql } from "drizzle-orm";
 import type { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  authUser,
-  developmentWorkspace,
-  ticket,
-  workspaceShare,
-} from "../../../../packages/db/src/schema";
-import type { WorkspaceShareInput } from "../../../../packages/workspace-domain/src/sharing";
+import type { createDatabase } from "#db/client";
+import { authUser, developmentWorkspace, ticket, workspaceShare } from "#db/schema";
+import type { WorkspaceShareInput } from "#workspace-domain/sharing";
 import { projectDevelopmentAuthorityIn } from "../access/authority";
 import { workspaceAuthorityIn } from "../access/workspace";
 import { CommandError } from "../command-error";

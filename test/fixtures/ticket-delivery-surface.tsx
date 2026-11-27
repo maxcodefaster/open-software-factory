@@ -1,7 +1,7 @@
 import { render } from "@solidjs/web";
 import { createSignal } from "solid-js";
-import { type TicketDraft } from "../../apps/factory/src/change/contracts";
-import { TicketWorkspace } from "../../apps/factory/src/ticket-workspace";
+import type { TicketDraft } from "../../apps/factory/src/change/contracts";
+import { TicketWorkspace } from "../../apps/factory/src/tickets/ticket-workspace";
 import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import { planningProduct } from "./technical-planning";
 import { deliveryStates } from "./ticket-delivery-states";

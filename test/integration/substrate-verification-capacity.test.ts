@@ -1,36 +1,79 @@
 import { expect, test } from "bun:test";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import {
-  nativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { nativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { nativeRuntimeFixture } from "../fixtures/native-runtime";
 
 test("initial Verification continuation keeps exact-job, native identity and revocation fences", async () => {
   const f = await nativeRuntimeFixture("ticket");
+  const previousAPI = process.env["FACTORY_FORGEJO_API_URL"];
   const previousPublic = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
   const previousOwner = process.env["FACTORY_FORGEJO_OWNER"];
   process.env["FACTORY_FORGEJO_PUBLIC_URL"] = "https://git.native.test";
   process.env["FACTORY_FORGEJO_OWNER"] = "owned";
   const configuration = { ...f.configuration, egressHosts: ["git.native.test"] };
-  const runtime = f.controller(configuration);
+  const submitted = new Set<string>();
+  let forge: ReturnType<typeof Bun.serve> | undefined;
   let submissionSequence = 0;
   async function submit(sequence: number, commit: string) {
     const id = crypto.randomUUID();
     // Controlled submitted-candidate metadata only, not a live implementation
     // or a claimed external Git outcome.
     await f.database.client`INSERT INTO factory.change_commit_operation(
-      id,change_id,sequence,branch_name,expected_parent_sha,commit_sha,observed_remote_sha,
-      commit_message,idempotency_key,state,created_by,completed_at,source,
-      repository_path,repository_blob_sha,repository_content,content_digest)
-      SELECT ${id},id,${sequence},branch_name,base_sha,${commit},${commit},
-        'Owned exact candidate',${`owned-capacity:${id}`},'succeeded',created_by,now(),
-        'repository-document','README.md',${"a".repeat(40)},'',${"b".repeat(64)}
+      id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,observed_remote_sha,
+      commit_message,idempotency_key,state,created_by,completed_at,source)
+      SELECT ${id},id,${f.attemptID},${sequence},branch_name,base_sha,${commit},${commit},
+        'Owned exact candidate',${`owned-capacity:${id}`},'succeeded',created_by,now(),'agent'
       FROM factory.change WHERE id=${f.changeID}`;
+    submitted.add(commit);
   }
   try {
+    const files = new Map<string, { content: string; sha: string }>();
+    for (const path of [".factory/system.json", nativeProjectTemplate.path])
+      files.set(path, {
+        content: await Bun.file(`${f.repository}/${path}`).text(),
+        sha: (
+          await Bun.$`git -C ${f.repository} rev-parse ${`${f.revision}:${path}`}`.text()
+        ).trim(),
+      });
+    // Controlled exact-candidate contents only. This test exercises native
+    // capacity/identity fences, not a live Forge or Git submission.
+    forge = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        const prefix = "/api/v1/repos/owned/verification/contents/";
+        if (
+          request.method !== "GET" ||
+          !url.pathname.startsWith(prefix) ||
+          !submitted.has(url.searchParams.get("ref") ?? "")
+        )
+          return new Response(null, { status: 403 });
+        const file = files.get(url.pathname.slice(prefix.length));
+        if (!file) return new Response(null, { status: 404 });
+        return Response.json({
+          content: Buffer.from(file.content).toString("base64"),
+          encoding: "base64",
+          sha: file.sha,
+        });
+      },
+    });
+    process.env["FACTORY_FORGEJO_API_URL"] = `${forge.url.origin}/api/v1/`;
+    const runtime = f.controller(configuration);
     await f.database.client`UPDATE factory.project
-      SET repository_url='http://127.0.0.1:1/owned/verification.git' WHERE id=${f.projectID}`;
+      SET repository_url=${`${forge.url.origin}/owned/verification.git`} WHERE id=${f.projectID}`;
+    await f.database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(
+        id,project_id,change_id,workspace_id,generation,revision,state,
+        parent_connector_token_hash,create_intended_at,created_by,
+        atespace,actor_name,binding_intent)
+        VALUES(${f.attemptID},${f.projectID},${f.changeID},${f.workspaceID},1,${f.revision},
+          'create-intended',${"b".repeat(64)},now(),${f.userID},
+          ${`fa-${f.attemptID.replaceAll("-", "")}`},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}')`;
+      await sql`UPDATE factory.runtime_attempt SET state='stopped',stop_intended_at=now()
+        WHERE id=${f.attemptID}`;
+    });
     for (const fault of [
       "unchanged",
       "unknown-reply",
@@ -57,9 +100,9 @@ test("initial Verification continuation keeps exact-job, native identity and rev
       const attemptID = runtimeIdentity(verificationID, 1).attemptID;
       const atespace = `fa-${attemptID.replaceAll("-", "")}`;
       await f.database.client`INSERT INTO factory.verification(
-        id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,
+        id,change_id,commit_sha,pull_request_number,action_run_id,
         runner_uuid,runner_token,runner_job_handle,created_by)
-        VALUES(${verificationID},${f.changeID},${candidate},1,1,'owned-capacity-check',
+        VALUES(${verificationID},${f.changeID},${candidate},1,1,
           ${crypto.randomUUID()},'owned-private-runner-token',${`owned-job-${verificationID}`},${f.userID})`;
       let reject = true;
       let cancelLate = false;
@@ -101,13 +144,23 @@ test("initial Verification continuation keeps exact-job, native identity and rev
         f.calls.filter((call) => call.scope === atespace && call.method === "CreateActor").length;
       const wait = async () => [
         ...(await f.database.client<{ reason: string }[]>`
-          SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`),
+          SELECT payload->>'reason' AS reason FROM factory.operation
+          WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+            AND scope_id=${attemptID}`),
       ];
       const facts = () =>
-        f.database
-          .client`SELECT actor_uid::text,native_version,origin_key,origin_checkpoint,stop_id,
-          intended_at::text,attempted_at::text,outcome FROM factory.substrate_actor_rpc
-          WHERE runtime_attempt_id=${attemptID} AND action='resume'`;
+        f.database.client`
+          SELECT payload->>'actorUid' AS actor_uid,
+            payload->>'nativeVersion' AS native_version,
+            payload->>'originKey' AS origin_key,
+            NULLIF(payload->'originCheckpoint','null'::jsonb) AS origin_checkpoint,
+            payload->>'stopId' AS stop_id,
+            created_at::text AS intended_at,
+            payload->>'attemptedAt' AS attempted_at,
+            result AS outcome
+          FROM factory.operation
+          WHERE kind='runtime.actor_rpc' AND scope_type='runtime_attempt'
+            AND scope_id=${attemptID} AND payload->>'action'='resume'`;
       const originalFacts = await facts();
       expect(resumes(), fault).toBe(1);
       expect(await wait(), fault).toEqual(
@@ -131,8 +184,8 @@ test("initial Verification continuation keeps exact-job, native identity and rev
         await f.database
           .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${attemptID}`;
       if (fault === "deleting")
-        await f.database.client`UPDATE factory.substrate_binding SET delete_intended_at=now()
-          WHERE runtime_attempt_id=${attemptID}`;
+        await f.database.client`UPDATE factory.runtime_attempt SET delete_intended_at=now()
+          WHERE id=${attemptID}`;
       if (fault === "cancelled")
         await f.database.client`UPDATE factory.verification SET state='cancelled',completed_at=now()
           WHERE id=${verificationID}`;
@@ -142,9 +195,10 @@ test("initial Verification continuation keeps exact-job, native identity and rev
           WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
       if (fault === "newer-commit") await submit(++submissionSequence, "e".repeat(40));
       if (fault === "other-hold")
-        await f.database
-          .client`UPDATE factory.runtime_compute_wait SET reason='accounting-incomplete'
-          WHERE attempt_id=${attemptID}`;
+        await f.database.client`UPDATE factory.operation
+          SET payload=jsonb_build_object('reason','accounting-incomplete'),updated_at=now()
+          WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+            AND scope_id=${attemptID}`;
       if (fault === "lost-after-progress") {
         loseAfterProgress = true;
         await expect(runtime.startVerification(verificationID, f.userID)).rejects.toThrow(
@@ -178,9 +232,12 @@ test("initial Verification continuation keeps exact-job, native identity and rev
       console.info(`Controlled native Verification capacity fence: ${fault}`);
     }
   } finally {
+    if (previousAPI === undefined) delete process.env["FACTORY_FORGEJO_API_URL"];
+    else process.env["FACTORY_FORGEJO_API_URL"] = previousAPI;
     if (previousOwner === undefined) delete process.env["FACTORY_FORGEJO_OWNER"];
     else process.env["FACTORY_FORGEJO_OWNER"] = previousOwner;
     await f.dispose();
+    await forge?.stop(true);
     if (previousPublic === undefined) delete process.env["FACTORY_FORGEJO_PUBLIC_URL"];
     else process.env["FACTORY_FORGEJO_PUBLIC_URL"] = previousPublic;
   }

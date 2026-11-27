@@ -3,6 +3,9 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseTransaction } from "#db/client";
+import { substrateSource } from "#db/schema/runtime";
+import { hashConnectorToken, runtimeIdentity } from "#runtime-domain/identity";
 import { createRuntimeEnvironmentEndpoint } from "../../apps/factory/src/environments/runtime";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import {
@@ -10,9 +13,6 @@ import {
   initialSourceActorIn,
 } from "../../apps/factory/src/workspace/source-initialization";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import { substrateSource } from "../../packages/db/src/schema/runtime";
-import { hashConnectorToken, runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { substrateFixture } from "../fixtures/substrate";
 
@@ -120,18 +120,18 @@ async function admitActor(
     templateSHA256: f.config.templateSHA256,
     ...provisionChanges,
   };
-  await sql`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent,
-      atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
-    VALUES(${f.workspaceID},${generation},${JSON.stringify(provision)}::jsonb,
-      now(),${JSON.stringify(space)}::jsonb,now(),'{}'::jsonb,
-      now(),${JSON.stringify(template)}::jsonb)`;
+  await sql`INSERT INTO factory.substrate_provision(owner_id,kind,generation,intent,resources)
+    VALUES(${f.workspaceID},'workspace',${generation},${JSON.stringify(provision)}::text::jsonb,
+      jsonb_build_object(
+        'atespace',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify(space)}::text::jsonb),
+        'policy',jsonb_build_object('attemptedAt',to_jsonb(now()),'value','{}'::jsonb),
+        'template',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify(template)}::text::jsonb)))`;
   await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,revision,state,
-      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      parent_connector_token_hash,create_intended_at,created_by,
+      atespace,actor_name,binding_intent,create_attempted_at,actor_uid,observation)
     VALUES(${attemptID},${f.projectID},${f.workspaceID},${f.kind === "ticket" ? f.changeID : null},${generation},${"a".repeat(40)},
-      'create-intended',${hashConnectorToken("owned-source-parent")},'owned-child-hash',now(),${f.userID})`;
-  await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
-      create_attempted_at,actor_uid,observation)
-    VALUES(${attemptID},${atespace},${actorName},
+      'create-intended',${hashConnectorToken("owned-source-parent")},now(),${f.userID},
+      ${atespace},${actorName},
       ${JSON.stringify({
         ...f.config,
         generation,
@@ -198,7 +198,10 @@ test("first Actor authorization rejects a mismatched identity before freezing ed
 
 // Controlled Source-service transport: these tests exercise real Factory/SQL
 // handoff and authentication, not native archive materialization acceptance.
-async function independentSourceFixture(kind: "personal" | "ticket" = "personal") {
+async function independentSourceFixture(
+  kind: "personal" | "ticket" = "personal",
+  published = true,
+) {
   const f = await substrateFixture("a".repeat(40), kind);
   const seed = seedFor(f);
   const directory = await mkdtemp(join(tmpdir(), "factory-source-commit-"));
@@ -228,7 +231,7 @@ process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
   const base = join(directory, "workspace-source", f.workspaceID, seed.id);
   await mkdir(join(base, "project"), { recursive: true });
   await writeFile(join(base, "initial-source.json"), JSON.stringify(seed));
-  await confirmInitialSourcePublication(f.database, f.workspaceID, seed.id);
+  if (published) await confirmInitialSourcePublication(f.database, f.workspaceID, seed.id);
   const priorState = process.env["FACTORY_STATE_DIRECTORY"];
   const priorBinary = process.env["FACTORY_SOURCE_SERVICE_BINARY"];
   process.env["FACTORY_STATE_DIRECTORY"] = directory;
@@ -251,9 +254,11 @@ process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
     await f.database
       .client`UPDATE factory.change_writer SET state='human',user_id=${f.userID},epoch=2 WHERE change_id=${f.changeID}`;
   }
-  await f.database
-    .client`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key)
-    VALUES(${actor.attemptID},'development',0,NULL)`;
+  await f.database.client`INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,state,payload)
+    VALUES(${crypto.randomUUID()},'runtime.environment_intent','runtime_attempt',${actor.attemptID},
+      ${`runtime.environment_intent:${actor.attemptID}`},'recorded',
+      ${JSON.stringify({ environment: "development", version: 0, secretKey: null })}::jsonb)`;
   await f.database
     .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${actor.attemptID}`;
   const controller = createWorkspaceSourceController(f.database, f.hub, source);
@@ -295,6 +300,48 @@ process.on("SIGTERM",async()=>{await server.stop(true);process.exit(0);});
     },
   };
 }
+
+test.each(["personal", "ticket"] as const)(
+  "first %s Start publishes unopened Source before its initial checkpoint",
+  async (kind) => {
+    const f = await independentSourceFixture(kind, false);
+    try {
+      expect(await f.source.lease(f.workspaceID)).toMatchObject({
+        owner: "service",
+        writable: true,
+        writerEpoch: 1,
+        generation: 0,
+        seedConfirmedAt: null,
+      });
+      await f.source.resume(f.workspaceID, f.attemptID, f.database.client);
+      const prepared = await f.source.lease(f.workspaceID);
+      expect(prepared).toMatchObject({
+        owner: "service",
+        actorUID: null,
+        writable: false,
+        writerEpoch: 2,
+        generation: 1,
+        seedConfirmedAt: expect.any(Date),
+        checkpoint: { seedID: f.seed.id, actorUID: null, writerEpoch: 2 },
+      });
+      expect(prepared?.checkpointID).toBe(prepared?.checkpoint?.id);
+      // Re-observation must not re-publish, checkpoint again or transfer files.
+      await f.source.resume(f.workspaceID, f.attemptID, f.database.client);
+      expect(await f.source.lease(f.workspaceID)).toEqual(prepared);
+      const response = await f.source.restoreEndpoint(f.request(), f.attemptID);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        checkpointSeedID: f.seed.id,
+        writerEpoch: 3,
+        checkpoint: { id: prepared?.checkpointID },
+      });
+      expect((await f.source.lease(f.workspaceID))?.owner).toBe("service");
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test("cold restore keeps Source readable during native Resume and grants execution only after exact import commit", async () => {
   const f = await independentSourceFixture();
@@ -391,7 +438,19 @@ test("cold restore keeps Source readable during native Resume and grants executi
       checkpointID: null,
     });
     expect((await environment(f.request(), f.attemptID)).status).toBe(200);
-    expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(409);
+    const retainedSource = await f.source.lease(f.workspaceID);
+    const retained = await f.source.restoreEndpoint(f.request(), f.attemptID);
+    expect(retained.status).toBe(200);
+    expect(await retained.json()).toEqual({
+      version: 2,
+      retained: true,
+      actorUID: f.actorUID,
+      writerEpoch: 3,
+      changeWriterEpoch: 3,
+      readOnly: false,
+      checkpoint: null,
+    });
+    expect(await f.source.lease(f.workspaceID)).toEqual(retainedSource);
   } finally {
     await lifecycle`SELECT pg_advisory_unlock(hashtext(${`runtime:${f.workspaceID}`}))`;
     await lifecycle.end({ timeout: 1 });
@@ -419,7 +478,19 @@ test("first and repeated import ACKs report the current Ticket writer role, not 
       });
     }
     expect((await f.source.lease(f.workspaceID))?.writerEpoch).toBe(3);
-    expect((await f.source.restoreEndpoint(f.request(), f.attemptID)).status).toBe(409);
+    const retainedSource = await f.source.lease(f.workspaceID);
+    const retained = await f.source.restoreEndpoint(f.request(), f.attemptID);
+    expect(retained.status).toBe(200);
+    expect(await retained.json()).toEqual({
+      version: 2,
+      retained: true,
+      actorUID: f.actorUID,
+      writerEpoch: 3,
+      changeWriterEpoch: 4,
+      readOnly: false,
+      checkpoint: null,
+    });
+    expect(await f.source.lease(f.workspaceID)).toEqual(retainedSource);
   } finally {
     await f.dispose();
   }
@@ -500,8 +571,8 @@ test.each(["v2", "unversioned", "undeleted"] as const)(
         WHERE id=${original.attemptID}`;
       if (prior !== "undeleted")
         await f.database
-          .client`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
-          WHERE runtime_attempt_id=${original.attemptID}`;
+          .client`UPDATE factory.runtime_attempt SET delete_intended_at=now(),deleted_at=now()
+          WHERE id=${original.attemptID}`;
       await f.database
         .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${original.attemptID}`;
       const successor = () =>
@@ -556,10 +627,8 @@ test.each([40, 64])(
       ]);
       expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
       expect(
-        await f.database.client`SELECT runtime_attempt_id FROM factory.substrate_binding`,
-      ).toHaveLength(0);
-      expect(
-        await f.database.client`SELECT workspace_id FROM factory.substrate_workspace`,
+        await f.database
+          .client`SELECT owner_id FROM factory.substrate_provision WHERE kind='workspace'`,
       ).toHaveLength(0);
     } finally {
       await f.dispose();
@@ -743,16 +812,16 @@ test("first Actor bind requires confirmed seed, frozen Source and exact observed
     const actor = await f.database.client.begin((sql) => admitActor(f, sql));
     for (const fault of [
       async (sql: SQL) => {
-        await sql`UPDATE factory.substrate_binding SET observation=NULL WHERE runtime_attempt_id=${actor.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET observation=NULL WHERE id=${actor.attemptID}`;
       },
       async (sql: SQL) => {
-        await sql`UPDATE factory.substrate_binding SET observation=jsonb_set(observation,'{metadata,uid}',to_jsonb(${crypto.randomUUID()}::text)) WHERE runtime_attempt_id=${actor.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET observation=jsonb_set(observation,'{metadata,uid}',to_jsonb(${crypto.randomUUID()}::text)) WHERE id=${actor.attemptID}`;
       },
       async (sql: SQL) => {
-        await sql`UPDATE factory.substrate_binding SET create_rejected=true WHERE runtime_attempt_id=${actor.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET create_rejected=true WHERE id=${actor.attemptID}`;
       },
       async (sql: SQL) => {
-        await sql`UPDATE factory.substrate_binding SET delete_intended_at=now() WHERE runtime_attempt_id=${actor.attemptID}`;
+        await sql`UPDATE factory.runtime_attempt SET delete_intended_at=now() WHERE id=${actor.attemptID}`;
       },
       async (sql: SQL) => {
         await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${actor.attemptID}`;
@@ -764,11 +833,11 @@ test("first Actor bind requires confirmed seed, frozen Source and exact observed
         const otherID = runtimeIdentity(f.workspaceID, 2).attemptID;
         await sql`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${actor.attemptID}`;
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            parent_connector_token_hash,create_intended_at,created_by,
+            atespace,actor_name,binding_intent)
           VALUES(${otherID},${f.projectID},${f.workspaceID},2,${"a".repeat(40)},
-            'create-intended','owned-other-parent','owned-other-child',now(),${f.userID})`;
-        await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-          VALUES(${otherID},${`fa-${otherID.replaceAll("-", "")}`},
+            'create-intended','owned-other-parent',now(),${f.userID},
+            ${`fa-${otherID.replaceAll("-", "")}`},
             ${`runtime-${otherID.replaceAll("-", "")}`},
             ${JSON.stringify({ ...f.config, generation: 2 })}::jsonb)`;
         await sql`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${otherID}`;
@@ -784,16 +853,17 @@ test("first Actor bind requires confirmed seed, frozen Source and exact observed
     }
     await expect(
       f.database
-        .client`UPDATE factory.substrate_binding SET intent=jsonb_set(intent,'{templateUID}',to_jsonb(${crypto.randomUUID()}::text))
-        WHERE runtime_attempt_id=${actor.attemptID}`.execute(),
+        .client`UPDATE factory.runtime_attempt SET binding_intent=jsonb_set(binding_intent,'{templateUID}',to_jsonb(${crypto.randomUUID()}::text))
+        WHERE id=${actor.attemptID}`.execute(),
     ).rejects.toThrow("identity and dispatch facts are immutable");
     await expect(
-      f.database.client`UPDATE factory.substrate_workspace SET template='{}'::jsonb
-        WHERE workspace_id=${f.workspaceID}`.execute(),
+      f.database
+        .client`UPDATE factory.substrate_provision SET resources=jsonb_set(resources,'{template,value}','{}'::jsonb)
+        WHERE owner_id=${f.workspaceID} AND kind='workspace'`.execute(),
     ).rejects.toThrow("identity and dispatch facts are immutable");
     await expect(
-      f.database.client`UPDATE factory.substrate_binding SET create_attempted_at=NULL
-        WHERE runtime_attempt_id=${actor.attemptID}`.execute(),
+      f.database.client`UPDATE factory.runtime_attempt SET create_attempted_at=NULL
+        WHERE id=${actor.attemptID}`.execute(),
     ).rejects.toThrow("identity and dispatch facts are immutable");
     await expect(
       f.database.client.begin(async (sql) => {
@@ -848,11 +918,8 @@ test("first Actor bind requires confirmed seed, frozen Source and exact observed
     await expect(f.database.client.begin((sql) => admitActor(f, sql, 2))).rejects.toThrow(
       "exact cleanup and independent Source",
     );
-    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
-      WHERE id=${actor.attemptID}`;
-    await f.database
-      .client`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
-      WHERE runtime_attempt_id=${actor.attemptID}`;
+    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',
+      delete_intended_at=now(),deleted_at=now() WHERE id=${actor.attemptID}`;
     const successor = await f.database.client.begin((sql) => admitActor(f, sql, 2));
     const finalID = await freeze(f, 6);
     await confirm(f, manifest(f, finalID, actor.actorUID, 6, 3), 3);

@@ -1,4 +1,4 @@
-import type { DatabaseTransaction, createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase, DatabaseTransaction } from "#db/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 
 // Candidate publication has no dependency on the native commit transport or its SDK.
@@ -16,13 +16,14 @@ export async function publishWorkspaceCandidate(
       WHERE session.change_id=${changeID} AND NOT session.stop_pending
         AND session.state IN ('stopped','failed','waiting')
         AND EXISTS (
-          SELECT 1 FROM factory.workspace_submission submission
+          SELECT 1 FROM factory.operation submission
           JOIN factory.change_commit_operation operation ON operation.id=submission.id
-          JOIN factory.development_workspace workspace ON workspace.id=submission.workspace_id
-          WHERE operation.change_id=session.change_id AND workspace.change_id=session.change_id
+          JOIN factory.development_workspace workspace ON workspace.id=(submission.scope_id)::uuid
+          WHERE submission.kind='workspace.submission' AND submission.scope_type='workspace'
+            AND operation.change_id=session.change_id AND workspace.change_id=session.change_id
             AND operation.source='workspace' AND operation.state='succeeded'
             AND operation.commit_sha=operation.observed_remote_sha AND operation.completed_at IS NOT NULL
-            AND submission.writer_epoch=${writer.epoch}::bigint
+            AND (submission.payload->>'writerEpoch')::bigint=${writer.epoch}::bigint
             AND session.updated_at<=submission.created_at
             AND operation.id=(SELECT id FROM factory.change_commit_operation
               WHERE change_id=session.change_id AND state='succeeded' AND source<>'integration'
@@ -47,7 +48,7 @@ export function submittedCandidate(
       AND state NOT IN ('succeeded','failed'))
     AND NOT EXISTS(SELECT 1 FROM factory.workspace_shared_document document
       JOIN factory.development_workspace workspace ON workspace.id=document.workspace_id
-      WHERE workspace.change_id=change.id AND (document.dirty OR document.conflict))
+      WHERE workspace.change_id=change.id AND document.sync_state<>'clean')
     AND EXISTS(
       SELECT 1 FROM factory.change_commit_operation submitted
       WHERE submitted.change_id=change.id AND submitted.state='succeeded'
@@ -60,11 +61,13 @@ export function submittedCandidate(
             AND EXISTS(SELECT 1 FROM factory.agent_turn
               WHERE id=submitted.id AND change_id=change.id AND state='completed'))
           OR (submitted.source='workspace' AND writer.state='unassigned'
-            AND EXISTS(SELECT 1 FROM factory.workspace_submission submission
-              JOIN factory.development_workspace workspace ON workspace.id=submission.workspace_id
+            AND EXISTS(SELECT 1 FROM factory.operation submission
+              JOIN factory.development_workspace workspace ON workspace.id=(submission.scope_id)::uuid
               JOIN factory.runtime_attempt attempt ON attempt.id=submitted.runtime_attempt_id
                 AND attempt.workspace_id=workspace.id AND attempt.change_id=change.id
-              WHERE submission.id=submitted.id AND submission.writer_epoch=writer.epoch
+              WHERE submission.id=submitted.id AND submission.kind='workspace.submission'
+                AND submission.scope_type='workspace'
+                AND (submission.payload->>'writerEpoch')::bigint=writer.epoch
                 AND workspace.kind='ticket' AND workspace.change_id=change.id
                 AND workspace.project_id=change.project_id
                 AND NOT EXISTS(SELECT 1 FROM factory.agent_turn coding

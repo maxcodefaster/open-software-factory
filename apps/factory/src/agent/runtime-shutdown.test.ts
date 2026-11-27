@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createDatabase } from "#db/client";
 import type { RuntimeHub } from "../runtime/hub";
 import { createCodingRuntimeShutdown } from "./runtime-shutdown";
 

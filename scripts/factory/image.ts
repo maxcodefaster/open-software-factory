@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import { publishedRuntimeArtifacts } from "./artifacts";
 import { requireAvailableRuntimeArtifacts } from "./artifact-availability";
+import { publishedRuntimeArtifacts } from "./artifacts";
 
 const root = resolve(import.meta.dir, "../..");
 const directory = resolve(process.env["FACTORY_STATE_DIRECTORY"] || resolve(root, ".factory"));

@@ -3,15 +3,11 @@ import {
   verificationChangeScope,
   verificationDiagnosisInput,
   verificationRepairInstructions,
-} from "../../../../packages/conversation-domain/src/verification";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import {
-  changeAgentSession,
-  runtimeAttempt,
-  verification as verificationTable,
-} from "../../../../packages/db/src/schema";
-import type { ForgeRepository } from "../../../../packages/forge/src/contracts";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+} from "#conversation-domain/verification";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { changeAgentSession, runtimeAttempt, verification as verificationTable } from "#db/schema";
+import type { ForgeRepository } from "#forge/contracts";
+import type { createForgejoClient } from "#forge/forge";
 import { reportFailure } from "../failure-log";
 import type { RuntimeAttemptView } from "../runtime/types";
 
@@ -28,6 +24,10 @@ type VerificationCandidate = {
 
 function bounded(value: string, limit = 2_000) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+}
+
+function verificationRunnerName(verificationID: string) {
+  return `factory-${verificationID.replaceAll("-", "").slice(0, 16)}`;
 }
 
 export function createDeliveryVerification(
@@ -101,9 +101,8 @@ export function createDeliveryVerification(
       WHERE verification.id=${verificationID} AND verification.runner_id IS NULL
         AND (verification.runtime_attempt_id IS NULL OR EXISTS(
           SELECT 1 FROM factory.runtime_attempt attempt
-          JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
           WHERE attempt.id=verification.runtime_attempt_id AND attempt.state='stopped'
-            AND binding.deleted_at IS NOT NULL
+            AND attempt.deleted_at IS NOT NULL
         ))`;
     return Boolean(confirmed);
   }
@@ -172,7 +171,6 @@ export function createDeliveryVerification(
             changeId: change.id,
             commitSha: commitSHA,
             pullRequestNumber: pullRequest.number,
-            runnerName: `factory-${verificationID.replaceAll("-", "").slice(0, 16)}`,
             createdBy: change.userID,
           })
           .onConflictDoNothing({
@@ -395,13 +393,9 @@ export function createDeliveryVerification(
         await forge.deleteRunner(repository, Number(verification.runnerID));
       }
       if (!(await stillActive())) return;
-      const names = await db
-        .select({ name: verificationTable.runnerName })
-        .from(verificationTable)
-        .where(eq(verificationTable.id, verification.id));
       const registration = await forge.registerEphemeralRunner(
         repository,
-        names[0]?.name ?? `factory-${verification.id.replaceAll("-", "").slice(0, 16)}`,
+        verificationRunnerName(verification.id),
       );
       const saved = await db
         .update(verificationTable)

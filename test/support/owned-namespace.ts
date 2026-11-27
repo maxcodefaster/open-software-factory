@@ -1,5 +1,5 @@
-import { expect } from "@playwright/test";
 import { spawn } from "node:child_process";
+import { expect } from "@playwright/test";
 
 async function kubectl(args: string[], input?: unknown) {
   const child = spawn("kubectl", ["--context", "orbstack", ...args], {

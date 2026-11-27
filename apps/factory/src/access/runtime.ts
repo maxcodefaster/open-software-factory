@@ -1,6 +1,6 @@
 import { and, eq, sql as expression, gt, ne, or } from "drizzle-orm";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import { authSession, runtimeAttempt } from "../../../../packages/db/src/schema";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import { authSession, runtimeAttempt } from "#db/schema";
 import { CommandError } from "../command-error";
 import { createAccessController } from "./controller";
 

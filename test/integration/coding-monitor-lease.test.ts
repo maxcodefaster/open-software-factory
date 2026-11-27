@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { createDatabase } from "#db/client";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
-import { createDatabase } from "../../packages/db/src/client";
+import { createBuildBrowserFixture as createBuildBrowserController } from "../fixtures/build-browser";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import {
@@ -66,11 +66,14 @@ async function ownedBuild() {
   // Exercise an actual bootstrap through execute(), not a directly invoked
   // monitor or an artificially expired/shortened ownership lease.
   await database.client`DELETE FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
-  await database.client`INSERT INTO factory.branch_create_operation(
-    id,change_id,repository_owner,repository_name,branch_name,start_sha,
-    idempotency_key,state,observed_head_sha,completed_at)
-    SELECT ${crypto.randomUUID()},id,'owned','fixture',branch_name,base_sha,
-      ${crypto.randomUUID()},'succeeded',base_sha,now()
+  await database.client`INSERT INTO factory.operation(
+    id,kind,scope_type,scope_id,idempotency_key,state,payload,result,completed_at)
+    SELECT ${crypto.randomUUID()},'delivery.branch_create','change',id::text,
+      'delivery.branch_create:change:'||id::text||':create-branch','succeeded',
+      jsonb_build_object(
+        'changeId',id::text,'repositoryOwner','owned','repositoryName','fixture',
+        'branchName',branch_name,'startSha',base_sha,'attemptCount',1,'leaseGeneration',0,'reconcileAfter',NULL),
+      jsonb_build_object('observedHeadSha',base_sha),now()
     FROM factory.change WHERE id=${owned.changeID}`;
   owned.acceptResponse();
   owned.release();

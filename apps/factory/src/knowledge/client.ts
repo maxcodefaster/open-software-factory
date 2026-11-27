@@ -1,0 +1,1 @@
+export { documentationLanguage } from "./language";

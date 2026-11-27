@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,7 +29,12 @@ import (
 // Parent/root. The inherited listener is inside the Parent's 0700 directory;
 // Project code cannot connect to it or read its random service-only capability.
 // No Parent/Child/native control credential is inherited by this process.
-func startNativeSource(ctx context.Context, workspaceID string, generation, ownerEpoch, writerEpoch uint64, readOnly bool, directory string, failed context.CancelFunc) (http.Handler, func(), error) {
+type nativeSourceService struct {
+	http.Handler
+	attest func(context.Context, string) (string, error)
+}
+
+func startNativeSource(ctx context.Context, workspaceID string, generation, ownerEpoch, writerEpoch uint64, readOnly bool, directory string, failed context.CancelFunc) (*nativeSourceService, func(), error) {
 	var token [32]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, nil, errors.New("native Source identity is unavailable")
@@ -57,16 +63,6 @@ func startNativeSource(ctx context.Context, workspaceID string, generation, owne
 		return nil, nil, err
 	}
 	defer file.Close()
-	archive, closeArchive, err := nativeArchiveView(filepath.Join(directory, "source-archive-view"))
-	if err != nil {
-		return nil, nil, err
-	}
-	archiveStarted := false
-	defer func() {
-		if !archiveStarted {
-			closeArchive()
-		}
-	}()
 	binary, err := os.Executable()
 	if err != nil {
 		return nil, nil, err
@@ -75,30 +71,91 @@ func startNativeSource(ctx context.Context, workspaceID string, generation, owne
 	command := exec.CommandContext(ctx, binary, "native-source")
 	command.Stdin = bytes.NewReader(encoded)
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin"}
-	command.ExtraFiles = []*os.File{file, archive}
+	command.ExtraFiles = []*os.File{file}
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{}}}
 	if err := command.Start(); err != nil {
 		return nil, nil, errors.New("native Source process could not start")
 	}
-	archiveStarted = true
-	archive.Close()
 	done := make(chan struct{})
+	var stopping atomic.Bool
 	go func() {
 		_ = command.Wait()
 		close(done)
-		failed()
+		if !stopping.Load() {
+			failed()
+		}
 	}()
 	proxy, transport := nativeSourceProxy(socket, access)
 	cleanup := func() {
+		stopping.Store(true)
 		_ = command.Process.Kill()
 		<-done
 		transport.CloseIdleConnections()
-		closeArchive()
 		// removeStaleSocket checks the exact file type/UID and refuses a live
 		// replacement; never unlink an unrelated path during error cleanup.
 		_ = removeStaleSocket(socket)
 	}
-	return proxy, cleanup, nil
+	// Announcing the Parent Source channel admits Project entry. Confirm the
+	// actual development-user file service first, not merely a forked process.
+	ready, cancelReady := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelReady()
+	client := &http.Client{Transport: transport}
+	for {
+		request, err := http.NewRequestWithContext(ready, http.MethodPost,
+			"http://source.internal/v1/workspaces/"+workspaceID+"/stat", strings.NewReader(`{"path":""}`))
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		request.Header.Set("Authorization", "Bearer "+access.Token)
+		request.Header.Set("X-Factory-Source-Service", access.ServiceID)
+		request.Header.Set("X-Factory-Source-Epoch", fmt.Sprint(access.Epoch))
+		response, err := client.Do(request)
+		if err == nil {
+			io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+			if response.StatusCode != http.StatusServiceUnavailable {
+				cleanup()
+				return nil, nil, errors.New("native Source readiness was denied")
+			}
+		}
+		select {
+		case <-ready.Done():
+			cleanup()
+			return nil, nil, errors.New("native Source file service readiness is unconfirmed")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	service := &nativeSourceService{Handler: proxy}
+	service.attest = func(ctx context.Context, checkpointID string) (string, error) {
+		body, _ := json.Marshal(map[string]any{"checkpointId": checkpointID})
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://source.internal/v1/workspaces/"+workspaceID+"/attest", bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		request.Header.Set("Authorization", "Bearer "+access.Token)
+		request.Header.Set("X-Factory-Source-Service", access.ServiceID)
+		request.Header.Set("X-Factory-Source-Epoch", fmt.Sprint(access.Epoch))
+		response, err := client.Do(request)
+		if err != nil {
+			return "", err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return "", errors.New("Preserved Source attestation was not confirmed")
+		}
+		var bundle workspacefiles.Bundle
+		if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&bundle) != nil ||
+			len(bundle.TreeSHA256) != 64 {
+			return "", errors.New("Preserved Source tree identity is unavailable")
+		}
+		return bundle.TreeSHA256, nil
+	}
+	return service, cleanup, nil
 }
 
 func nativeSourceProxy(socket string, access workspacefiles.Access) (*httputil.ReverseProxy, *http.Transport) {
@@ -266,20 +323,12 @@ func runSourceService(ctx context.Context, descriptor bool) error {
 		source, err = workspacefiles.OpenDescriptor(root)
 		root.Close()
 	} else {
-		source, err = workspacefiles.Open("/home/rootless/persist/project")
+		source, err = workspacefiles.Open("/var/lib/factory/source/project")
 	}
 	if err != nil {
 		return errors.New("native canonical Source is unavailable")
 	}
 	defer source.Close()
-	if !descriptor {
-		archive := os.NewFile(4, "native-Source-archive-view")
-		err = source.AttachArchiveDescriptor(archive)
-		archive.Close()
-		if err != nil {
-			return err
-		}
-	}
 	service, err := workspacefiles.NewService(source, access)
 	if err != nil {
 		return err

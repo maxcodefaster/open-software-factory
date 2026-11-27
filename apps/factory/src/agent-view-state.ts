@@ -1,4 +1,4 @@
-import { type AgentView } from "./agent/contracts";
+import type { AgentView } from "./agent/contracts";
 
 export type AgentSnapshot = { changeID: string; view: AgentView };
 

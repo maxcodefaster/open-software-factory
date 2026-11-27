@@ -3,6 +3,13 @@
   "primaryApp": "web",
   "apps": [
     {
+      "id": "support",
+      "label": "Support service",
+      "command": ["node", "support.mjs"],
+      "port": 4100,
+      "healthPath": "/health"
+    },
+    {
       "id": "web",
       "label": "Web",
       "command": ["node", "src/server.mjs"],

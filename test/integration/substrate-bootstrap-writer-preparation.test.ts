@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
@@ -21,11 +23,11 @@ import {
   templateInitialSourceRole,
 } from "../../apps/factory/src/workspace/source-role-fence";
 import { createSubstrateSources } from "../../apps/factory/src/workspace/substrate-source";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+  nativeProjectBootstrap,
+  nativeProjectDefinition,
+  nativeProjectTemplate,
+} from "../fixtures/native-project";
 import { substrateFixture } from "../fixtures/substrate";
 
 test.each([
@@ -75,6 +77,13 @@ test.each([
   async (fault) => {
     const f = await substrateFixture("a".repeat(40), "ticket");
     const sources = createSubstrateSources(f.database, f.hub);
+    // Saved configuration is controlled here; Source materialization belongs
+    // to its own lane. Keep the real lease, import and role-fencing methods.
+    sources.startupConfiguration = async (workspaceID, actorTemplatePath) => {
+      expect(workspaceID).toBe(f.workspaceID);
+      expect(actorTemplatePath).toBe(nativeProjectTemplate.path);
+      return { systemContract: null, actorTemplate: nativeProjectTemplate };
+    };
     let runtime: Awaited<ReturnType<typeof f.controller>> | undefined;
     let capabilityReads = 0;
     const sourceController = createWorkspaceSourceController(
@@ -108,18 +117,17 @@ test.each([
               "factory.dev/deployment": "owned",
             },
           },
-          {
+          nativeProjectBootstrap({
             sourceHandoff: fault !== "missing-capability",
             assignment: {
               runtimeAttemptId: f.attemptID,
               generation: 1,
               repositoryIdentity: f.projectID,
-              workspaceFolder: "/home/rootless/persist/project",
-              connectorStateDir: "/home/rootless/persist/connector",
               preserveWorkspace: true,
             },
             source: { workspaceId: f.workspaceID, projectId: f.projectID },
-          },
+          }),
+          nativeProjectDefinition,
         ),
         { metadata },
       );
@@ -138,6 +146,37 @@ test.each([
         if (method === "CreateActor") {
           creates++;
           actor = await f.createdActor();
+          const source = await sources.lease(f.workspaceID);
+          if (!source?.seed) throw Error("Owned independent Source seed missing");
+          expect(source).toMatchObject({
+            actorUID: null,
+            owner: "service",
+            writable: true,
+            writerEpoch: 1,
+            generation: 0,
+            serviceBase: source.seed.id,
+            seedConfirmedAt: null,
+          });
+          const checkpointID = crypto.randomUUID();
+          const checkpoint = {
+            id: checkpointID,
+            workspaceID: f.workspaceID,
+            actorUID: null,
+            seedID: source.seed.id,
+            writerEpoch: 2,
+            generation: 1,
+            bundle: { version: 1, bytes: 1, sha256: "a".repeat(64), chunks: ["a".repeat(64)] },
+          };
+          // Controlled complete initial export, before the real sources.resume
+          // consumes it. Native materialization has its own acceptance lane.
+          await f.database.client.begin(async (sql) => {
+            await sql`UPDATE factory.substrate_source SET seed_confirmed_at=now()
+              WHERE workspace_id=${f.workspaceID}`;
+            await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,
+              checkpoint_id=${checkpointID} WHERE workspace_id=${f.workspaceID}`;
+            await sql`UPDATE factory.substrate_source SET generation=1,
+              checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE workspace_id=${f.workspaceID}`;
+          });
           return structuredClone(actor);
         }
         if (method === "ResumeActor" && actor) {
@@ -147,35 +186,19 @@ test.each([
           if (resumes === 1) {
             const actorUID = actor.metadata.uid;
             const source = await sources.lease(f.workspaceID);
-            if (!source?.seed) throw Error("Owned independent Source seed missing");
+            if (!source?.seed || !source.checkpoint)
+              throw Error("Owned initial Source export missing");
             expect(source).toMatchObject({
               actorUID: null,
               owner: "service",
-              writable: true,
-              writerEpoch: 1,
-              generation: 0,
-              serviceBase: source.seed.id,
-              seedConfirmedAt: null,
-            });
-            const checkpointID = crypto.randomUUID();
-            const checkpoint = {
-              id: checkpointID,
-              workspaceID: f.workspaceID,
-              actorUID: null,
-              seedID: source.seed.id,
+              writable: false,
               writerEpoch: 2,
               generation: 1,
-              bundle: { version: 1, bytes: 1, sha256: "a".repeat(64), chunks: ["a".repeat(64)] },
-            };
-            // Controlled complete Source2 import receipt, using the real storage
-            // constraints. Native materialization has its own acceptance lane.
+              checkpointID: source.checkpoint.id,
+            });
+            expect(source.seedConfirmedAt).not.toBeNull();
+            // Controlled Source2 import ACK, using the real storage constraints.
             await f.database.client.begin(async (sql) => {
-              await sql`UPDATE factory.substrate_source SET seed_confirmed_at=now()
-                WHERE workspace_id=${f.workspaceID}`;
-              await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,
-                checkpoint_id=${checkpointID} WHERE workspace_id=${f.workspaceID}`;
-              await sql`UPDATE factory.substrate_source SET generation=1,
-                checkpoint=${JSON.stringify(checkpoint)}::jsonb WHERE workspace_id=${f.workspaceID}`;
               await sql`UPDATE factory.substrate_source SET owner='actor',actor_uid=${actorUID},
                 writer_epoch=3,writable=true,checkpoint_id=NULL WHERE workspace_id=${f.workspaceID}`;
             });
@@ -309,7 +332,7 @@ test.each([
       SELECT state,fence_required FROM factory.change_writer WHERE change_id=${f.changeID}`;
       expect(preparing).toMatchObject({ state: "agent-preparing", fence_required: false });
       const [provision] = await f.database.client<{ template: object }[]>`
-        SELECT template FROM factory.substrate_workspace WHERE workspace_id=${f.workspaceID} AND generation=1`;
+        SELECT resources->'template'->'value' AS template FROM factory.substrate_provision WHERE owner_id=${f.workspaceID} AND kind='workspace' AND generation=1`;
       expect(Object.keys(provision?.template ?? {})).toEqual(["metadata"]);
 
       switch (fault) {
@@ -328,11 +351,22 @@ test.each([
           VALUES(${f.changeID},${f.attemptID},${`ses_owned_${original.id.replaceAll("-", "")}`},
             'stopped',${f.userID},${original.id})`;
           break;
-        case "human-history":
-          await f.database.client`INSERT INTO factory.change_editing_decision(
-          command_id,change_id,actor_id,target_id,writer_epoch,kind)
-          VALUES(${crypto.randomUUID()},${f.changeID},${f.userID},${f.userID},1,'takeover')`;
+        case "human-history": {
+          const decisionID = crypto.randomUUID();
+          await f.database.client`INSERT INTO factory.audit_event(
+          id,kind,scope_type,scope_id,dedupe_key,actor_id,payload)
+          VALUES(${decisionID},'access.change_editing_decision','change',${f.changeID},
+            ${`access.change_editing_decision:${decisionID}`},${f.userID},
+            ${JSON.stringify({
+              changeId: f.changeID,
+              kind: "takeover",
+              fromEpoch: 1,
+              toEpoch: 2,
+              targetUserId: f.userID,
+              requestId: null,
+            })}::jsonb)`;
           break;
+        }
         case "previous-readiness":
           await f.database
             .client`UPDATE factory.runtime_attempt SET ready_at=now() WHERE id=${f.attemptID}`;
@@ -660,18 +694,17 @@ test.each([
           ...renderSubstrateTemplate(
             atespace,
             { workloadImage, workerSelector: {} },
-            {
+            nativeProjectBootstrap({
               sourceHandoff: true,
               assignment: {
                 runtimeAttemptId: attemptID,
                 generation: current,
                 repositoryIdentity: f.projectID,
-                workspaceFolder: "/home/rootless/persist/project",
-                connectorStateDir: "/home/rootless/persist/connector",
                 preserveWorkspace: true,
               },
               source: { workspaceId: f.workspaceID, projectId: f.projectID },
-            },
+            }),
+            nativeProjectDefinition,
           ),
           metadata: { ...f.template.metadata, atespace, uid: crypto.randomUUID() },
         };
@@ -681,23 +714,25 @@ test.each([
         actor.metadata.atespace = atespace;
         // Retained native/receipt facts only; this does not dispatch an Actor.
         await f.database.client.begin(async (sql) => {
-          await sql`INSERT INTO factory.substrate_workspace(workspace_id,generation,intent,
-            atespace_attempted_at,atespace,policy_attempted_at,policy,template_attempted_at,template)
-            VALUES(${f.workspaceID},${current},
+          await sql`INSERT INTO factory.substrate_provision(owner_id,kind,generation,intent,resources)
+            VALUES(${f.workspaceID},'workspace',${current},
             ${JSON.stringify({
               configuration: { deployment: "fresh-workspaces" },
               revision: "a".repeat(40),
               repositoryURL: "https://example.invalid/fixture.git",
               branch: f.branch,
               templateSHA256,
-            })}::jsonb,now(),${JSON.stringify(space)}::jsonb,now(),'{}'::jsonb,
-            now(),${JSON.stringify({ metadata: template.metadata })}::jsonb)`;
+            })}::text::jsonb,
+            jsonb_build_object(
+              'atespace',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify(space)}::text::jsonb),
+              'policy',jsonb_build_object('attemptedAt',to_jsonb(now()),'value','{}'::jsonb),
+              'template',jsonb_build_object('attemptedAt',to_jsonb(now()),'value',${JSON.stringify({ metadata: template.metadata })}::text::jsonb)))`;
           await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,change_id,generation,
-            revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            revision,state,parent_connector_token_hash,create_intended_at,created_by,
+            atespace,actor_name,binding_intent,actor_uid,create_attempted_at,observation)
             VALUES(${attemptID},${f.projectID},${f.workspaceID},${f.changeID},${current},${"a".repeat(40)},
-            'create-intended','owned-parent','owned-child',now(),${f.userID})`;
-          await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,
-            actor_uid,create_attempted_at,observation) VALUES(${attemptID},${atespace},${actor.metadata.name},
+            'create-intended','owned-parent',now(),${f.userID},
+            ${atespace},${actor.metadata.name},
             ${JSON.stringify({
               ...f.config,
               deployment: "fresh-workspaces",
@@ -709,9 +744,7 @@ test.each([
             })}::jsonb,${actor.metadata.uid},now(),${JSON.stringify(actor)}::jsonb)`;
           if (current < generation) {
             await sql`UPDATE factory.runtime_attempt SET state='stopped',stop_intended_at=now(),
-              stopped_at=now() WHERE id=${attemptID}`;
-            await sql`UPDATE factory.substrate_binding SET delete_intended_at=now(),deleted_at=now()
-              WHERE runtime_attempt_id=${attemptID}`;
+              delete_intended_at=now(),deleted_at=now() WHERE id=${attemptID}`;
             return;
           }
           if (seeded) {
@@ -739,9 +772,8 @@ test.each([
           const resume = await intendActorRPCIn(sql, attemptID, "resume", null, actor);
           await dispatchActorRPCIn(sql, attemptID, resume);
           actor.status.state = "ACTOR_STATE_RESUMING";
-          await sql`UPDATE factory.substrate_binding SET observation=${JSON.stringify(actor)}::jsonb
-            WHERE runtime_attempt_id=${attemptID}`;
-          await sql`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${attemptID}`;
+          await sql`UPDATE factory.runtime_attempt SET observation=${JSON.stringify(actor)}::jsonb,
+            state='starting' WHERE id=${attemptID}`;
           await sql`UPDATE factory.change SET state='starting',runtime_attempt_id=${attemptID}
             WHERE id=${f.changeID}`;
           await sql`UPDATE factory.change_writer SET fence_attempt_id=${attemptID},fence_required=false

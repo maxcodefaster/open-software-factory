@@ -15,8 +15,8 @@ test("Build freezes only authorized active Project Knowledge in its exact dispat
     await owned.database.client`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES(${outsiderID},'Unrelated Project reader',${`knowledge-outsider-${outsiderID}@factory.local`},true)`;
     await owned.database.client`INSERT INTO factory.project(id, slug, name, repository_url,
-      default_branch, devcontainer_path, created_by) VALUES(${otherProjectID}, ${`knowledge-denial-${otherProjectID}`},
-      'Other Project', 'https://example.invalid/other.git', 'main', '.devcontainer/devcontainer.json', ${owned.userID})`;
+      default_branch, actor_template_path, created_by) VALUES(${otherProjectID}, ${`knowledge-denial-${otherProjectID}`},
+      'Other Project', 'https://example.invalid/other.git', 'main', '.factory/actor-template.json', ${owned.userID})`;
     for (const [id, projectID, state, body] of [
       [pageID, owned.projectID, "active", "The starter preview uses the declared web App."],
       [archivedID, owned.projectID, "archived", "ARCHIVED MUST NOT ENTER BUILD"],

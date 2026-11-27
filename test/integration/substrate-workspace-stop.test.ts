@@ -1,16 +1,13 @@
 import { expect, test } from "bun:test";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { SubstrateSourceHandoff } from "../../apps/factory/src/workspace/substrate-source";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import {
   readResetResources,
   requireResetResourcesAbsent,
 } from "../../scripts/factory/reset-resources";
-import { substrateFixture } from "../fixtures/substrate";
 import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
+import { substrateFixture } from "../fixtures/substrate";
 
 test("Workspace Stop requires independent Source, fences concurrent Start and reconciles one UID-bound Delete", async () => {
   const f = await substrateFixture();
@@ -104,9 +101,9 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
         options: { uid: originalUID, version: "2" },
       });
       const [intent] = await f.database.client`
-        SELECT a.state,a.stop_intended_at,b.delete_intended_at,b.deleted_at
-        FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-        WHERE a.id=${f.attemptID}`;
+        SELECT state,stop_intended_at,delete_intended_at,deleted_at
+        FROM factory.runtime_attempt
+        WHERE id=${f.attemptID}`;
       expect(intent?.["state"]).toBe("stopping");
       expect(intent?.["stop_intended_at"]).not.toBeNull();
       expect(intent?.["delete_intended_at"]).not.toBeNull();
@@ -129,8 +126,8 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     expect((await c.get(f.attemptID))?.state).toBe("stopping");
     expect(suspends).toBe(0);
     const [earlyStop] = await f.database.client`SELECT stop_intended_at,checkpoint
-      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-      WHERE a.id=${f.attemptID}`;
+      FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     expect(earlyStop?.["stop_intended_at"]).not.toBeNull();
     expect(earlyStop?.["checkpoint"]).toBeNull();
     independent = true;
@@ -167,8 +164,8 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     expect(suspends).toBe(0);
     expect(resumes).toBe(1);
     const [retained] = await f.database.client`
-      SELECT actor_uid,deleted_at,checkpoint FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      SELECT actor_uid,deleted_at,checkpoint FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     if (!retained) throw Error("Original native Stop binding disappeared");
     expect(retained?.["actor_uid"]).toBe(originalUID);
     expect(retained?.["deleted_at"]).not.toBeNull();
@@ -195,8 +192,8 @@ test("Workspace Stop requires independent Source, fences concurrent Start and re
     ).rejects.toThrow("native scope");
     expect(disposalReads).toEqual(["GetAtespace"]);
     const [observed] = await f.database
-      .client`SELECT actor_uid,deleted_at,checkpoint FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      .client`SELECT actor_uid,deleted_at,checkpoint FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     expect(observed).toEqual(retained);
   } finally {
     release.resolve();

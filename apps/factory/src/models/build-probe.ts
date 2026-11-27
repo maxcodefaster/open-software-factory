@@ -3,10 +3,10 @@ import { model as anthropicModel } from "@opencode/ai/providers/anthropic";
 import { model as deepseekModel } from "@opencode/ai/providers/deepseek";
 import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
 import { z } from "zod";
-import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
-import { codingReasoningInput } from "../../../../packages/conversation-domain/src/model-settings";
-import { unknownCounters, usageCounters } from "../../../../packages/conversation-domain/src/usage";
-import { openCodeModelConfiguration } from "../../../../packages/runtime-kubernetes/src/opencode-model";
+import type { ModelProbeResult } from "#conversation-domain/model-connection";
+import { codingReasoningInput } from "#conversation-domain/model-settings";
+import { unknownCounters, usageCounters } from "#conversation-domain/usage";
+import { openCodeModelConfiguration } from "#runtime-kubernetes/opencode-model";
 import type { ModelProbeInput } from "./probe-contracts";
 import { modelProbeFailure, reportedModelLimits } from "./probe-result";
 

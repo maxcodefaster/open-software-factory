@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   type AgentTurnCommand,
-  agentTurnBoundary,
   agentTurnAuthorityInput,
+  agentTurnBoundary,
   agentTurnCommandInput,
   assertAgentTurnAuthority,
   changeAgentPromptInput,

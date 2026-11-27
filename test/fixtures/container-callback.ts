@@ -1,5 +1,5 @@
 import { connect, createServer, isIP, type Socket } from "node:net";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { runCommand } from "#runtime-kubernetes/command";
 
 function loopbackTarget(base: string) {
   const target = new URL(base);

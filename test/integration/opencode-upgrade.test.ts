@@ -143,14 +143,7 @@ test.skipIf(!candidateImage)(
       expect(logs.some((event) => event.type === "session.step.ended")).toBe(true);
       await Bun.write(resolve(project, "manual.txt"), "Retained developer edits\n");
       await control("/kill");
-      upgraded = await pinnedOpenCode(
-        candidateImage,
-        undefined,
-        undefined,
-        undefined,
-        project,
-        "2.3.2",
-      );
+      upgraded = await pinnedOpenCode(candidateImage, undefined, undefined, project, "2.3.2");
       expect(await upgraded.client.message.list({ sessionID, limit: 100 })).toEqual(history);
       const retainedLogs = await Array.fromAsync(
         upgraded.client.session.log({ sessionID, follow: false }),

@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { developerIDEOrigin } from "../../apps/factory/src/workspace/client";
 import { developerIDEPath } from "../../apps/factory/src/workspace/developer-ide-access";
 import { test } from "../fixtures/browser-test";
 

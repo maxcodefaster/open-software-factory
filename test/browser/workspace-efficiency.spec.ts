@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
+import { createDatabase } from "#db/client";
 import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
 import { openProjectMenu } from "../fixtures/project-menu";
@@ -63,9 +63,9 @@ test("workspace focus and Ticket quick-find preserve keyboard access and commiss
     const nestedID = crypto.randomUUID();
     const historyID = crypto.randomUUID();
     await database.client`INSERT INTO factory.project
-      (id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      (id,slug,name,repository_url,default_branch,actor_template_path,created_by)
       VALUES(${projectID},${`efficiency-${projectID}`},'Workspace efficiency',
-        'https://example.invalid/efficiency.git','main','.devcontainer/devcontainer.json',${administrator.id})`;
+        'https://example.invalid/efficiency.git','main','.factory/actor-template.json',${administrator.id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${administrator.id},'developer',${administrator.id})`;
     const epicID = await createPlanningEpic({

@@ -12,7 +12,7 @@ export function editorCallbacks<T>(options: {
   path: string;
   source?: string;
   component: string;
-  expose: string[];
+  expose?: string[];
   imports: Record<string, unknown>;
   /** Dependencies used only by JSX or callbacks outside this case. Access fails explicitly. */
   stubs?: string[];
@@ -23,7 +23,8 @@ export function editorCallbacks<T>(options: {
   };
 }): (props: unknown) => T {
   const source = options.source ?? readFileSync(options.path, "utf8");
-  let replaced = false;
+  const replaceReturn = options.expose !== undefined;
+  let replaced = !replaceReturn;
   const compiled = ts.transpileModule(source, {
     fileName: options.path,
     compilerOptions: {
@@ -34,38 +35,40 @@ export function editorCallbacks<T>(options: {
     transformers: {
       before: [
         (context) => (file) => {
-          const transformed = ts.visitEachChild(
-            file,
-            (node) => {
-              if (!ts.isFunctionDeclaration(node) || node.name?.text !== options.component)
-                return node;
-              if (!node.body) return node;
-              return ts.factory.updateFunctionDeclaration(
-                node,
-                node.modifiers,
-                node.asteriskToken,
-                node.name,
-                node.typeParameters,
-                node.parameters,
-                node.type,
-                ts.factory.updateBlock(
-                  node.body,
-                  node.body.statements.map((statement) => {
-                    if (!ts.isReturnStatement(statement)) return statement;
-                    replaced = true;
-                    return ts.factory.createReturnStatement(
-                      ts.factory.createObjectLiteralExpression(
-                        options.expose.map((name) =>
-                          ts.factory.createShorthandPropertyAssignment(name),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-              );
-            },
-            context,
-          );
+          const transformed = replaceReturn
+            ? ts.visitEachChild(
+                file,
+                (node) => {
+                  if (!ts.isFunctionDeclaration(node) || node.name?.text !== options.component)
+                    return node;
+                  if (!node.body) return node;
+                  return ts.factory.updateFunctionDeclaration(
+                    node,
+                    node.modifiers,
+                    node.asteriskToken,
+                    node.name,
+                    node.typeParameters,
+                    node.parameters,
+                    node.type,
+                    ts.factory.updateBlock(
+                      node.body,
+                      node.body.statements.map((statement) => {
+                        if (!ts.isReturnStatement(statement)) return statement;
+                        replaced = true;
+                        return ts.factory.createReturnStatement(
+                          ts.factory.createObjectLiteralExpression(
+                            (options.expose ?? []).map((name) =>
+                              ts.factory.createShorthandPropertyAssignment(name),
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  );
+                },
+                context,
+              )
+            : file;
           // Bind private components too. Adding an export modifier after TypeScript's
           // module analysis does not reliably emit a CommonJS export for them.
           return ts.factory.updateSourceFile(transformed, [

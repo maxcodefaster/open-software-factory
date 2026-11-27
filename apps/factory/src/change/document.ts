@@ -1,34 +1,21 @@
 import { and, desc, eq, gt, inArray, isNull, notExists, sql as query } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
+import { type createDatabase, type DatabaseTransaction, drizzleTransaction } from "#db/client";
 import {
-  type createDatabase,
-  type DatabaseTransaction,
-  drizzleTransaction,
-} from "../../../../packages/db/src/client";
-import {
+  auditEvent,
   change,
   conversationEntry,
   requirementApproval,
   requirementRevision,
   ticketConversation,
   ticketDocumentRevision,
-  ticketFollowUp,
   ticket as ticketTable,
-} from "../../../../packages/db/src/schema";
-import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
-import type {
-  TicketDocumentInput,
-  TicketFollowUpInput,
-} from "../../../../packages/requirement-domain/src/document";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../../../packages/requirement-domain/src/requirement";
-import {
-  appendTicketAuthoringIn,
-  insertInitialTicketIn,
-} from "../../../../packages/ticket-authoring/src/authoring";
+} from "#db/schema";
+import { requirementContentInput } from "#requirement-domain/content";
+import type { TicketDocumentInput, TicketFollowUpInput } from "#requirement-domain/document";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
+import { appendTicketAuthoringIn, insertInitialTicketIn } from "#ticket-authoring/authoring";
 import { projectAuthorityIn } from "../access/authority";
 import { CommandError } from "../command-error";
 
@@ -75,14 +62,21 @@ export function createTicketDocumentController(
         await projectAuthorityIn(sql, userID, ticket.projectID);
         const [existing] = await db
           .select({
-            sourceID: ticketFollowUp.sourceTicketId,
-            documentID: ticketFollowUp.sourceDocumentId,
-            revisionID: ticketFollowUp.sourceRevisionId,
+            sourceID: query<string>`(${auditEvent.payload}->>'sourceTicketId')::uuid`,
+            documentID: query<string | null>`(${auditEvent.payload}->>'sourceDocumentId')::uuid`,
+            revisionID: query<string>`(${auditEvent.payload}->>'sourceRevisionId')::uuid`,
             userID: ticketTable.createdBy,
           })
-          .from(ticketFollowUp)
-          .innerJoin(ticketTable, eq(ticketTable.id, ticketFollowUp.ticketId))
-          .where(eq(ticketFollowUp.ticketId, input.commandId));
+          .from(auditEvent)
+          .innerJoin(ticketTable, query`${ticketTable.id}::text = ${auditEvent.scopeId}`)
+          .where(
+            and(
+              eq(auditEvent.kind, "tickets.follow_up"),
+              eq(auditEvent.scopeType, "ticket"),
+              eq(auditEvent.scopeId, input.commandId),
+              eq(auditEvent.dedupeKey, `tickets.follow_up:${input.commandId}`),
+            ),
+          );
         if (existing) {
           if (
             existing.sourceID !== ticketID ||
@@ -93,6 +87,8 @@ export function createTicketDocumentController(
             throw new CommandError("conflict", "This follow-up command belongs to different work");
           return { ticketId: input.commandId };
         }
+        if (input.commandId === ticketID)
+          throw new CommandError("conflict", "This follow-up command belongs to different work");
         const [delivered] = await db
           .select({ id: change.id })
           .from(change)
@@ -143,11 +139,19 @@ export function createTicketDocumentController(
             requirement: { id: crypto.randomUUID(), canonicalContent: canonical },
           },
         });
-        await db.insert(ticketFollowUp).values({
-          ticketId: input.commandId,
-          sourceTicketId: ticketID,
-          sourceDocumentId: document?.id ?? null,
-          sourceRevisionId: input.requirementRevisionId,
+        await db.insert(auditEvent).values({
+          id: input.commandId,
+          kind: "tickets.follow_up",
+          scopeType: "ticket",
+          scopeId: input.commandId,
+          dedupeKey: `tickets.follow_up:${input.commandId}`,
+          actorId: userID,
+          payload: {
+            ticketId: input.commandId,
+            sourceTicketId: ticketID,
+            sourceDocumentId: document?.id ?? null,
+            sourceRevisionId: input.requirementRevisionId,
+          },
         });
         return { ticketId: input.commandId };
       });

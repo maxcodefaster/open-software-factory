@@ -1,10 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import { z } from "zod";
+import { inheritedModelSettingsView } from "#conversation-domain/model-inheritance";
+import { createDatabase } from "#db/client";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
-import { createDatabase } from "../../packages/db/src/client";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
@@ -76,8 +76,8 @@ test("Project managers set model defaults and locks; developers select and Reset
       .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
       .parse(await browserBootstrap(page));
     administrator = session.session.user.id;
-    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
-      VALUES (${projectID}, ${`models-qa-${projectID}`}, ${name}, 'https://example.invalid/models-qa.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+    await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
+      VALUES (${projectID}, ${`models-qa-${projectID}`}, ${name}, 'https://example.invalid/models-qa.git', 'main', '.factory/actor-template.json', ${administrator})`;
     for (const role of ["project-manager", "developer"] as const) {
       const email = `${role}-${projectID}@factory.local`;
       const created = await serverCall(
@@ -105,11 +105,6 @@ test("Project managers set model defaults and locks; developers select and Reset
       managerDialog
         .getByRole("navigation", { name: "Settings navigation" })
         .getByRole("heading", { name: "Factory administration", exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      managerDialog
-        .getByRole("combobox", { name: "Settings scope", exact: true })
-        .getByRole("option", { name: "Factory administration", exact: true }),
     ).toHaveCount(0);
     await managerDialog
       .getByRole("combobox", { name: /^Investigate & Plan/ })
@@ -187,13 +182,19 @@ test("Project managers set model defaults and locks; developers select and Reset
     await developerContext.close();
     try {
       await database.client.begin(async (sql) => {
-        await sql`DELETE FROM factory.forge_grant_intent WHERE project_id=${projectID}`;
+        await sql`DELETE FROM factory.operation WHERE kind='forge.grant' AND payload->>'projectId'=${projectID}`;
         if (administrator)
           await sql`DELETE FROM factory.project WHERE id = ${projectID} AND created_by = ${administrator} AND slug = ${`models-qa-${projectID}`}
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id = ${projectID}) AND NOT EXISTS(SELECT 1 FROM factory.ticket WHERE project_id = ${projectID})`;
+        await sql`SET LOCAL session_replication_role = replica`;
+        for (const user of users)
+          await sql`DELETE FROM factory.audit_event WHERE actor_id=${user.id}`;
+        await sql`SET LOCAL session_replication_role = origin`;
         for (const user of users) {
-          await sql`DELETE FROM factory.forge_grant_intent WHERE user_id=${user.id}`;
-          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${user.id}`;
+          await sql`DELETE FROM factory.operation
+            WHERE (kind='forge.grant' AND payload->>'userId'=${user.id})
+               OR (kind='forge.account' AND scope_type='user' AND scope_id=${user.id})
+               OR created_by=${user.id}`;
           await sql`DELETE FROM auth."user" WHERE id = ${user.id} AND email = ${user.email}`;
         }
       });

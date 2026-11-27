@@ -154,9 +154,9 @@ test.each(["version", "revision", "state"] as const)(
     try {
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${userID},'Owned Wiki author',${`${userID}@factory.invalid`})`;
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
         VALUES(${projectID},${`wiring-${projectID}`},'Overview','https://forge.invalid/owned/wiki.git',
-          'main','.devcontainer/devcontainer.json',${userID})`;
+          'main','.factory/actor-template.json',${userID})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${projectID},${userID},'developer',${userID})`;
       for (const page of rows) {
@@ -170,8 +170,9 @@ test.each(["version", "revision", "state"] as const)(
             ${"a".repeat(40)},${userID})`;
         await database.client`UPDATE factory.knowledge_page SET current_revision_id=${page.revisionId} WHERE id=${page.id}`;
       }
-      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,model_id)
-        VALUES(${generationID},${projectID},${commit},${userID},'controlled-wiki')`;
+      await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,created_by,payload)
+        VALUES(${generationID},'knowledge.generation','project',${projectID},${`knowledge.generation:${generationID}`},${`knowledge.generation:${projectID}`},'pending',${userID},
+          ${JSON.stringify({ id: generationID, projectId: projectID, sourceCommitSha: commit, pageCount: null, conflictCount: null, failure: null, createdBy: userID, modelId: "controlled-wiki", attemptId: null, modelConnectionId: null, modelConnectionVersion: null, progress: null })}::jsonb)`;
       await wiki.recover();
       await wiki.settle();
       expect(calls).toBe(2);
@@ -306,8 +307,8 @@ test.each(["README", "README.md"])(
     try {
       await db.client`INSERT INTO auth."user"(id,name,email,email_verified)
         VALUES(${user},'Wiki owner',${`readme-${user}@factory.invalid`},true)`;
-      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${project},${`readme-${project}`},'Hello World','http://127.0.0.1:9/owned/wiki','master','.devcontainer/devcontainer.json',${user})`;
+      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${project},${`readme-${project}`},'Hello World','http://127.0.0.1:9/owned/wiki','master','.factory/actor-template.json',${user})`;
       await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${user},'developer',${user})`;
       await wiki.generate(project, user);
@@ -326,6 +327,104 @@ test.each(["README", "README.md"])(
       await db.client.end();
       await owned.dispose();
       for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  },
+  30_000,
+);
+
+test.each([
+  ".factory/actor-template.json",
+  "ops/native/project-runtime.json",
+  "ops/native/project-runtime",
+])(
+  "Wiki bootstrap retains the configured native contract within its initial source budget: %s",
+  async (actorTemplatePath) => {
+    const owned = await factoryProcess();
+    const database = owned.connect();
+    const userID = crypto.randomUUID();
+    const projectID = crypto.randomUUID();
+    const commit = "a".repeat(40);
+    const settings = {
+      FACTORY_FORGEJO_API_URL: "https://forge.invalid/api/v1/",
+      FACTORY_FORGEJO_PUBLIC_URL: "https://forge.invalid",
+      FACTORY_FORGEJO_OWNER: "owned",
+      FACTORY_FORGEJO_TOKEN: "offline-not-a-credential",
+      FACTORY_MODEL_BASE_URL: "https://provider.invalid/v1",
+      FACTORY_MODEL_API_KEY: "offline-not-a-credential",
+      FACTORY_PLANNING_MODEL_BASE_URL: "https://provider.invalid/v1",
+      FACTORY_PLANNING_MODEL_API_KEY: "offline-not-a-credential",
+      FACTORY_PROJECT_AGENT_MODEL: "controlled-wiki",
+      FACTORY_AUTH_SECRET: "offline-native-wiki-fixture-signing-secret",
+    };
+    const previous = Object.fromEntries(
+      Object.keys(settings).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, settings);
+    const files = [
+      { path: "README.md", content: "# Native Project\n" },
+      { path: actorTemplatePath, content: '{"containers":[{"name":"work"}]}' },
+      { path: ".factory/system.json", content: '{"apps":[]}' },
+      ...Array.from({ length: 60 }, (_, index) => ({
+        path: `packages/package-${index}/package.json`,
+        content: JSON.stringify({ name: `package-${index}` }),
+      })),
+    ].map((file, index) => ({
+      ...file,
+      sha: (index + 1).toString(16).padStart(40, "0"),
+      size: file.content.length,
+    }));
+    const packets: Array<{ sources: Array<{ path: string; content: string }> }> = [];
+    const network = spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network admitted"));
+    const wiki = createKnowledgeController(
+      database,
+      {
+        getDefaultBranch: async () => ({ name: "main", headSha: commit }),
+        listFiles: async () => files,
+        getFileInfo: async (_repository, path, revision) => {
+          expect(revision).toBe(commit);
+          const file = fixtureValue(
+            files.find((candidate) => candidate.path === path),
+            path,
+          );
+          return { sha: file.sha, content: file.content };
+        },
+      },
+      async (input) => {
+        packets.push(input);
+        return { pages: [] };
+      },
+    );
+    try {
+      await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+        VALUES(${userID},'Native Wiki owner',${`native-wiki-${userID}@factory.invalid`},true)`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${`native-wiki-${projectID}`},'Native Wiki','https://forge.invalid/owned/wiki.git',
+          'main',${actorTemplatePath},${userID})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+        VALUES(${projectID},${userID},'developer',${userID})`;
+      await wiki.generate(projectID, userID);
+      await wiki.settle();
+      expect(packets).toHaveLength(1);
+      expect(packets[0]).toMatchObject({ actorTemplatePath });
+      expect(packets[0]?.sources).toHaveLength(6);
+      expect(packets[0]?.sources).toEqual(
+        expect.arrayContaining(
+          files
+            .filter((file) => [actorTemplatePath, ".factory/system.json"].includes(file.path))
+            .map(({ path, content }) => ({ path, content })),
+        ),
+      );
+      expect((await wiki.generation(projectID))?.state).toBe("succeeded");
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      await wiki.close();
+      network.mockRestore();
+      await database.client.end();
+      await owned.dispose();
+      for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
@@ -442,7 +541,7 @@ test.each([false, true])(
         await input.progress?.(recorded as never);
         const [row] = await db.client<
           Array<{ progress: unknown }>
-        >`SELECT progress FROM factory.knowledge_generation WHERE project_id=${project} AND state='running'`;
+        >`SELECT NULLIF(payload->'progress','null'::jsonb) AS progress FROM factory.operation WHERE kind='knowledge.generation' AND scope_type='project' AND scope_id=${project} AND state='running'`;
         expect(row?.progress).toEqual(recorded);
       }
       if (calls === 1)
@@ -484,7 +583,7 @@ test.each([false, true])(
       );
     try {
       await db.client`INSERT INTO auth."user"(id,name,email,email_verified) VALUES(${user},'Wiki developer',${`wiki-generation-${user}@factory.local`},true)`;
-      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${project},${`wiki-generation-${project}`},'Wiki fixture','http://127.0.0.1:9/owned/wiki.git','main','.devcontainer/devcontainer.json',${user})`;
+      await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by) VALUES(${project},${`wiki-generation-${project}`},'Wiki fixture','http://127.0.0.1:9/owned/wiki.git','main','.factory/actor-template.json',${user})`;
       await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${user},'product-contributor',${user})`;
       await db.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by,icon,sort_order) VALUES(${page},${project},'guide','Human guide','Original business purpose.','Original business purpose.',${commit},${user},'home',7)`;
       await Promise.all([wiki.generate(project, user), wiki.generate(project, user)]);
@@ -526,7 +625,7 @@ test.each([false, true])(
         expect(interrupted?.["state"]).toBe("failed");
         const retained = await wiki.history(page, user);
         expect(retained).toHaveLength(3);
-        await db.client`UPDATE factory.knowledge_generation SET state='running',attempt_id=${crypto.randomUUID()},completed_at=NULL WHERE id=${String(interrupted?.["id"])}`;
+        await db.client`UPDATE factory.operation SET state='running',active_key=${`knowledge.generation:${project}`},payload=jsonb_set(payload,'{attemptId}',to_jsonb(${crypto.randomUUID()}::text),true),completed_at=NULL WHERE id=${String(interrupted?.["id"])} AND kind='knowledge.generation'`;
         interruptAfterPackage = false;
         noop = true;
         expectedCompleted = [page];

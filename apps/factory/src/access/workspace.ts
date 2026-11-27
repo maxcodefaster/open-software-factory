@@ -1,4 +1,6 @@
-import type { DatabaseTransaction } from "../../../../packages/db/src/client";
+import { and, eq, isNull, sql as query } from "drizzle-orm";
+import { type DatabaseTransaction, drizzleTransaction } from "#db/client";
+import { developmentWorkspace, workspaceShare } from "#db/schema";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./authority";
 
@@ -19,24 +21,37 @@ export async function workspaceAuthorityIn(
   userID: string,
   write = false,
 ): Promise<WorkspaceAuthority> {
-  const [workspace] = await sql<
-    {
-      projectID: string;
-      kind: string;
-      ownerID: string | null;
-      changeID: string | null;
-      collaborative: boolean;
-    }[]
-  >`SELECT project_id AS "projectID",kind,owner_user_id AS "ownerID",change_id AS "changeID",collaboration_enabled AS collaborative
-    FROM factory.development_workspace WHERE id=${workspaceID} FOR SHARE`;
+  const db = drizzleTransaction(sql);
+  const [workspace] = await db
+    .select({
+      projectID: developmentWorkspace.projectId,
+      kind: developmentWorkspace.kind,
+      ownerID: developmentWorkspace.ownerUserId,
+      changeID: developmentWorkspace.changeId,
+      collaborative: developmentWorkspace.collaborationEnabled,
+    })
+    .from(developmentWorkspace)
+    .where(eq(developmentWorkspace.id, workspaceID))
+    .for("share");
   if (!workspace) throw new CommandError("not-found", "Workspace not found");
   await projectDevelopmentAuthorityIn(sql, userID, workspace.projectID);
   let permission: WorkspaceAuthority["permission"] = "collaborate";
   let accessVersion = "0";
   if (workspace.kind === "personal" && workspace.ownerID !== userID) {
-    const [share] = await sql<{ permission: WorkspaceAuthority["permission"]; version: string }[]>`
-      SELECT permission,version::text FROM factory.workspace_share
-      WHERE workspace_id=${workspaceID} AND user_id=${userID} AND revoked_at IS NULL FOR SHARE`;
+    const [share] = await db
+      .select({
+        permission: workspaceShare.permission,
+        version: query<string>`${workspaceShare.version}::text`,
+      })
+      .from(workspaceShare)
+      .where(
+        and(
+          eq(workspaceShare.workspaceId, workspaceID),
+          eq(workspaceShare.userId, userID),
+          isNull(workspaceShare.revokedAt),
+        ),
+      )
+      .for("share");
     if (!share) throw new CommandError("not-found", "Workspace not found");
     permission = share.permission;
     accessVersion = share.version;

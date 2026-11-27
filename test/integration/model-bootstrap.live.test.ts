@@ -2,18 +2,15 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { modelConnectionView, modelProbeResult } from "#conversation-domain/model-connection";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createModelConnections } from "../../apps/factory/src/models/connections";
+import { createModelSettingsController } from "../../apps/factory/src/models/controller";
+import { deploymentModelConnections } from "../../apps/factory/src/models/deployment";
+import { createOpenBaoModelSecrets } from "../../apps/factory/src/models/secrets";
+import { createModelService } from "../../apps/factory/src/models/service";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { factoryProcess } from "../fixtures/factory-process";
-import { createModelConnections } from "../../apps/factory/src/models/connections";
-import { createModelService } from "../../apps/factory/src/models/service";
-import { createAccessController } from "../../apps/factory/src/access/controller";
-import { createOpenBaoModelSecrets } from "../../apps/factory/src/models/secrets";
-import { deploymentModelConnections } from "../../apps/factory/src/models/deployment";
-import { createModelSettingsController } from "../../apps/factory/src/models/controller";
-import {
-  modelConnectionView,
-  modelProbeResult,
-} from "../../packages/conversation-domain/src/model-connection";
 
 test.skipIf(process.env["FACTORY_RUN_MODEL_BOOTSTRAP_PROOF"] !== "1")(
   "real deployment adoption encrypts two role connections and probes native transports without a Project",
@@ -108,13 +105,15 @@ test.skipIf(process.env["FACTORY_RUN_MODEL_BOOTSTRAP_PROOF"] !== "1")(
       expect(await database.client`SELECT id FROM factory.project`).toHaveLength(0);
       const persisted =
         JSON.stringify(
-          await database.client`SELECT row_to_json(row) FROM factory.model_connection_write row`,
+          await database.client`SELECT row_to_json(row) FROM factory.operation row
+            WHERE kind='models.connection_write'`,
         ) +
         JSON.stringify(
           await database.client`SELECT row_to_json(row) FROM factory.model_connection_version row`,
         ) +
         JSON.stringify(
-          await database.client`SELECT row_to_json(row) FROM factory.model_role_probe row`,
+          await database.client`SELECT row_to_json(row) FROM factory.operation row
+            WHERE kind='models.role_probe'`,
         );
       for (const connection of deploymentModelConnections(signingKey))
         if (connection.apiKey) expect(persisted).not.toContain(connection.apiKey);

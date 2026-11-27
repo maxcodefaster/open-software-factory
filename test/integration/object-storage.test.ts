@@ -57,9 +57,26 @@ test("Source-only retained checkpoints require every matching chunk and manifest
   const actorUID = crypto.randomUUID();
   const bytes = new Uint8Array((1 << 20) + 37).fill(7);
   const chunks = [bytes.slice(0, 1 << 20), bytes.slice(1 << 20)];
+  const drains: string[] = [];
   f.hub.sourceConnected = () => true;
-  f.hub.parentOperation = async () => ({});
+  f.hub.childOperation = async (attemptID, operation) => {
+    expect(attemptID).toBe(f.attemptID);
+    expect(operation["action"]).toBe("source-drain");
+    const checkpointID = (await source.lease(f.workspaceID))?.checkpointID;
+    if (!checkpointID) throw Error("Owned Source checkpoint intent is unavailable");
+    expect(operation["operationId"]).toBe(checkpointID);
+    drains.push("child");
+  };
+  f.hub.parentOperation = async (attemptID, operation) => {
+    expect(attemptID).toBe(f.attemptID);
+    expect(operation.action).toBe("source-drain");
+    expect(operation["data"]).toBe(operation.operationId);
+    expect(drains).toEqual(["child"]);
+    drains.push("parent");
+    return {};
+  };
   f.hub.request = async (_attempt, channel, request, path) => {
+    expect(drains).toEqual(["child", "parent"]);
     expect(channel).toBe("source");
     const input = await request.json();
     return path.endsWith("/checkpoint")
@@ -73,12 +90,11 @@ test("Source-only retained checkpoints require every matching chunk and manifest
   };
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
-        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at)
+        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
     });
     await f.admitActorSource(actorUID);
+    // Exercise the separate explicit Source-export protocol, not native Pause.
     await source.freezeActor(f.workspaceID, f.attemptID, f.database.client);
     const before = await source.lease(f.workspaceID);
     expect(before).toMatchObject({
@@ -97,16 +113,17 @@ test("Source-only retained checkpoints require every matching chunk and manifest
     ).toHaveLength(0);
     const storage = fixtureValue(
       (
-        await f.database.client<
-          { id: string }[]
-        >`SELECT id FROM factory.attachment_storage WHERE singleton`
+        await f.database.client<{ id: string }[]>`
+          SELECT id FROM factory.operation
+          WHERE kind='attachment.storage' AND idempotency_key='attachment.storage:singleton'`
       )[0],
       "Installation storage identity",
     );
     const identityKey = `factory-storage/${storage.id}/identity`;
     const identityBytes = new TextEncoder().encode(`Factory private storage ${storage.id}\n`);
     const installationBefore = [
-      ...(await f.database.client`SELECT * FROM factory.attachment_storage`),
+      ...(await f.database.client`SELECT * FROM factory.operation
+        WHERE kind='attachment.storage' AND idempotency_key='attachment.storage:singleton'`),
     ];
     const descriptions = sourceCheckpointObjects(before?.checkpoint);
     expect(descriptions.chunks.map((chunk) => chunk.bytes)).toEqual([1 << 20, 37]);
@@ -118,9 +135,10 @@ test("Source-only retained checkpoints require every matching chunk and manifest
       expect(replacement.blobs).toEqual(retainedBefore);
       expect(replacement.blobs.has(identityKey)).toBe(false);
       expect(await source.lease(f.workspaceID)).toEqual(before);
-      expect([...(await f.database.client`SELECT * FROM factory.attachment_storage`)]).toEqual(
-        installationBefore,
-      );
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.operation
+          WHERE kind='attachment.storage' AND idempotency_key='attachment.storage:singleton'`),
+      ]).toEqual(installationBefore);
     }
     function transfer() {
       replacement.blobs.clear();
@@ -165,9 +183,10 @@ test("Source-only retained checkpoints require every matching chunk and manifest
     expect(replacement.blobs.size).toBe(original.blobs.size + 1);
     for (const [key, data] of original.blobs) expect(replacement.blobs.get(key)).toEqual(data);
     expect(await source.lease(f.workspaceID)).toEqual(before);
-    expect([...(await f.database.client`SELECT * FROM factory.attachment_storage`)]).toEqual(
-      installationBefore,
-    );
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.operation
+        WHERE kind='attachment.storage' AND idempotency_key='attachment.storage:singleton'`),
+    ]).toEqual(installationBefore);
   } finally {
     await source.close();
     await f.dispose();
@@ -199,10 +218,8 @@ test("Source-only startup rejects a full bundle checksum mismatch even when ever
   };
   try {
     await f.database.client.begin(async (sql) => {
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${f.userID})`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent,actor_uid,create_attempted_at)
-        VALUES(${f.attemptID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,create_intended_at,created_by,atespace,actor_name,binding_intent,actor_uid,create_attempted_at)
+        VALUES(${f.attemptID},${f.projectID},${f.workspaceID},1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},now(),${f.userID},${f.atespace},${`runtime-${f.attemptID.replaceAll("-", "")}`},'{}',${actorUID},now())`;
       await sql`INSERT INTO factory.substrate_source(workspace_id,actor_uid)
         VALUES(${f.workspaceID},${actorUID})`;
       await sql`UPDATE factory.substrate_source SET writable=false,writer_epoch=2,checkpoint_id=${saved.id} WHERE workspace_id=${f.workspaceID}`;

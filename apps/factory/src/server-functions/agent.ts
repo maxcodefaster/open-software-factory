@@ -5,7 +5,7 @@ import {
   changeAgentResumeInput,
   changeAgentStartInput,
   changeAgentStopConfirmationInput,
-} from "../../../../packages/conversation-domain/src/agent-turn";
+} from "#conversation-domain/agent-turn";
 import { newCodingConversationInput } from "../agent/commands";
 import { factoryFunction, factoryFunctionContext } from "./context";
 import { registerSharedReads } from "./shared-reads";

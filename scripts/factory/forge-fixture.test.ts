@@ -2,13 +2,26 @@ import { expect, test } from "bun:test";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import upstream from "../../upstream.json";
+import { parseSubstrateProjectTemplate } from "#runtime-kubernetes/substrate-project-template";
 import { prepareForgejoFixture, requireForgeFixtureInstallation } from "./forge-fixture";
 import { type DisposableInstallation, installationDirectory } from "./installation";
 import { nativeStarterImages } from "./starter-images";
 
 const contents = {
-  ".devcontainer/compose.yaml": `services:\n  app:\n    image: ${upstream.nodeDevelopment.image}\n`,
+  ".factory/actor-template.json": `${JSON.stringify(
+    {
+      containers: [
+        {
+          name: "work",
+          image: `registry.example.test/starter-work@sha256:${"a".repeat(64)}`,
+          volumeMounts: [{ name: "source", mountPath: "/workspace" }],
+        },
+      ],
+      volumes: [{ name: "source", durableDir: {} }],
+    },
+    null,
+    2,
+  )}\n`,
   ".forgejo/workflows/factory-verification.yml": "name: Factory Verification\n",
   ".factory/system.json": '{"schema":1}\n',
   "src/worker.mjs": "console.log('fixture worker');\n",
@@ -92,7 +105,12 @@ async function fixture(
         installation,
         confirmation: installation.name,
         token: "fixture-token",
-        starterImages: nativeStarterImages(),
+        platform: "linux/arm64",
+        starterImages: nativeStarterImages("linux/arm64", {
+          platform: "linux/arm64",
+          development: `registry.example.test/starter-work@sha256:${"a".repeat(64)}`,
+          postgres: `registry.example.test/starter-postgres@sha256:${"b".repeat(64)}`,
+        }),
         fetch: forge.fetch,
         command: async (args) => {
           commands.push(args);
@@ -145,7 +163,7 @@ test("fixture preparation refuses a missing retained token without effects", asy
 test("matching fixture files cause no Forgejo writes or local Git commands", async () => {
   await fixture(async (input, forge, commands) => {
     await prepareForgejoFixture(input);
-    expect(forge.calls).toHaveLength(6);
+    expect(forge.calls).toHaveLength(7);
     expect(forge.calls.every((call) => call.method === "GET")).toBe(true);
     expect(commands).toEqual([]);
   });
@@ -182,7 +200,7 @@ test.each([403, 409, 500])(
       await mkdir(resolve(destination, ".git"), { recursive: true });
       const retained = resolve(destination, "retained-user-file");
       await writeFile(retained, "retained");
-      forge.files[".devcontainer/compose.yaml"] = "protected old compose";
+      forge.files[".factory/actor-template.json"] = "protected old template";
       forge.updateStatus = status;
       await expect(prepareForgejoFixture(input)).rejects.toThrow(`update failed with ${status}`);
       expect(forge.calls.filter((call) => call.method !== "GET")).toHaveLength(1);
@@ -190,7 +208,7 @@ test.each([403, 409, 500])(
       expect(forge.calls.some((call) => call.method === "DELETE")).toBe(false);
       expect(commands).toEqual([]);
       expect(await readFile(retained, "utf8")).toBe("retained");
-      expect(forge.files[".devcontainer/compose.yaml"]).toBe("protected old compose");
+      expect(forge.files[".factory/actor-template.json"]).toBe("protected old template");
     });
   },
 );
@@ -217,8 +235,8 @@ test("initial fixture seeding uses only the confirmed disposable path and loopba
       installationDirectory(input.root, installation.name),
       "runtime-fixture-repository",
     );
-    expect(await readFile(resolve(destination, ".devcontainer/compose.yaml"), "utf8")).toBe(
-      contents[".devcontainer/compose.yaml"],
+    expect(await readFile(resolve(destination, ".factory/actor-template.json"), "utf8")).toBe(
+      contents[".factory/actor-template.json"],
     );
     expect(forge.calls.find((call) => call.method === "POST")).toEqual({
       path: "/api/v1/user/repos",
@@ -232,6 +250,104 @@ test("initial fixture seeding uses only the confirmed disposable path and loopba
     });
     expect(commands.at(-1)).toEqual(["git", "-C", destination, "push", "origin", "HEAD:main"]);
     expect(commands.some((args) => args.some((arg) => arg.startsWith("--force")))).toBe(false);
+  });
+});
+
+test("native fixture uses the selected catalog without translating a legacy recipe", async () => {
+  await fixture(async (input, forge, commands) => {
+    const path = resolve(input.root, "test/fixtures/runtime-project/.factory/actor-template.json");
+    const authored = parseSubstrateProjectTemplate(contents[".factory/actor-template.json"]);
+    const work = authored.containers[0];
+    if (!work) throw new Error("Missing owned work container");
+    work.image = `registry.example.test/other-work@sha256:${"c".repeat(64)}`;
+    await writeFile(path, JSON.stringify(authored));
+    await prepareForgejoFixture(input);
+    expect(forge.files[".factory/actor-template.json"]).toBe(
+      contents[".factory/actor-template.json"],
+    );
+    expect(commands).toEqual([]);
+    const legacy = resolve(input.root, "test/fixtures/runtime-project/.devcontainer");
+    await mkdir(legacy);
+    await prepareForgejoFixture(input); // Empty, untracked directories are not legacy source.
+    await writeFile(resolve(legacy, "devcontainer.json"), '{"image":"old"}');
+    forge.calls.length = 0;
+    await expect(prepareForgejoFixture(input)).rejects.toThrow("not Dev Containers");
+    expect(forge.calls).toEqual([]);
+    expect(commands).toEqual([]);
+  });
+});
+
+test("native fixture materializes only its named catalog containers", async () => {
+  await fixture(async (input, forge) => {
+    const path = resolve(input.root, "test/fixtures/runtime-project/.factory/actor-template.json");
+    const authored = parseSubstrateProjectTemplate(contents[".factory/actor-template.json"]);
+    const customImage = `registry.example.test/custom@sha256:${"c".repeat(64)}`;
+    authored.containers.push(
+      { name: "postgres", image: customImage, command: ["postgres"] },
+      { name: "custom", image: customImage, command: ["/bin/service"] },
+    );
+    await writeFile(path, JSON.stringify(authored));
+    await prepareForgejoFixture(input);
+    const materialized = parseSubstrateProjectTemplate(
+      forge.files[".factory/actor-template.json"] ?? "",
+    );
+    expect(materialized.containers.map(({ name, image }) => ({ name, image }))).toEqual([
+      {
+        name: "work",
+        image: `registry.example.test/starter-work@sha256:${"a".repeat(64)}`,
+      },
+      {
+        name: "postgres",
+        image: `registry.example.test/starter-postgres@sha256:${"b".repeat(64)}`,
+      },
+      { name: "custom", image: customImage },
+    ]);
+  });
+});
+
+test("native fixture refuses a retained legacy repository instead of migrating or deleting it", async () => {
+  await fixture(async (input, forge, commands) => {
+    forge.files[".devcontainer"] = "retained legacy recipe";
+    await expect(prepareForgejoFixture(input)).rejects.toThrow("not migrated");
+    expect(forge.calls.every((call) => call.method === "GET")).toBe(true);
+    expect(commands).toEqual([]);
+    expect(forge.files[".devcontainer"]).toBe("retained legacy recipe");
+  });
+});
+
+test.each(["linux/arm64", "linux/amd64"])(
+  "fixture creation accepts the selected %s catalog and refuses a mismatch before effects",
+  async (platform) => {
+    await fixture(async (input, forge, commands) => {
+      const starterImages = {
+        platform,
+        development: `registry.example.test/starter-work@sha256:${"a".repeat(64)}`,
+        postgres: `registry.example.test/starter-postgres@sha256:${"b".repeat(64)}`,
+      };
+      await expect(
+        prepareForgejoFixture({
+          ...input,
+          platform: platform === "linux/arm64" ? "linux/amd64" : "linux/arm64",
+          starterImages,
+        }),
+      ).rejects.toThrow("selected native runtime");
+      expect(forge.calls).toEqual([]);
+      expect(commands).toEqual([]);
+      await prepareForgejoFixture({ ...input, platform, starterImages });
+      expect(forge.calls.every((call) => call.method === "GET")).toBe(true);
+    });
+  },
+);
+
+test("missing or invalid native fixture source fails before any Forge effects", async () => {
+  await fixture(async (input, forge, commands) => {
+    const path = resolve(input.root, "test/fixtures/runtime-project/.factory/actor-template.json");
+    await writeFile(path, '{"dockerComposeFile":"compose.yaml","service":"app"}');
+    await expect(prepareForgejoFixture(input)).rejects.toThrow("Project ActorTemplate");
+    await rm(path);
+    await expect(prepareForgejoFixture(input)).rejects.toThrow("ENOENT");
+    expect(forge.calls).toEqual([]);
+    expect(commands).toEqual([]);
   });
 });
 

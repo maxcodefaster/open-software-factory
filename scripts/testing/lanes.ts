@@ -2,149 +2,136 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { runProcess } from "../owned-client-process";
 
-const nativeNames = new Set([
-  "backup-runner.native",
-  "substrate-adapter.native",
-  "substrate-rootless-proxy.native",
-  "substrate-workspaces.native",
-  "developer-ide-kubernetes.native",
-  "substrate-coding-stop",
-  "substrate-writer-input-stop",
-  "repository-mirrors.native",
-  "forgejo-diagnostics.native",
-  "native-project-releases",
-  "attachment-s3",
-  "object-storage.native",
+// Native lane tests run against real external services/binaries. Suffix `*.native.test.ts`
+// and `opencode-*.test.ts` match structurally; these legacy names predate the `.native` suffix.
+const nativeIntegrationExceptions = new Set([
+  "agent-native-commit-recovery",
   "attachment-browser",
   "attachment-factory-browser",
-  "agent-native-commit-recovery",
+  "attachment-s3",
   "build-browser",
-  "build-browser-client",
-  "browser-tools-package.native",
   "change-writer-source",
-  "native-skill-loading",
-  "project-setup-forge",
   "native-enterprise-identity",
   "native-forge-issuer",
+  "native-project-releases",
+  "native-skill-loading",
   "openbao",
-]);
-const selfContainedControllerTests = new Set([
-  "backup-runner.native.test.ts",
-  "browser-tools-package.native.test.ts",
-  "substrate-adapter.test.ts",
-  "substrate-adapter.native.test.ts",
-  "substrate-rootless-proxy.native.test.ts",
-  "developer-ide-kubernetes.native.test.ts",
-  "native-project-releases.test.ts",
-  "substrate-workspaces.test.ts",
-  "substrate-workspace-stop.test.ts",
-  "substrate-runtime-list.test.ts",
-  "substrate-coding-stop.test.ts",
-  "substrate-workspace-generations.test.ts",
-  "substrate-usage.test.ts",
-  "substrate-idle.test.ts",
-  "substrate-input-stop.test.ts",
-  "substrate-lifecycle-facts.test.ts",
-  "substrate-reset.test.ts",
-  "substrate-pause-failure.test.ts",
-  "workspace-commands.test.ts",
-  "workspace-container-files.test.ts",
-  "workspace-sharing.test.ts",
-  "substrate-verification.test.ts",
-  "substrate-isolated.test.ts",
-  "substrate-prebuild.test.ts",
-  "substrate-workspaces.native.test.ts",
-  "substrate-source.test.ts",
-  "substrate-source-access.test.ts",
-  "substrate-source-seed.test.ts",
-  "source-startup.test.ts",
-  "openbao.test.ts",
-  "postgres-baseline.test.ts",
-  "schema-baseline.test.ts",
-  "attachments-store.test.ts",
-  "conversation-persistence.test.ts",
-  "review-media.test.ts",
-  "native-ui-fixture.test.ts",
-  "native-fixture-observation.test.ts",
-  "uncreated-workspace-attempt.test.ts",
-  "runtime-app-origins.test.ts",
-  "runtime-declared-apps.test.ts",
-  "project-preparation.test.ts",
-  "verification-cancellation.test.ts",
-  "usage-cleanup.test.ts",
-  "server-function-repository-mirrors.test.ts",
-  "client-budgets.test.ts",
-  "server-function-learning.test.ts",
-  "server-function-inbox.test.ts",
-  "server-function-runtime.test.ts",
-  "server-function-tickets.test.ts",
-  "server-function-delivery.test.ts",
-  "server-function-streams.test.ts",
-  "server-function-knowledge.test.ts",
-  "server-function-workspaces.test.ts",
-  "server-function-attachments.test.ts",
-  "server-function-access.test.ts",
-  "server-function-settings.test.ts",
-  "server-function-setup.test.ts",
-  "server-function-skills.test.ts",
-  "server-function-mcp-inputs.test.ts",
-  "server-function-writer-review.test.ts",
+  "project-setup-forge",
+  "substrate-coding-stop",
+  "substrate-writer-input-stop",
 ]);
 
+// Self-contained tests need neither the lane's shared PostgreSQL server nor a compiled
+// application build. `*-baseline.test.ts` and `substrate-source*.test.ts` match structurally.
+const selfContainedIntegrationExceptions = new Set([
+  "attachments-store.test.ts",
+  "backup-runner.native.test.ts",
+  "browser-tools-package.native.test.ts",
+  "conversation-persistence.test.ts",
+  "native-memory-source-transfer.test.ts",
+  "native-project-entry.test.ts",
+  "native-ui-fixture.test.ts",
+  "openbao.test.ts",
+  "review-media.test.ts",
+  "source-native-retention.test.ts",
+  "source-startup.test.ts",
+  "substrate-adapter.native.test.ts",
+  "substrate-input-stop.test.ts",
+  "substrate-lifecycle-facts.test.ts",
+  "substrate-workspace-generations.test.ts",
+  "substrate-workspaces.test.ts",
+  "workspace-commands.test.ts",
+  "workspace-container-files.test.ts",
+  "workspace-pause-command.test.ts",
+  "workspace-sharing.test.ts",
+]);
+
+// `server-function-*.test.ts` proofs are self-contained with respect to PostgreSQL except these.
+const serverFunctionDatabaseExceptions = new Set([
+  "server-function-mcp-authority.test.ts",
+  "server-function-ticket-sql.test.ts",
+]);
+
+// Tests that still need an application build but manage or omit PostgreSQL themselves.
+// `substrate-adapter*.test.ts`, `substrate-workspace*.test.ts`, and `server-function-*.test.ts`
+// (outside `serverFunctionDatabaseExceptions`) match structurally.
+const noSharedDatabaseExceptions = new Set([
+  "client-budgets.test.ts",
+  "developer-ide-kubernetes.native.test.ts",
+  "native-fixture-observation.test.ts",
+  "native-project-releases.test.ts",
+  "runtime-app-origins.test.ts",
+  "runtime-declared-apps.test.ts",
+  "substrate-coding-stop.test.ts",
+  "substrate-idle.test.ts",
+  "substrate-isolated.test.ts",
+  "substrate-pause-failure.test.ts",
+  "substrate-reset.test.ts",
+  "substrate-runtime-list.test.ts",
+  "substrate-verification.test.ts",
+  "uncreated-workspace-attempt.test.ts",
+  "usage-cleanup.test.ts",
+  "verification-cancellation.test.ts",
+]);
+
+// Database/controller proofs that share the lane's PostgreSQL server without an application build.
+// `*-drizzle.test.ts` matches structurally.
+const noApplicationBuildExceptions = new Set([
+  "agent-read.test.ts",
+  "agent-turn-store.test.ts",
+  "coding-budget.test.ts",
+  "coding-source-dispatch-fence.test.ts",
+  "developer-ide-access-recovery.test.ts",
+  "developer-ide.test.ts",
+  "fixture-cleanup.test.ts",
+  "inbox.test.ts",
+  "mcp-cancellation.test.ts",
+  "mcp-library.test.ts",
+  "mcp-oauth.test.ts",
+  "project-registration-authority.test.ts",
+  "project-release-store.test.ts",
+  "retained-stop-maintenance.test.ts",
+  "substrate-bound-provisioning.test.ts",
+  "substrate-browser.test.ts",
+  "substrate-usage.test.ts",
+  "usage-journal.test.ts",
+  "usage-policy.test.ts",
+]);
+
+function isSelfContainedIntegration(name: string) {
+  return (
+    name.endsWith("-baseline.test.ts") ||
+    name.startsWith("substrate-source") ||
+    selfContainedIntegrationExceptions.has(name)
+  );
+}
+
 export function controllerNeedsDatabase(path: string) {
-  return !selfContainedControllerTests.has(path.split("/").at(-1) ?? "");
+  const name = basename(path);
+  if (isSelfContainedIntegration(name)) return false;
+  if (name.startsWith("server-function-") && !serverFunctionDatabaseExceptions.has(name))
+    return false;
+  if (name.startsWith("substrate-adapter") || name.startsWith("substrate-workspace")) return false;
+  return !noSharedDatabaseExceptions.has(name);
 }
+
 export function integrationNeedsApplicationBuild(path: string) {
-  return ![
-    "backup-runner.native.test.ts",
-    "browser-tools-package.native.test.ts",
-    "substrate-rootless-proxy.native.test.ts",
-    "openbao.test.ts",
-    "schema-baseline.test.ts",
-    "postgres-baseline.test.ts",
-    "attachments-store.test.ts",
-    "conversation-persistence.test.ts",
-    "review-media.test.ts",
-    "project-release-store.test.ts",
-    "project-registration-authority.test.ts",
-    "mcp-library.test.ts",
-    "mcp-oauth.test.ts",
-    "mcp-cancellation.test.ts",
-    "agent-read.test.ts",
-    "agent-turn-store.test.ts",
-    "coding-source-dispatch-fence.test.ts",
-    "fixture-cleanup.test.ts",
-    "native-ui-fixture.test.ts",
-    "change-document-drizzle.test.ts",
-    "delivery-controller-drizzle.test.ts",
-    "inbox.test.ts",
-    "skills-controllers-drizzle.test.ts",
-    "substrate-drizzle.test.ts",
-    "substrate-bound-provisioning.test.ts",
-    "substrate-lifecycle-facts.test.ts",
-    "usage-journal.test.ts",
-    "usage-policy.test.ts",
-    "coding-budget.test.ts",
-    "workspace-sharing.test.ts",
-    "workspace-commands.test.ts",
-    "workspace-container-files.test.ts",
-    "substrate-source.test.ts",
-    "substrate-source-access.test.ts",
-    "substrate-source-seed.test.ts",
-    "source-startup.test.ts",
-    "substrate-workspaces.test.ts",
-    "substrate-workspace-generations.test.ts",
-    "developer-ide.test.ts",
-    "developer-ide-access-recovery.test.ts",
-  ].includes(basename(path));
+  const name = basename(path);
+  if (isSelfContainedIntegration(name)) return false;
+  if (name.endsWith("-drizzle.test.ts")) return false;
+  return !noApplicationBuildExceptions.has(name);
 }
+
 export function integrationLane(path: string) {
   const name = basename(path).replace(/\.test\.ts$/, "");
-  return name.endsWith(".live")
-    ? "live"
-    : name.startsWith("opencode-") || nativeNames.has(name)
-      ? "native"
-      : "controllers";
+  if (name.endsWith(".live")) return "live";
+  if (
+    name.endsWith(".native") ||
+    name.startsWith("opencode-") ||
+    nativeIntegrationExceptions.has(name)
+  )
+    return "native";
+  return "controllers";
 }
 
 export const browserFiles = {

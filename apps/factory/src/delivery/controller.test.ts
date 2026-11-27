@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { type createDatabase, drizzleTransaction } from "../../../../packages/db/src/client";
-import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { type createDatabase, drizzleTransaction } from "#db/client";
+import type { createForgejoClient } from "#forge/forge";
 import { verificationReceipt } from "../../../../test/fixtures/verification";
 import { createDeliveryController } from "./controller";
 
@@ -13,6 +13,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
   let mergeCalls = 0;
   let stopCalls = 0;
   let failStop = false;
+  let failPause = false;
   let defaultHead = commitSHA;
   let failMergePersistence = false;
   let sessionState = "committed";
@@ -26,6 +27,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
   let supersededRunner = "42";
   let supersededStopped = false;
   const stoppedAttempts: string[] = [];
+  const pausedAttempts: string[] = [];
   const deletedRunners: number[] = [];
   const retiredBranches: string[] = [];
   const verificationID = crypto.randomUUID();
@@ -99,9 +101,9 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
             runtimeAttemptID: "ticket-runtime",
           },
         ];
-      if (query.includes("FROM factory.pull_request_operation WHERE"))
+      if (query.includes("FROM factory.operation") && values.includes("delivery.pull_request"))
         return [{ id: "pr", state: "succeeded", number: "1", url: "http://forge/pr/1" }];
-      if (query.includes("FROM factory.merge_operation merge"))
+      if (query.includes("FROM factory.operation") && values.includes("delivery.merge"))
         return [{ id: "merge", state: mergeState, commitSHA, baseSHA, pullRequestNumber: "1" }];
       if (query.includes("SELECT EXISTS(")) return [{ exists: !repair }];
       if (query.includes("FROM factory.verification verification"))
@@ -134,7 +136,10 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
               },
             ]
           : [];
-      if (query.includes("UPDATE factory.merge_operation SET state = 'succeeded'")) {
+      if (
+        query.includes("UPDATE factory.operation SET state = 'succeeded'") &&
+        values.includes("delivery.merge")
+      ) {
         if (failMergePersistence) {
           failMergePersistence = false;
           throw new Error("database write lost after merge");
@@ -143,9 +148,15 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       }
       if (query.includes("Delivery gate moved before merge")) mergeState = "failed";
       if (query.includes("UPDATE factory.change SET state = 'delivering'")) state = "delivering";
-      if (query.includes("UPDATE factory.promotion_operation SET last_error = NULL"))
+      if (
+        query.includes("UPDATE factory.operation SET error = NULL") &&
+        values.includes("delivery.promotion")
+      )
         cleanupError = null;
-      else if (query.includes("UPDATE factory.promotion_operation SET last_error ="))
+      else if (
+        query.includes("UPDATE factory.operation SET error =") &&
+        values.includes("delivery.promotion")
+      )
         cleanupError = String(values[0]);
       return [];
     },
@@ -153,7 +164,8 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       begin: async <T>(operation: (sql: unknown) => Promise<T>) => operation(client),
       unsafe(text: string, parameters: unknown[]) {
         async function execute(): Promise<unknown[][] & { count?: number }> {
-          if (text.startsWith('select "runtime_attempt_id", "runner_id"')) return [];
+          if (text.startsWith('select "runtime_attempt_id", "runner_id"'))
+            return state === "delivered" ? [["delivery-verification-runtime", "42"]] : [];
           if (
             text.startsWith("select") &&
             text.includes("from factory.current_promotion promotion")
@@ -173,8 +185,20 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
                 ]
               : [];
           if (text.startsWith("select") && text.includes("count(*)")) return [[0]];
-          if (text.startsWith("select exists") && text.includes('from "factory"."merge_operation"'))
+          if (
+            text.startsWith("select exists") &&
+            text.includes('from "factory"."operation"') &&
+            parameters.includes("delivery.merge")
+          )
             return [[!repair]];
+          if (
+            text.startsWith("select") &&
+            text.includes('from "factory"."change" "change"') &&
+            text.includes('for update of "change", "ticket"')
+          )
+            return [["project", state === "active"]];
+          if (text.startsWith("select") && text.includes('from "factory"."change_writer"'))
+            return [["unassigned", "1", null, null, null, false, null, null, "takeover"]];
           if (text.startsWith("select") && text.includes('inner join "factory"."ticket"'))
             return [
               [
@@ -213,9 +237,17 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
             supersededState = "cancelled";
             return [["old-verification", "old-verification-runtime", supersededRunner || null]];
           }
-          if (text.startsWith("select") && text.includes('from "factory"."pull_request_operation"'))
+          if (
+            text.startsWith("select") &&
+            text.includes('from "factory"."operation"') &&
+            parameters.includes("delivery.pull_request")
+          )
             return [["pr", "succeeded", "1", "http://forge/pr/1"]];
-          if (text.startsWith("select") && text.includes('from "factory"."merge_operation"'))
+          if (
+            text.startsWith("select") &&
+            text.includes('from "factory"."operation"') &&
+            parameters.includes("delivery.merge")
+          )
             return [["merge", mergeState, commitSHA, baseSHA, "1", null, null]];
           if (text.startsWith("select") && text.includes('from "factory"."runtime_attempt"')) {
             expect(parameters).toEqual(["old-verification-runtime"]);
@@ -246,20 +278,30 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
             if (text.includes('"runner_id" = $1') && parameters[0] === null) supersededRunner = "";
             if (text.includes('"repair_prompted_at" = now()')) repairAcknowledged = true;
           }
-          if (text.startsWith('update "factory"."merge_operation"')) {
-            if (parameters[0] === "succeeded" && failMergePersistence) {
+          if (
+            text.startsWith('update "factory"."operation"') &&
+            parameters.includes("delivery.merge")
+          ) {
+            const stateMatch = /"state" = \$(\d+)/.exec(text);
+            const nextState = stateMatch ? parameters[Number(stateMatch[1]) - 1] : undefined;
+            if (nextState === "succeeded" && failMergePersistence) {
               failMergePersistence = false;
               throw new Error("database write lost after merge");
             }
-            mergeState = String(parameters[0]);
+            if (typeof nextState === "string") mergeState = nextState;
           }
           if (text.startsWith('update "factory"."change"') && parameters.includes("delivering"))
             state = "delivering";
           if (
-            text.startsWith('update "factory"."promotion_operation"') &&
-            text.includes('"last_error" = $1')
-          )
-            cleanupError = parameters[0] === null ? null : String(parameters[0]);
+            text.startsWith('update "factory"."operation"') &&
+            parameters.includes("delivery.promotion")
+          ) {
+            const errorMatch = /"error" = \$(\d+)/.exec(text);
+            if (errorMatch) {
+              const value = parameters[Number(errorMatch[1]) - 1];
+              cleanupError = value === null ? null : String(value);
+            }
+          }
           return Object.assign([], { count: 1 });
         }
         const result = execute();
@@ -313,6 +355,11 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
   const runtime = {
     startVerification: async () => null,
     startStagingReplacement: async () => null,
+    pause: async (attemptID: string) => {
+      pausedAttempts.push(attemptID);
+      if (failPause) throw new Error("pause failed");
+      return null;
+    },
     stop: async (attemptID: string) => {
       stopCalls += 1;
       stoppedAttempts.push(attemptID);
@@ -347,6 +394,9 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
     failStop: (value: boolean) => {
       failStop = value;
     },
+    failPause: (value: boolean) => {
+      failPause = value;
+    },
     setDefaultHead: (value: string) => {
       defaultHead = value;
     },
@@ -367,6 +417,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       rejectPrompt = value;
     },
     stoppedAttempts,
+    pausedAttempts,
     deletedRunners,
     supersededState: () => supersededState,
     retiredBranches,
@@ -380,6 +431,41 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
 }
 
 describe("Delivery recovery", () => {
+  test("successful Delivery pauses Coding but stops only the old Preview and Verification", async () => {
+    const f = fixture(true);
+    await f.controller.reconcile("change");
+    expect(f.pausedAttempts).toEqual(["ticket-runtime"]);
+    expect(f.stoppedAttempts).toEqual(["old-staging", "delivery-verification-runtime"]);
+    expect(f.deletedRunners).toEqual([42]);
+    expect(f.retiredBranches).toEqual(["change"]);
+    expect(f.cleanupError()).toBeNull();
+    await f.controller.reconcile("change");
+    expect(f.pausedAttempts).toEqual(["ticket-runtime"]);
+    expect(f.stoppedAttempts).toEqual(["old-staging", "delivery-verification-runtime"]);
+  });
+
+  test("failed Coding Pause retains Delivery cleanup for retry without stopping its Workspace", async () => {
+    const f = fixture(true);
+    f.failPause(true);
+    await f.controller.reconcile("change");
+    expect(f.cleanupError()).toBe("pause failed");
+    expect(f.pausedAttempts).toEqual(["ticket-runtime"]);
+    expect(f.stoppedAttempts).toEqual(["old-staging"]);
+    expect(f.retiredBranches).toEqual([]);
+    f.failPause(false);
+    await f.controller.reconcile("change");
+    expect(f.pausedAttempts).toEqual(["ticket-runtime", "ticket-runtime"]);
+    expect(f.stoppedAttempts).toEqual([
+      "old-staging",
+      "old-staging",
+      "delivery-verification-runtime",
+    ]);
+    expect(f.cleanupError()).toBeNull();
+    expect(f.retiredBranches).toEqual(["change"]);
+    await f.controller.reconcile("change");
+    expect(f.pausedAttempts).toHaveLength(2);
+  });
+
   test.each(["cancelled", "skipped", "execution-failed", "unavailable"])(
     "%s cannot commission an application-code correction",
     async (kind) => {

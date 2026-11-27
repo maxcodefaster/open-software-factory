@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { runtimeIdentity } from "#runtime-domain/identity";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 const readCases = (["committed", "stopped"] as const).flatMap((state) =>
@@ -63,13 +63,10 @@ test("completed history can be read from the same retained Workspace without reb
     await owned.database.client.begin(async (sql) => {
       // Controlled uncreated admission only. Preserve the native owner binding
       // and environment before presenting a ready transport to the reader.
-      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'create-intended', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, create_intended_at, created_by, atespace, actor_name, binding_intent)
+        SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'create-intended', parent_connector_token_hash, now(), created_by,
+          ${`fa-${replacementID.replaceAll("-", "")}`}, ${`runtime-${replacementID.replaceAll("-", "")}`}, binding_intent
         FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
-      await sql`INSERT INTO factory.substrate_binding(runtime_attempt_id,atespace,actor_name,intent)
-        SELECT ${replacementID},${`fa-${replacementID.replaceAll("-", "")}`},
-          ${`runtime-${replacementID.replaceAll("-", "")}`},intent
-        FROM factory.substrate_binding WHERE runtime_attempt_id=${owned.attemptID}`;
       await freezeRuntimeEnvironment(sql, replacementID);
       await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacementID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${replacementID} WHERE id=${owned.changeID}`;
@@ -223,7 +220,7 @@ test.each(readCases)(
     const entered = Promise.withResolvers<void>();
     const original = owned.hub.request.bind(owned.hub);
     const transport = new RuntimeHub(async () => {});
-    const sent: Array<{ type: string; streamId: string; path?: string }> = [];
+    const sent: Array<{ type: string; streamId: string; path?: string; method?: string }> = [];
     const child = {
       data: { kind: "connector", role: "child", attemptID: owned.attemptID, generation: 1 },
       close() {},
@@ -249,17 +246,28 @@ test.each(readCases)(
                   type: "stream-data",
                   streamId: message.streamId,
                   data: Buffer.from(
-                    JSON.stringify({
-                      data: [
-                        {
-                          id: "owned-output",
-                          type: "assistant",
-                          content: [{ type: "text", text: "Useful Build output" }],
-                          time: { created: 1, completed: 2 },
-                          finish: "stop",
-                        },
-                      ],
-                    }),
+                    JSON.stringify(
+                      message.path === "/api/location"
+                        ? {
+                            directory: "/workspace/project",
+                            project: {
+                              id: "owned-controlled-project",
+                              directory: "/workspace/project",
+                              canonical: "/workspace/project",
+                            },
+                          }
+                        : {
+                            data: [
+                              {
+                                id: "owned-output",
+                                type: "assistant",
+                                content: [{ type: "text", text: "Useful Build output" }],
+                                time: { created: 1, completed: 2 },
+                                finish: "stop",
+                              },
+                            ],
+                          },
+                    ),
                   ).toString("base64"),
                 }),
               );
@@ -313,8 +321,17 @@ test.each(readCases)(
         turn: { id: turn.id, state: state === "stopped" ? "stopped" : "completed" },
       });
       expect(sent.some((message) => message.type === "stream-close")).toBe(stall !== "not stalled");
-      expect(sent.filter((message) => message.type === "http-request")).toHaveLength(1);
-      expect(sent[0]?.path).toContain(`/api/session/${owned.sessionID}/message`);
+      expect(
+        sent
+          .filter((message) => message.type === "http-request")
+          .map((message) => ({
+            method: message.method,
+            path: new URL(message.path ?? "", "http://runtime.invalid").pathname,
+          })),
+      ).toEqual([
+        { method: "GET", path: `/api/session/${owned.sessionID}/message` },
+        ...(stall === "not stalled" ? [{ method: "GET", path: "/api/location" }] : []),
+      ]);
       expect(owned.requests()).toBe(0);
       expect(owned.commitCalls).toEqual([]);
     } finally {

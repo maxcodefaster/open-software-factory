@@ -29,11 +29,11 @@ const projectTable = {
       customType: null as unknown as string,
       serverName: "default_branch",
     },
-    devcontainerPath: {
+    actorTemplatePath: {
       type: "string",
       optional: false,
       customType: null as unknown as string,
-      serverName: "devcontainer_path",
+      serverName: "actor_template_path",
     },
     createdAt: {
       type: "number",

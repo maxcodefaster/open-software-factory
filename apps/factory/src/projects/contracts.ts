@@ -1,11 +1,11 @@
-import { type PullRow } from "@rocicorp/zero";
+import type { PullRow } from "@rocicorp/zero";
 import { z } from "zod";
-import { desktopBackgroundKeys } from "../../../../packages/interface-domain/src/background";
-import { type FactoryZeroSchema } from "../../../../packages/zero-schema/src";
+import { desktopBackgroundKeys } from "#interface-domain/background";
+import type { FactoryZeroSchema } from "#zero-schema";
 
 export type Project = Pick<
   PullRow<"project", FactoryZeroSchema>,
-  "id" | "slug" | "name" | "repositoryUrl" | "defaultBranch" | "devcontainerPath" | "createdAt"
+  "id" | "slug" | "name" | "repositoryUrl" | "defaultBranch" | "actorTemplatePath" | "createdAt"
 >;
 
 export type Epic = Pick<
@@ -20,7 +20,7 @@ export const projectSchema = z.object({
   desktopBackgroundKey: z.enum(desktopBackgroundKeys),
   repositoryUrl: z.string(),
   defaultBranch: z.string(),
-  devcontainerPath: z.string(),
+  actorTemplatePath: z.string(),
   createdAt: z.union([z.number(), z.string()]),
 });
 

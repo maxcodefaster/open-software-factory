@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { factoryProcess } from "../fixtures/factory-process";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
+import { createForgejoClient } from "#forge/forge";
 import { installationPlanningConnection } from "../../apps/factory/src/models/resolver";
+import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test.skipIf(process.env["FACTORY_RUN_SETUP_INSPECTION_PROOF"] !== "1")(
   "Luna inspects real exact-commit Forgejo source and confirms only missing configuration",
@@ -51,8 +51,8 @@ test.skipIf(process.env["FACTORY_RUN_SETUP_INSPECTION_PROOF"] !== "1")(
           },
         ],
       });
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-        VALUES(${projectID},${repository.name},'Support desk',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${manager})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+        VALUES(${projectID},${repository.name},'Support desk',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}`},'main','.factory/actor-template.json',${manager})`;
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${manager},'developer',true,${manager})`;
       const controller = createSetupInspection({
         database,

@@ -1,18 +1,15 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
+import { changeIdentity } from "#change-domain/change";
+import { createForgejoClient } from "#forge/forge";
+import { canonicalRequirementContent, requirementDigest } from "#requirement-domain/requirement";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { changeIdentity } from "../../packages/change-domain/src/change";
-import { createForgejoClient } from "../../packages/forge/src/forge";
-import {
-  canonicalRequirementContent,
-  requirementDigest,
-} from "../../packages/requirement-domain/src/requirement";
 import { requirePublishedRuntimeArtifacts } from "../../scripts/factory/artifacts";
-import { requireOwnedProjectSourceRetention } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal as terminal } from "../fixtures/runtime-access";
 import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
+import { connectStarterNativeLifecycle } from "../fixtures/starter-native-lifecycle";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -23,7 +20,7 @@ function promptHistorySource(sessionID: string) {
 
 for (const boundary of ["lost commit acknowledgement", "running Build"] as const) {
   test.skipIf(process.env["FACTORY_LIVE_COMMIT_RECOVERY"] !== "1")(
-    `actual model, Envbox and Connector recover ${boundary} after Factory SIGKILL`,
+    `actual model, native Workspace and Connector recover ${boundary} after Factory SIGKILL`,
     async () => {
       for (const key of [
         "FACTORY_MODEL_BASE_URL",
@@ -56,7 +53,6 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
       let branchCreateIntended = false;
       let recoveredSHA: string | undefined;
       let baseSHA = "";
-      let safeToDispose = false;
       async function command(path: string, body: unknown = {}) {
         const response = await fetch(`${processFixture.base}${path}`, {
           method: "POST",
@@ -120,9 +116,9 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
           nonGoals: ["Change dependencies, runtime configuration, or other files."],
         });
         await database.client.begin(async (sql) => {
-          await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+          await sql`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, actor_template_path, created_by)
           VALUES (${projectID}, ${slug}, 'Owned commit runtime recovery',
-          'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.devcontainer/devcontainer.json', ${userID})`;
+          'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.factory/actor-template.json', ${userID})`;
           await sql`INSERT INTO factory.ticket(id, project_id, title, state, created_by)
           VALUES (${ticketID}, ${projectID}, 'Owned commit runtime recovery', 'in-progress', ${userID})`;
           await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
@@ -131,10 +127,19 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
           VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${userID})`;
           await sql`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
           VALUES (${identity.changeID}, ${projectID}, ${ticketID}, ${approvalID}, ${identity.branchName}, ${baseSHA}, 'active', ${userID})`;
-          await sql`INSERT INTO factory.branch_create_operation(id, change_id, repository_owner, repository_name,
-          branch_name, start_sha, idempotency_key, state, observed_head_sha, completed_at)
-          VALUES (${identity.branchOperationID}, ${identity.changeID}, ${repository.owner}, ${repository.name},
-          ${identity.branchName}, ${baseSHA}, ${`owned-runtime:${identity.changeID}`}, 'pending', NULL, NULL)`;
+          await sql`INSERT INTO factory.operation(id, kind, scope_type, scope_id, idempotency_key, active_key, state, payload)
+          VALUES (${identity.branchOperationID}, 'delivery.branch_create', 'change', ${identity.changeID},
+          ${`delivery.branch_create:change:${identity.changeID}:create-branch`}, ${`delivery.branch_create:${identity.changeID}`}, 'pending',
+          ${JSON.stringify({
+            changeId: identity.changeID,
+            repositoryOwner: repository.owner,
+            repositoryName: repository.name,
+            branchName: identity.branchName,
+            startSha: baseSHA,
+            attemptCount: 1,
+            leaseGeneration: 0,
+            reconcileAfter: null,
+          })}::jsonb)`;
           await sql`INSERT INTO factory.ticket_conversation(id, project_id, ticket_id, mode, created_by)
           VALUES (${crypto.randomUUID()}, ${projectID}, ${ticketID}, 'build', ${userID})`;
         });
@@ -164,8 +169,10 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
         branchCreateIntended = true;
         const branch = await forge.ensureBranch(repository, identity.branchName, baseSHA);
         expect(branch.headSha).toBe(baseSHA);
-        await database.client`UPDATE factory.branch_create_operation SET state = 'succeeded', observed_head_sha = ${baseSHA},
-        completed_at = now() WHERE id = ${identity.branchOperationID}`;
+        await database.client`UPDATE factory.operation
+        SET state = 'succeeded', active_key = NULL, result = ${JSON.stringify({ observedHeadSha: baseSHA })}::jsonb,
+        completed_at = now(), updated_at = now()
+        WHERE id = ${identity.branchOperationID} AND kind = 'delivery.branch_create'`;
         await serverCall(
           callFactoryFunction(
             processFixture.base,
@@ -190,19 +197,26 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
         const sourceIdentity = async () => {
           const [source] = await database.client<
             Array<{
-              state: string;
-              epoch: number;
-              podUID: string;
-              namespaceUID: string;
-              claimUID: string;
+              actorUID: string;
+              owner: string;
+              writerEpoch: number;
+              generation: string;
+              writable: boolean;
+              checkpointID: string | null;
             }>
-          >`SELECT state,access_epoch::float8 AS epoch,pod_uid AS "podUID",
-            namespace_uid AS "namespaceUID",claim_uid AS "claimUID"
-            FROM factory.workspace_source WHERE workspace_id=${workspace.id}`;
+          >`SELECT actor_uid AS "actorUID",owner,writer_epoch::float8 AS "writerEpoch",
+            generation::text AS generation,writable,checkpoint_id AS "checkpointID"
+            FROM factory.substrate_source WHERE workspace_id=${workspace.id}`;
           return source;
         };
         const sourceBefore = await sourceIdentity();
-        expect(sourceBefore?.state).toBe("ready");
+        if (!sourceBefore) throw new Error("Owned native Source missing");
+        z.uuid().parse(sourceBefore.actorUID);
+        expect(sourceBefore).toMatchObject({
+          owner: "actor",
+          writable: true,
+          checkpointID: null,
+        });
         const sourceFile = z.object({ content: z.string(), version: z.string() });
         const readCanonicalVersion = async () =>
           sourceFile.parse(
@@ -459,11 +473,20 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
         ]);
         const sourceAfter = await eventually(
           sourceIdentity,
-          (source) => source?.state === "ready",
+          (source) => source?.owner === "actor" && source.writable && source.checkpointID === null,
           "Owned canonical source did not recover",
           60_000,
         );
-        expect(sourceAfter).toEqual(sourceBefore);
+        if (!sourceAfter) throw new Error("Owned native Source did not recover");
+        expect(sourceAfter).toMatchObject({
+          actorUID: sourceBefore.actorUID,
+          owner: "actor",
+          generation: sourceBefore.generation,
+          checkpointID: null,
+        });
+        // Explicit Coding authorizations may advance the writer fence. They do
+        // not replace the canonical Actor or export Source to a separate writer.
+        expect(sourceAfter.writerEpoch).toBeGreaterThanOrEqual(sourceBefore.writerEpoch);
         const canonicalVersion = await readCanonicalVersion();
         expect(Buffer.from(canonicalVersion.content, "base64").toString()).toBe(`${slug}\n`);
         await writeFile(
@@ -511,9 +534,9 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
           );
           const staging = async () => {
             const [row] = await database.client<{ id: string; revision: string; state: string }[]>`
-              SELECT attempt.id, preview.revision, attempt.state FROM factory.staging_preview preview
-              JOIN factory.runtime_attempt attempt ON attempt.id = preview.runtime_attempt_id
-              WHERE preview.project_id = ${projectID}`;
+              SELECT attempt.id, preview.payload->>'revision' AS revision, attempt.state FROM factory.operation preview
+              JOIN factory.runtime_attempt attempt ON attempt.id::text = preview.payload->>'runtimeAttemptId'
+              WHERE preview.kind = 'delivery.staging_preview' AND preview.scope_type = 'project' AND preview.scope_id = ${projectID}`;
             return row;
           };
           const initial = await eventually(
@@ -547,8 +570,9 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
             async () => {
               const [promotion] = await database.client<
                 Array<{ state: string; cleanupError: string | null }>
-              >`SELECT state,last_error AS "cleanupError" FROM factory.promotion_operation
-                WHERE change_id=${identity.changeID}`;
+              >`SELECT state, error AS "cleanupError" FROM factory.operation
+                WHERE kind = 'delivery.promotion' AND scope_type = 'change' AND scope_id = ${identity.changeID}
+                ORDER BY (payload->>'ordinal')::integer DESC LIMIT 1`;
               return promotion;
             },
             (promotion) => promotion?.state === "succeeded" && promotion.cleanupError === null,
@@ -599,9 +623,10 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
         );
         throw cause;
       } finally {
-        for (const opened of terminals) opened.close();
-        const cleanOwnedResources = async () => {
-          // Preserve recovery identities if any external cleanup cannot be confirmed.
+        let haltConfirmed = false;
+        let lifecycle: Awaited<ReturnType<typeof connectStarterNativeLifecycle>> | undefined;
+        try {
+          for (const opened of terminals) opened.close();
           if (!(await fetch(`${processFixture.base}/health/ready`).catch(() => null))?.ok)
             await processFixture.start();
           cookie = await processFixture.signIn();
@@ -632,103 +657,90 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
                 ),
               );
             }
-            // Confirm every owned runtime is stopped before removing the disposable database.
-            const stoppedAttempts = new Set<string>();
+            const ownedAttempts = () =>
+              database.client<Array<{ id: string; workspaceID: string | null; state: string }>>`
+                SELECT id,workspace_id AS "workspaceID",state FROM factory.runtime_attempt
+                WHERE project_id=${projectID}`;
+            for (const attempt of await ownedAttempts()) {
+              if (
+                ["failed", "stopped"].includes(attempt.state) ||
+                (attempt.workspaceID && attempt.state === "paused")
+              )
+                continue;
+              if (attempt.workspaceID) {
+                lifecycle ??= await connectStarterNativeLifecycle(processFixture.base, cookie);
+                const requestID = crypto.randomUUID();
+                await writeFile(
+                  `${evidenceDirectory}/final-pause-${attempt.id}.json`,
+                  JSON.stringify({ projectID, workspaceID: attempt.workspaceID, requestID }),
+                  { mode: 0o600, flag: "wx" },
+                );
+                expect(await lifecycle.pause(attempt.workspaceID, requestID)).toMatchObject({
+                  id: attempt.id,
+                  projectId: projectID,
+                  workspaceId: attempt.workspaceID,
+                });
+              } else {
+                await serverCall(
+                  callFactoryFunction(
+                    processFixture.base,
+                    "stopRuntimeAttempt",
+                    [attempt.id],
+                    { cookie, origin: processFixture.base, "content-type": "application/json" },
+                    AbortSignal.timeout(180_000),
+                  ),
+                );
+              }
+            }
             await eventually(
-              async () => {
-                const ownedAttempts = await database.client<Array<{ id: string }>>`
-                  SELECT id FROM factory.runtime_attempt WHERE project_id = ${projectID}
-                    AND state <> 'stopped'
-                `;
-                for (const attempt of ownedAttempts) {
-                  if (stoppedAttempts.has(attempt.id)) continue;
-                  await serverCall(
-                    callFactoryFunction(
-                      processFixture.base,
-                      "stopRuntimeAttempt",
-                      [attempt.id],
-                      { cookie, origin: processFixture.base, "content-type": "application/json" },
-                      AbortSignal.timeout(180_000),
-                    ),
-                  );
-                  stoppedAttempts.add(attempt.id);
-                }
-                if (ownedAttempts.length) return ownedAttempts.length;
-                await requireOwnedProjectSourceRetention(database, projectID);
-                const child = Bun.spawn(
-                  [
-                    "kubectl",
-                    "--context",
-                    "orbstack",
-                    "get",
-                    "namespaces",
-                    "-l",
-                    `factory.dev/project=${projectID}`,
-                    "-o",
-                    "json",
-                  ],
-                  { stdout: "pipe", stderr: "pipe" },
-                );
-                const [output, status] = await Promise.all([
-                  new Response(child.stdout).text(),
-                  child.exited,
-                ]);
-                if (status !== 0) throw new Error("Cannot confirm owned runtime cleanup");
-                return (
-                  ownedAttempts.length + (JSON.parse(output) as { items: unknown[] }).items.length
-                );
-              },
-              (count) => count === 0,
-              "Owned Namespace remained after cancellation",
+              ownedAttempts,
+              (attempts) =>
+                attempts.every(
+                  (attempt) =>
+                    ["failed", "stopped"].includes(attempt.state) ||
+                    (attempt.workspaceID !== null && attempt.state === "paused"),
+                ),
+              "Owned runtime halt is unconfirmed",
               180_000,
             );
-            const pulls = await database.client<
-              { number: number | null }[]
-            >`SELECT pull_request_number AS number FROM factory.pull_request_operation WHERE change_id = ${identity.changeID}`;
-            for (const pull of pulls)
-              if (pull.number !== null) {
-                const observed = await forge.getPullRequest(
-                  repository,
-                  "main",
-                  identity.branchName,
-                );
-                if (!observed || observed.number !== Number(pull.number))
-                  throw new Error("Owned pull request cleanup refused unexpected identity");
-                if (observed.merged || observed.state === "closed") continue;
-                if (observed.headSha !== recoveredSHA)
-                  throw new Error("Owned pull request cleanup refused unexpected head");
-                const closed = await fetch(
-                  `http://127.0.0.1:33030/api/v1/repos/${repository.owner}/${repository.name}/pulls/${pull.number}`,
-                  {
-                    method: "PATCH",
-                    headers: {
-                      authorization: `token ${forgejoToken}`,
-                      "content-type": "application/json",
-                    },
-                    body: JSON.stringify({ state: "closed" }),
-                  },
-                );
-                if (!closed.ok) throw new Error("Owned pull request cleanup failed");
-              }
           }
-          if (branchCreateIntended) {
-            const current = await forge.getBranch(repository, identity.branchName);
-            if (current && ![baseSHA, recoveredSHA].includes(current.headSha))
-              throw new Error("Owned branch cleanup refused unexpected head");
-            if (current) await forge.deleteBranch(repository, identity.branchName);
-          }
-          safeToDispose = true;
-          await writeFile(
-            `${evidenceDirectory}/cleanup.json`,
-            `${JSON.stringify({ projectID, runtimeResourcesRemoved: true, branchRemoved: branchCreateIntended }, null, 2)}\n`,
-          );
-        };
-        try {
-          await cleanOwnedResources();
+          haltConfirmed = true;
         } finally {
-          await database.client.end();
-          if (safeToDispose) await processFixture.dispose();
-          else await processFixture.shutdown();
+          try {
+            await lifecycle?.close();
+          } finally {
+            // Explicit Coding cancellation above is separate from Pause. Neither
+            // permits erasing retained Source, recovery history or Forge identities.
+            const retainedCommitRecovery = {
+              id: processFixture.id,
+              base: processFixture.base,
+              projectID,
+              changeID: identity.changeID,
+              slug,
+              branchName: identity.branchName,
+              branchCreateIntended,
+              recoveredSHA,
+              haltConfirmed,
+              runtimeResourcesRemoved: false,
+              destructiveDisposal: false,
+            };
+            console.log(JSON.stringify({ retainedCommitRecovery }));
+            try {
+              await writeFile(
+                `${evidenceDirectory}/cleanup.json`,
+                `${JSON.stringify({ retainedCommitRecovery }, null, 2)}\n`,
+                { mode: 0o600 },
+              );
+            } finally {
+              try {
+                await database.client.end();
+              } finally {
+                // Only local listeners/cache stop; the exact owned database and
+                // native resource identities remain available for explicit follow-up.
+                await processFixture.pause();
+              }
+            }
+          }
         }
       }
     },

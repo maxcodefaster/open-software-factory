@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   modelConnectionMetadata,
   modelConnectionWrite,
-} from "../../../../packages/conversation-domain/src/model-connection";
+} from "#conversation-domain/model-connection";
 import { createOpenBaoKV, type OpenBaoOptions } from "../secrets/openbao";
 
 export const storedModelConnection = modelConnectionMetadata

@@ -1,10 +1,6 @@
 import type { LLMStepResult } from "@mastra/core/stream";
 import { z } from "zod";
-import {
-  type UsageCounters,
-  unknownCounters,
-  usageCounters,
-} from "../../../../packages/conversation-domain/src/usage";
+import { type UsageCounters, unknownCounters, usageCounters } from "#conversation-domain/usage";
 import type { UsageEntry } from "./journal";
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional();

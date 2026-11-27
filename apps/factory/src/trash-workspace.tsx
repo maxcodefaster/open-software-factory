@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { type Ticket } from "./change/contracts";
+import type { Ticket } from "./change/contracts";
 
 export function TrashWorkspace(props: {
   tickets: readonly Ticket[];

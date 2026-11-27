@@ -3,10 +3,11 @@ import { resolve } from "node:path";
 import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { environmentSettingsView } from "#project-domain/environment";
+import { setupInspectionView, setupReadiness } from "#project-domain/setup";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { environmentSettingsView } from "../../packages/project-domain/src/environment";
-import { setupInspectionView, setupReadiness } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
+import { nativeProjectTemplate } from "../fixtures/native-project";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage, openSetupRecovery } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -25,7 +26,6 @@ test.beforeEach(async ({ page }) => {
         return environmentSettingsView.parse({
           environment,
           variables: [],
-          registries: [],
           version: 0,
           canManage: role !== "viewer" && role !== "developer",
           storeConfigured: true,
@@ -341,9 +341,8 @@ test("configuration corrections retain the exact proposal, answers and unconfirm
             '{"version":1,"primaryApp":"web","apps":[{"id":"web","label":"Web","command":["pnpm","dev"],"port":4321,"healthPath":"/health"}]}',
         },
         {
-          path: ".devcontainer/devcontainer.json",
-          content:
-            '{"image":"node:24-bookworm","workspaceFolder":"/workspace/project","remoteUser":"node"}',
+          path: nativeProjectTemplate.path,
+          content: nativeProjectTemplate.content,
         },
         {
           path: ".forgejo/workflows/factory-verification.yml",

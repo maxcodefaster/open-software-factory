@@ -1,4 +1,4 @@
-import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import type { SkillContent } from "#conversation-domain/skills";
 
 // Reviewed, adapted text only. Publication remains an explicit System Manager command.
 export const requirementsInterviewSkill = {

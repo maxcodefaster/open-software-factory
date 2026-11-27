@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createForgejoClient, ForgeAmbiguousWriteError } from "#forge/forge";
+import { setupFeedbackKey } from "#project-domain/setup";
 import { configurationPath } from "../../apps/factory/src/setup/configuration";
 import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
-import { createForgejoClient, ForgeAmbiguousWriteError } from "../../packages/forge/src/forge";
-import { setupFeedbackKey } from "../../packages/project-domain/src/setup";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
+import { nativeProjectTemplate } from "../fixtures/native-project";
+import { controlledStarterInput } from "../fixtures/starter";
 
 test("an explicit retry retains confirmed setup answers after a failed continuation", async () => {
   const isolated = await factoryProcess();
@@ -30,7 +32,9 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     body: string | null;
     denied: string[];
   }[] = [];
-  const files = (await starterFiles()).filter((file) => configurationPath(file.path));
+  const files = (await starterFiles(controlledStarterInput)).filter((file) =>
+    configurationPath(file.path),
+  );
   const inventory = [
     { path: "package.json", size: 40 },
     ...Array.from({ length: 2000 }, (_, index) => ({ path: `src/part-${index}.ts`, size: 40 })),
@@ -126,7 +130,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
           calls === 1
             ? []
             : invalidRecipe
-              ? files.filter((file) => file.path !== ".devcontainer/compose.yaml")
+              ? files.filter((file) => file.path !== ".factory/actor-template.json")
               : files,
       };
     },
@@ -134,8 +138,8 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
   try {
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${userID},'Owned retry proof',${`${userID}@retry.test`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`retry-${projectID.slice(0, 8)}`},'Retry proof','https://forge.test/owned/retry','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`retry-${projectID.slice(0, 8)}`},'Retry proof','https://forge.test/owned/retry','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectID},${userID},'developer',true,${userID})`;
     await controller.start(projectID, userID, initialID);
@@ -170,8 +174,37 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     await controller.start(projectID, userID, retryID, { parentID: failedID });
     expect(calls).toBe(3);
     expect(sourceReads).toBe(6);
+    const insertInspection = (row: {
+      id: string;
+      state: "inspecting" | "proposal" | "failed" | "superseded";
+      parentId?: string | null;
+      answers?: Record<string, string>;
+      output?: unknown;
+      failure?: string | null;
+    }) => {
+      const active = ["inspecting", "proposal", "confirming"].includes(row.state);
+      const payload = {
+        projectId: projectID,
+        sourceCommit: head,
+        output: row.output ?? null,
+        failure: row.failure ?? null,
+        modelId: null,
+        connectionId: null,
+        connectionVersion: null,
+        parentId: row.parentId ?? null,
+        answers: row.answers ?? {},
+        createdBy: userID,
+      };
+      return database.client`INSERT INTO factory.operation
+        (id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,error,created_by,completed_at)
+        VALUES(${row.id},'project.setup_inspection','project',${projectID},
+          ${`project.setup_inspection:${row.id}`},
+          ${active ? `project.setup_inspection:${projectID}` : null},
+          ${row.state},${JSON.stringify(payload)}::jsonb,${row.failure ?? null},${userID},
+          ${active ? null : new Date().toISOString()})`;
+    };
     const [failed] = await database.client<{ state: string; failure: string }[]>`
-      SELECT state,failure FROM factory.project_setup_inspection WHERE id=${failedID}`;
+      SELECT state, payload->>'failure' AS failure FROM factory.operation WHERE id=${failedID} AND kind='project.setup_inspection'`;
     expect(failed?.state).toBe("failed");
     expect(failed?.failure).toContain("timed out");
     expect(failed?.failure).not.toContain("must-not-retain-provider-credentials");
@@ -192,9 +225,13 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     let failedParent = failedID;
     for (let index = 0; index < 9; index++) {
       const id = crypto.randomUUID();
-      await database.client`INSERT INTO factory.project_setup_inspection
-        (id,project_id,source_commit,state,created_by,parent_id,answers,failure)
-        VALUES(${id},${projectID},${head},'failed',${userID},${failedParent},'{}'::jsonb,'Earlier inspection failed')`;
+      await insertInspection({
+        id,
+        state: "failed",
+        parentId: failedParent,
+        answers: {},
+        failure: "Earlier inspection failed",
+      });
       failedParent = id;
     }
     const recoveredID = crypto.randomUUID();
@@ -210,26 +247,32 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     expect(calls).toBe(4);
     await controller.stop(projectID, userID, recoveredID);
 
-    const questionOutput = JSON.stringify({
+    const questionOutput = {
       purpose: "Owned bounded question history",
       services: [],
       uncertainty: [],
       questions: [{ id: "port", question: "Which port should Factory use?" }],
       files: [],
-    });
+    };
     let questionParent = initialID;
     for (let index = 0; index < 7; index++) {
       const id = crypto.randomUUID();
-      await database.client`INSERT INTO factory.project_setup_inspection
-        (id,project_id,source_commit,state,created_by,parent_id,answers,output)
-        VALUES(${id},${projectID},${head},'superseded',${userID},${questionParent},
-          '{"port":"4321"}'::jsonb,${questionOutput}::jsonb)`;
+      await insertInspection({
+        id,
+        state: "superseded",
+        parentId: questionParent,
+        answers: { port: "4321" },
+        output: questionOutput,
+      });
       questionParent = id;
     }
     const eighthFailedID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,parent_id,answers)
-      VALUES(${eighthFailedID},${projectID},${head},'failed',${userID},${questionParent},'{"port":"4321"}'::jsonb)`;
+    await insertInspection({
+      id: eighthFailedID,
+      state: "failed",
+      parentId: questionParent,
+      answers: { port: "4321" },
+    });
     const eighthRetryID = crypto.randomUUID();
     await controller.start(projectID, userID, eighthRetryID, { parentID: eighthFailedID });
     await controller.settle();
@@ -239,23 +282,32 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     await controller.stop(projectID, userID, eighthRetryID);
 
     const ninthQuestionID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,parent_id,answers,output)
-      VALUES(${ninthQuestionID},${projectID},${head},'superseded',${userID},${questionParent},
-        '{"port":"4321"}'::jsonb,${questionOutput}::jsonb)`;
+    await insertInspection({
+      id: ninthQuestionID,
+      state: "superseded",
+      parentId: questionParent,
+      answers: { port: "4321" },
+      output: questionOutput,
+    });
     const ninthFailedID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,parent_id,answers)
-      VALUES(${ninthFailedID},${projectID},${head},'failed',${userID},${ninthQuestionID},'{"port":"4321"}'::jsonb)`;
+    await insertInspection({
+      id: ninthFailedID,
+      state: "failed",
+      parentId: ninthQuestionID,
+      answers: { port: "4321" },
+    });
     await controller.start(projectID, userID, crypto.randomUUID(), { parentID: ninthFailedID });
     await controller.settle();
     expect((await controller.view(projectID, userID))?.state).toBe("failed");
     expect(calls).toBe(5);
 
     const cyclicID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,parent_id,answers)
-      VALUES(${cyclicID},${projectID},${head},'failed',${userID},${cyclicID},'{}'::jsonb)`;
+    await insertInspection({
+      id: cyclicID,
+      state: "failed",
+      parentId: cyclicID,
+      answers: {},
+    });
     await controller.start(projectID, userID, crypto.randomUUID(), { parentID: cyclicID });
     await controller.settle();
     expect((await controller.view(projectID, userID))?.state).toBe("failed");
@@ -268,7 +320,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     const invalid = await controller.view(projectID, userID);
     expect(invalid?.state).toBe("failed");
     expect(invalid?.output).toBeNull();
-    expect(invalid?.failure).toContain("required recipe file");
+    expect(invalid?.failure).toContain("omitted required configuration");
     invalidRecipe = false;
     const correctedID = crypto.randomUUID();
     await controller.start(projectID, userID, correctedID, { parentID: invalidID });
@@ -279,7 +331,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     expect(calls).toBe(7);
     expect(sourceReads).toBe(14);
     const [retainedInvalid] =
-      await database.client`SELECT state,failure FROM factory.project_setup_inspection WHERE id=${invalidID}`;
+      await database.client`SELECT state, payload->>'failure' AS failure FROM factory.operation WHERE id=${invalidID} AND kind='project.setup_inspection'`;
     expect(retainedInvalid?.["state"]).toBe("failed");
     expect(retainedInvalid?.["failure"]).toBe(invalid?.failure);
 
@@ -303,17 +355,20 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     }
     await controller.stop(projectID, userID, reviewedID);
     const eighthReviewBase = crypto.randomUUID();
-    const reviewedOutput = JSON.stringify({
+    const reviewedOutput = {
       purpose: "Owned retry application",
       services: [],
       uncertainty: [],
       questions: [],
       files,
+    };
+    await insertInspection({
+      id: eighthReviewBase,
+      state: "proposal",
+      parentId: eighthFailedID,
+      answers: {},
+      output: reviewedOutput,
     });
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,parent_id,answers,output)
-      VALUES(${eighthReviewBase},${projectID},${head},'proposal',${userID},${eighthFailedID},
-        '{}'::jsonb,${reviewedOutput}::jsonb)`;
     const eighthReviewID = crypto.randomUUID();
     await controller.start(projectID, userID, eighthReviewID, {
       parentID: eighthReviewBase,
@@ -321,7 +376,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     });
     await controller.settle();
     expect((await controller.view(projectID, userID))?.state).toBe("proposal");
-    expect(previousProposals.at(-1)).toEqual(JSON.parse(reviewedOutput));
+    expect(previousProposals.at(-1)).toEqual(reviewedOutput);
     expect(contexts.at(-1)).toHaveLength(9);
     invalidRecipe = true;
     const failedReviewID = crypto.randomUUID();
@@ -336,7 +391,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     await controller.start(projectID, userID, recoveredReviewID, { parentID: failedReviewID });
     await controller.settle();
     expect((await controller.view(projectID, userID))?.state).toBe("proposal");
-    expect(previousProposals.at(-1)).toEqual(JSON.parse(reviewedOutput));
+    expect(previousProposals.at(-1)).toEqual(reviewedOutput);
     expect(contexts.at(-1)).toContainEqual({
       question: "Requested configuration changes",
       answer: "Preserve the recipe and correct only its installer.",
@@ -346,16 +401,18 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     expect(calls).toBe(settledCalls);
     await controller.stop(projectID, userID, recoveredReviewID);
     const interruptedID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.project_setup_inspection
-      (id,project_id,source_commit,state,created_by,answers)
-      VALUES(${interruptedID},${projectID},${head},'inspecting',${userID},'{"port":"4321"}'::jsonb)`;
+    await insertInspection({
+      id: interruptedID,
+      state: "inspecting",
+      answers: { port: "4321" },
+    });
     await controller.recover();
     expect((await controller.view(projectID, userID))?.state).toBe("failed");
     expect((await controller.view(projectID, userID))?.failure).toContain("interrupted");
     expect(calls).toBe(settledCalls);
     expect(
       (
-        await database.client`SELECT answers FROM factory.project_setup_inspection WHERE id=${interruptedID}`
+        await database.client`SELECT payload->'answers' AS answers FROM factory.operation WHERE id=${interruptedID} AND kind='project.setup_inspection'`
       )[0]?.["answers"],
     ).toEqual({ port: "4321" });
   } finally {
@@ -378,12 +435,14 @@ test("setup inference does not retain the application's only pooled database con
   let generations = 0;
   let latestAnswers: Record<string, string> | undefined;
   let latestContext: readonly { question: string; answer: string }[] | undefined;
-  const configuration = (await starterFiles()).filter((file) => configurationPath(file.path));
+  const configuration = (await starterFiles(controlledStarterInput)).filter((file) =>
+    configurationPath(file.path),
+  );
   let sourceCommit = "a".repeat(40);
   try {
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Owned pool proof',${`${userID}@pool.test`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${`pool-${projectID.slice(0, 8)}`},'Pool proof','https://forge.test/owned/pool','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${`pool-${projectID.slice(0, 8)}`},'Pool proof','https://forge.test/owned/pool','main','.factory/actor-template.json',${userID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectID},${userID},'developer',true,${userID})`;
     const forge = createForgejoClient({
@@ -511,11 +570,12 @@ test("setup inference does not retain the application's only pooled database con
       expect(input.repository).toEqual({ owner: "owned", name: "pool" });
       expect(input.baseCommit).toBe("a".repeat(40));
       expect(input.files).toEqual(configuration);
-      const [confirmation] = await database.client`SELECT inspection_id,created_by
-        FROM factory.project_setup_confirmation WHERE inspection_id=${revisionID}`;
+      const [confirmation] =
+        await database.client`SELECT payload->>'inspectionId' AS inspection_id,actor_id AS created_by
+        FROM factory.audit_event WHERE kind='projects.setup_confirmation' AND dedupe_key=${`projects.setup_confirmation:${revisionID}`}`;
       expect(confirmation?.["created_by"]).toBe(userID);
-      const [admitted] = await database.client`SELECT state,output
-        FROM factory.project_setup_inspection WHERE id=${revisionID}`;
+      const [admitted] = await database.client`SELECT state, payload->'output' AS output
+        FROM factory.operation WHERE id=${revisionID} AND kind='project.setup_inspection'`;
       expect(admitted?.["state"]).toBe("confirming");
       expect(admitted?.["output"]).toMatchObject({ files: configuration });
       if (++applies === 1) throw new ForgeAmbiguousWriteError("Owned unconfirmed setup write");
@@ -566,7 +626,7 @@ test("setup inference does not retain the application's only pooled database con
       expect(merges).toBe(1);
       expect(
         (
-          await database.client`SELECT inspection_id FROM factory.project_setup_confirmation WHERE inspection_id=${revisionID}`
+          await database.client`SELECT id FROM factory.audit_event WHERE kind='projects.setup_confirmation' AND dedupe_key=${`projects.setup_confirmation:${revisionID}`}`
         ).length,
       ).toBe(1);
       expect(generations).toBe(3);
@@ -640,16 +700,16 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
         { path: "server.js", content: 'console.log("owned application");\n' },
       ],
     });
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${repository.name},'Owned application',${`${forgeHost.origin}/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,actor_template_path,created_by)
+      VALUES(${projectID},${repository.name},'Owned application',${`${forgeHost.origin}/${repository.owner}/${repository.name}`},'main','.factory/actor-template.json',${manager})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${manager},'developer',true,${manager}),(${projectID},${contributor},'product-contributor',false,${manager})`;
-    await database.client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
-      VALUES(${crypto.randomUUID()},${setupID},${manager},${projectID},'Owned import',${repository.name},'import','https://github.com/owned/import',${"a".repeat(64)},'committed')`;
+    await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+      VALUES(${crypto.randomUUID()},'projects.repository_intent','project',${projectID},${`projects.repository_intent:${projectID}`},'committed',${JSON.stringify({ setupId: setupID, name: "Owned import", slug: repository.name, kind: "import", sourceUrl: "https://github.com/owned/import", credentialKey: null, fingerprint: "a".repeat(64) })}::jsonb,${manager},now())`;
     await expect(requireSetupReady(database.client, projectID)).rejects.toThrow("Confirm");
     const files = [
       {
-        path: ".devcontainer/devcontainer.json",
-        content: '{"image":"node:24-bookworm","workspaceFolder":"/workspace/project",}',
+        path: nativeProjectTemplate.path,
+        content: nativeProjectTemplate.content,
       },
       {
         path: ".factory/system.json",
@@ -686,8 +746,8 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
       connection: async () => ({ apiKey: "not-a-production-key" }),
       ready: async () => {
         ready++;
-        await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-          VALUES(${projectID},'configuration','ready',${crypto.randomUUID()}) ON CONFLICT(project_id,task) DO NOTHING`;
+        await database.client`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,state,payload,created_by,completed_at)
+          VALUES(${crypto.randomUUID()},'projects.setup_readiness','project',${projectID},${`projects.setup_readiness:${projectID}:configuration`},'ready',${JSON.stringify({ task: "configuration", commandId: crypto.randomUUID() })}::jsonb,${manager},now()) ON CONFLICT(idempotency_key) DO NOTHING`;
       },
       generate: async (input) => {
         generations++;
@@ -784,6 +844,7 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
       answers: { start: "npm run dev" },
     });
     await controller.settle();
+    expect((await controller.view(projectID, manager))?.state).toBe("proposal");
     await forge.ensureDefaultBranchProtection(repository, "main", false);
     // Account reconciliation may already have protected the still-missing
     // workflow before the manager confirms an imported Project's setup.

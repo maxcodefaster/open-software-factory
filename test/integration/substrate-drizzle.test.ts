@@ -1,11 +1,8 @@
 import { expect, test } from "bun:test";
+import type { DatabaseTransaction } from "#db/client";
+import { runtimeConnectorTokens } from "#runtime-domain/identity";
+import { type NativeActor, SubstrateRPCError } from "#runtime-kubernetes/substrate-control";
 import { agentConfiguration } from "../../apps/factory/src/runtime/agent-configuration";
-import type { DatabaseTransaction } from "../../packages/db/src/client";
-import { runtimeConnectorTokens } from "../../packages/runtime-domain/src/identity";
-import {
-  type NativeActor,
-  SubstrateRPCError,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
 import { startSubstrateFixtureWorkspace, substrateFixture } from "../fixtures/substrate";
 
 test("runtime model projection keeps the first admission's version and reasoning, never personal settings", async () => {
@@ -23,8 +20,8 @@ test("runtime model projection keeps the first admission's version and reasoning
     );
   try {
     await f.database
-      .client`INSERT INTO factory.personal_model_settings(project_id,user_id,version,build_model_id)
-      VALUES(${f.projectID},${f.userID},1,'private-model-not-for-background')`;
+      .client`INSERT INTO factory.model_settings(scope_type,scope_key,project_id,user_id,version,settings)
+      VALUES('personal',${`${f.projectID}:${f.userID}`},${f.projectID},${f.userID},1,${JSON.stringify({ planningModelId: null, buildModelId: "private-model-not-for-background" })}::jsonb)`;
     const fallback = await configuration();
     expect(fallback.modelID).not.toBe("private-model-not-for-background");
     expect(fallback.provider).toBe("openai");
@@ -34,14 +31,13 @@ test("runtime model projection keeps the first admission's version and reasoning
         const commandID = crypto.randomUUID();
         const provider = version === 2 ? "anthropic" : "deepseek";
         const secretKey = `owned-model-${connectionID}-${version}`;
-        await sql`INSERT INTO factory.model_connection_write(command_id,connection_id,base_version,
-          provider,endpoint,fingerprint,secret_key,created_by)
-          VALUES(${commandID},${connectionID},${version - 1},${provider},'https://example.invalid/v1',
-            ${"b".repeat(64)},${secretKey},${f.userID})`;
+        await sql`INSERT INTO factory.operation(id,kind,scope_type,scope_id,idempotency_key,active_key,state,payload,created_by)
+          VALUES(${commandID},'models.connection_write','connection',${connectionID},${`models.connection_write:${secretKey}`},${`models.connection_write:${connectionID}`},'write-intended',
+            ${JSON.stringify({ connectionID, baseVersion: version - 1, provider, endpoint: "https://example.invalid/v1", fingerprint: "b".repeat(64), secretKey })}::jsonb,${f.userID})`;
         await sql`INSERT INTO factory.model_connection_version(connection_id,version,provider,endpoint,secret_key,created_by)
           VALUES(${connectionID},${version},${provider},'https://example.invalid/v1',${secretKey},${f.userID})`;
-        await sql`UPDATE factory.model_connection_write SET state='committed',committed_at=now()
-          WHERE command_id=${commandID}`;
+        await sql`UPDATE factory.operation SET state='committed',active_key=NULL,completed_at=now(),updated_at=now()
+          WHERE id=${commandID} AND kind='models.connection_write'`;
       }
       const [approval] = await sql<{ revisionID: string }[]>`
         SELECT requirement_revision_id AS "revisionID" FROM factory.requirement_approval
@@ -97,11 +93,13 @@ test("native Drizzle admission commits typed JSON and database-clock intent befo
       creates++;
       const [saved] = await f.database.client`
         SELECT a.workspace_id,a.change_id,a.generation,a.revision,a.declared_apps,
-          a.create_intended_at::text,b.create_attempted_at::text,b.actor_uid,b.create_rejected,
-          b.intent,e.environment,e.version,e.secret_key
+          a.create_intended_at::text,a.create_attempted_at::text,a.actor_uid,a.create_rejected,
+          a.binding_intent AS intent,e.payload->>'environment' AS environment,e.payload->>'version' AS version,
+          e.payload->>'secretKey' AS secret_key
         FROM factory.runtime_attempt a
-        JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-        JOIN factory.runtime_environment_intent e ON e.runtime_attempt_id=a.id
+        JOIN factory.operation e ON e.kind='runtime.environment_intent'
+          AND e.scope_type='runtime_attempt' AND e.scope_id=a.id::text
+          AND e.idempotency_key='runtime.environment_intent:' || a.id::text
         WHERE a.id=${f.attemptID}`;
       expect(saved).toMatchObject({
         workspace_id: f.workspaceID,
@@ -139,8 +137,8 @@ test("native Drizzle admission commits typed JSON and database-clock intent befo
   try {
     expect(await execution.start(f.userID)).toBe(f.attemptID);
     const [saved] = await f.database.client`
-      SELECT actor_uid,observation,checkpoint FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      SELECT actor_uid,observation,checkpoint FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     expect(saved).toMatchObject({
       actor_uid: actor?.metadata.uid,
       observation: actor,
@@ -177,9 +175,11 @@ test("native Drizzle admission rolls back with its existing Postgres.js transact
       begin(async (transaction) => {
         const result = await action(transaction);
         const [intent] = await transaction`
-          SELECT b.runtime_attempt_id FROM factory.substrate_binding b
-          JOIN factory.runtime_environment_intent e ON e.runtime_attempt_id=b.runtime_attempt_id
-          WHERE b.runtime_attempt_id=${f.attemptID}`;
+          SELECT a.id FROM factory.runtime_attempt a
+          JOIN factory.operation e ON e.kind='runtime.environment_intent'
+            AND e.scope_type='runtime_attempt' AND e.scope_id=a.id::text
+            AND e.idempotency_key='runtime.environment_intent:' || a.id::text
+          WHERE a.id=${f.attemptID} AND a.atespace IS NOT NULL`;
         if (intent) throw Error("Owned admission transaction interrupted");
         return result;
       })) as typeof connection.begin;
@@ -194,10 +194,8 @@ test("native Drizzle admission rolls back with its existing Postgres.js transact
     await expect(execution.start(f.userID)).rejects.toThrow("admission transaction interrupted");
     expect(await f.database.client`SELECT id FROM factory.runtime_attempt`).toHaveLength(0);
     expect(
-      await f.database.client`SELECT runtime_attempt_id FROM factory.substrate_binding`,
-    ).toHaveLength(0);
-    expect(
-      await f.database.client`SELECT runtime_attempt_id FROM factory.runtime_environment_intent`,
+      await f.database.client`SELECT scope_id FROM factory.operation
+        WHERE kind='runtime.environment_intent'`,
     ).toHaveLength(0);
     expect(calls).toBe(0);
   } finally {
@@ -217,8 +215,8 @@ test("native Drizzle observation treats an empty guarded RETURNING as a lost UID
       const actor = await f.createdActor();
       // This separate connection changes the UID after the adapter's binding
       // read. Its guarded typed UPDATE must return no row, never trust the reply.
-      await f.database.client`UPDATE factory.substrate_binding SET actor_uid=${competingUID}
-        WHERE runtime_attempt_id=${f.attemptID}`;
+      await f.database.client`UPDATE factory.runtime_attempt SET actor_uid=${competingUID}
+        WHERE id=${f.attemptID}`;
       return actor;
     }
     if (method === "ResumeActor") resumes++;
@@ -227,8 +225,8 @@ test("native Drizzle observation treats an empty guarded RETURNING as a lost UID
   try {
     await expect(execution.start(f.userID)).rejects.toThrow("Actor UID binding changed");
     const [saved] = await f.database.client`
-      SELECT actor_uid,observation,checkpoint FROM factory.substrate_binding
-      WHERE runtime_attempt_id=${f.attemptID}`;
+      SELECT actor_uid,observation,checkpoint FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     expect(saved).toEqual({ actor_uid: competingUID, observation: null, checkpoint: null });
     expect(resumes).toBe(0);
   } finally {
@@ -308,8 +306,7 @@ test("native Drizzle pause CASE keeps initial failure, clears ready failure, and
       WHERE id=${f.attemptID}`;
     await execution.suspend();
     const [initial] = await f.database.client`
-      SELECT a.state,a.failure,b.checkpoint FROM factory.runtime_attempt a
-      JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id WHERE a.id=${f.attemptID}`;
+      SELECT state,failure,checkpoint FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(initial).toMatchObject({
       state: "paused",
       failure: "initial failure",
@@ -328,12 +325,11 @@ test("native Drizzle pause CASE keeps initial failure, clears ready failure, and
     await execution.stop();
     await execution.stop();
     const [stopped] = await f.database.client`
-      SELECT a.state,a.failure,a.stop_intended_at::text,a.stopped_at::text,b.deleted_at::text
-      FROM factory.runtime_attempt a JOIN factory.substrate_binding b ON b.runtime_attempt_id=a.id
-      WHERE a.id=${f.attemptID}`;
+      SELECT state,failure,stop_intended_at::text,deleted_at::text
+      FROM factory.runtime_attempt
+      WHERE id=${f.attemptID}`;
     expect(stopped).toMatchObject({ state: "stopped", failure: "retained diagnosis" });
     expect(Number.isFinite(Date.parse(stopped?.["stop_intended_at"]))).toBe(true);
-    expect(Number.isFinite(Date.parse(stopped?.["stopped_at"]))).toBe(true);
     expect(Number.isFinite(Date.parse(stopped?.["deleted_at"]))).toBe(true);
     expect(deletes).toBe(1);
   } finally {
@@ -351,21 +347,29 @@ test("native Drizzle wait deletion preserves non-capacity reasons and stopped or
       "finish-reserve-used",
       "compute-capacity",
     ]) {
-      await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-        VALUES(${f.attemptID},${reason}) ON CONFLICT(attempt_id) DO UPDATE SET reason=EXCLUDED.reason`;
+      await f.database.client`INSERT INTO factory.operation(
+        id,kind,scope_type,scope_id,idempotency_key,state,payload)
+        VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${f.attemptID},
+          ${`runtime.compute_wait:${f.attemptID}`},'waiting',jsonb_build_object('reason',${reason}::text))
+        ON CONFLICT(idempotency_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()`;
       await runtime.get(f.attemptID);
       const rows = await f.database.client`
-        SELECT reason FROM factory.runtime_compute_wait WHERE attempt_id=${f.attemptID}`;
+        SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait' AND scope_type='runtime_attempt'
+          AND scope_id=${f.attemptID}`;
       expect([...rows]).toEqual(reason === "compute-capacity" ? [] : [{ reason }]);
     }
-    await f.database.client`INSERT INTO factory.runtime_compute_wait(attempt_id,reason)
-      VALUES(${f.attemptID},'compute-capacity')`;
+    await f.database.client`INSERT INTO factory.operation(
+      id,kind,scope_type,scope_id,idempotency_key,state,payload)
+      VALUES(${crypto.randomUUID()},'runtime.compute_wait','runtime_attempt',${f.attemptID},
+        ${`runtime.compute_wait:${f.attemptID}`},'waiting',jsonb_build_object('reason','compute-capacity'))`;
     await f.database
       .client`UPDATE factory.runtime_attempt SET state='paused' WHERE id=${f.attemptID}`;
     await runtime.get(f.attemptID);
-    expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
-      1,
-    );
+    expect(
+      await f.database.client`SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait'`,
+    ).toHaveLength(1);
     await expect(
       f.database.client`UPDATE factory.runtime_attempt SET state='starting',stop_intended_at=now()
         WHERE id=${f.attemptID}`.execute(),
@@ -374,9 +378,10 @@ test("native Drizzle wait deletion preserves non-capacity reasons and stopped or
       .client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now()
       WHERE id=${f.attemptID}`;
     await runtime.get(f.attemptID);
-    expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
-      1,
-    );
+    expect(
+      await f.database.client`SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait'`,
+    ).toHaveLength(1);
     const [finalStop] = await f.database.client`
       SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
     expect(finalStop?.["state"]).toBe("stopping");
@@ -399,14 +404,15 @@ test("native Drizzle wait deletion preserves non-capacity reasons and stopped or
           SELECT state,stop_intended_at::text FROM factory.runtime_attempt WHERE id=${f.attemptID}`
       )[0],
     ).toEqual(finalStop);
-    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
+    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped'
       WHERE id=${f.attemptID}`;
     await runtime.get(f.attemptID);
-    expect(await f.database.client`SELECT reason FROM factory.runtime_compute_wait`).toHaveLength(
-      1,
-    );
+    expect(
+      await f.database.client`SELECT payload->>'reason' AS reason FROM factory.operation
+        WHERE kind='runtime.compute_wait'`,
+    ).toHaveLength(1);
     await expect(
-      f.database.client`UPDATE factory.runtime_attempt SET stopped_at=NULL
+      f.database.client`UPDATE factory.runtime_attempt SET state='ready'
         WHERE id=${f.attemptID}`.execute(),
     ).rejects.toThrow("Final Stop intent cannot be cleared or reopen execution");
   } finally {

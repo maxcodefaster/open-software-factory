@@ -4,20 +4,20 @@ import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, type Page, expect as visible } from "@playwright/test";
 import { z } from "zod";
-import {
-  type requireSubstrateActor,
-  substrateTemplateSHA256,
-} from "../../apps/factory/src/runtime/substrate";
-import { boundNativeProvisioningResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
-import { createDatabase } from "../../packages/db/src/client";
-import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
-import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { createDatabase } from "#db/client";
+import { runtimeIdentity } from "#runtime-domain/identity";
+import { runCommand } from "#runtime-kubernetes/command";
 import {
   createSubstrateControl,
   type SubstrateConnection,
   SubstrateRPCError,
   substrateConnection,
-} from "../../packages/runtime-kubernetes/src/substrate-control";
+} from "#runtime-kubernetes/substrate-control";
+import {
+  type requireSubstrateActor,
+  substrateTemplateSHA256,
+} from "../../apps/factory/src/runtime/substrate";
+import { boundNativeProvisioningResource } from "../../apps/factory/src/runtime/substrate-bound-provisioning";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import {
   requireNativeForgeOrigin,
@@ -170,11 +170,10 @@ export async function readReleaseNativeBinding(
   >`
     SELECT attempt.id,attempt.project_id AS "projectID",attempt.workspace_id AS "workspaceID",
       attempt.generation::float8 AS generation,attempt.state,attempt.stop_intended_at::text AS "stopIntendedAt",
-      binding.atespace,binding.actor_name AS "actorName",binding.actor_uid AS "actorUID",
-      binding.create_attempted_at::text AS "attemptedAt",binding.intent,
-      binding.deleted_at::text AS "deletedAt",binding.create_rejected AS rejected
+      attempt.atespace,attempt.actor_name AS "actorName",attempt.actor_uid AS "actorUID",
+      attempt.create_attempted_at::text AS "attemptedAt",attempt.binding_intent AS intent,
+      attempt.deleted_at::text AS "deletedAt",attempt.create_rejected AS rejected
     FROM factory.runtime_attempt attempt
-    LEFT JOIN factory.substrate_binding binding ON binding.runtime_attempt_id=attempt.id
     WHERE attempt.id=${z.uuid().parse(attemptID)} AND attempt.project_id=${z.uuid().parse(projectID)}`;
   if (!row?.intent || !row.actorUID || !row.attemptedAt || row.rejected)
     throw new Error("Release attempt has no confirmed original native binding");
@@ -183,10 +182,9 @@ export async function readReleaseNativeBinding(
       ? row.intent.workspaceID
       : "isolatedID" in row.intent
         ? row.intent.isolatedID
-        : "verificationID" in row.intent
-          ? row.intent.verificationID
-          : row.intent.preparationID;
+        : row.intent.verificationID;
   if (
+    !ownerID ||
     row.intent.projectID !== projectID ||
     row.intent.generation !== row.generation ||
     (row.workspaceID !== null && row.workspaceID !== ownerID) ||

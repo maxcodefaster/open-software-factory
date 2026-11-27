@@ -45,7 +45,6 @@ test("native Build loads required guidance and Factory system policy before infe
     undefined,
     undefined,
     undefined,
-    undefined,
     nativeSkillManifest(revisions),
   );
   const sessionID = `ses_owned_${crypto.randomUUID().replaceAll("-", "")}`;

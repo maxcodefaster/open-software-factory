@@ -98,34 +98,33 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       </Show>
       <Show when={!props.company}>
         <section>
-          <h3>Browser sessions</h3>
+          <h3>Sessions</h3>
           <p class="model-settings-note">
-            Signing out never stops an Agent. Local Git credentials and other devices stay signed
-            in.
+            Signing out never stops an Agent or background work. Ending all browser sessions
+            requires a recent sign-in.
           </p>
-          <button
-            type="button"
-            class="quiet-button"
-            disabled={busy()}
-            onClick={() => void signOut()}
-          >
-            Sign out here
-          </button>
-        </section>
-        <section>
-          <h3>All your devices</h3>
-          <p class="model-settings-note">
-            End all Factory browser sessions. Background work continues. Recent sign-in is required.
-          </p>
-          <Show
-            when={confirm()}
-            fallback={
-              <button type="button" class="quiet-button" onClick={() => setConfirm(true)}>
-                End all browser sessions
-              </button>
-            }
-          >
-            <div class="access-confirm">
+          <div class="access-confirm">
+            <button
+              type="button"
+              class="quiet-button"
+              disabled={busy()}
+              onClick={() => void signOut()}
+            >
+              Sign out here
+            </button>
+            <Show
+              when={confirm()}
+              fallback={
+                <button
+                  type="button"
+                  class="quiet-button"
+                  disabled={busy()}
+                  onClick={() => setConfirm(true)}
+                >
+                  End all browser sessions
+                </button>
+              }
+            >
               <button
                 type="button"
                 class="quiet-button"
@@ -142,8 +141,8 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
               >
                 Confirm sign out everywhere
               </button>
-            </div>
-          </Show>
+            </Show>
+          </div>
         </section>
         <Show when={loadError()}>
           <div class="model-settings-error">

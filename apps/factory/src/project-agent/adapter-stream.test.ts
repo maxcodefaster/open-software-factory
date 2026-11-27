@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
+import type { ProjectAgentOutput } from "#conversation-domain/conversation";
 import { generateProjectResponse } from "./adapter";
 
 const requirement = {
@@ -115,6 +115,84 @@ test("native stream coalesces a token burst without delaying first text or losin
   } finally {
     release.resolve();
     await pending.catch(() => {});
+    await provider.stop(true);
+  }
+});
+
+test("native stream throttles research.authorize during token flushes", async () => {
+  let authorizeCalls = 0;
+  const parts: string[] = [];
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          async start(controller) {
+            const send = (content: string, finished = false) =>
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    id: "owned-auth",
+                    object: "chat.completion.chunk",
+                    created: 1,
+                    model: "owned-stream",
+                    choices: [
+                      {
+                        index: 0,
+                        delta: finished ? {} : { role: "assistant", content },
+                        finish_reason: finished ? "stop" : null,
+                      },
+                    ],
+                  })}\n\n`,
+                ),
+              );
+            send('{"output":{"kind":"answer","message":"Chunk0');
+            for (let index = 1; index <= 4; index++) {
+              await Bun.sleep(50);
+              send(` Chunk${index}`);
+            }
+            send('","citations":[]}}');
+            send("", true);
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  try {
+    const result = await generateProjectResponse({
+      mode: "investigate",
+      modelId: "owned-stream",
+      connection: { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned" },
+      prompt: "Stream chunks",
+      history: [],
+      signal: AbortSignal.timeout(4000),
+      research: {
+        authorize: async () => {
+          authorizeCalls++;
+        },
+        search: async () => [],
+        read: async () => {
+          throw new Error("Unused");
+        },
+      },
+      answerText: async (text) => {
+        parts.push(text);
+      },
+    });
+    expect(result).toMatchObject({
+      kind: "answer",
+      message: "Chunk0 Chunk1 Chunk2 Chunk3 Chunk4",
+    });
+    expect(parts.length).toBeGreaterThanOrEqual(4);
+    // 1 authorize before the LLM request + 1 immediate authorize before first stream flush = 2 total,
+    // not once per 40ms flush.
+    expect(authorizeCalls).toBe(2);
+  } finally {
     await provider.stop(true);
   }
 });
